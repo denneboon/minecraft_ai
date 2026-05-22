@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(python -c \"import tools.replay_demo as r; print\\('ok'\\)\")",
+      "PowerShell($env:PYTHONIOENCODING = \"utf-8\"; python scripts/collect_demo.py --duration 15 --fps 20 --downscale 0.5 --output data/raw/demo_v2_smoketest 2>&1 | Out-String)",
+      "PowerShell($env:PYTHONIOENCODING = \"utf-8\"; Write-Output \"=== first 3 events ===\"; Get-Content data/raw/demo_v2_smoketest/events.jsonl -TotalCount 3; Write-Output \"\"; Write-Output \"=== inter-frame timestamps ===\"; Get-Content data/raw/demo_v2_smoketest/events.jsonl | ForEach-Object { $j = $_ | ConvertFrom-Json; \"  frame $\\($j.frame\\)  ts=$\\($j.ts\\)\" } | Select-Object -First 8)",
+      "PowerShell($env:PYTHONIOENCODING = \"utf-8\"; Write-Output \"=== sample events with F3 data ===\"; Get-Content data/raw/demo_v2_smoketest/events.jsonl | Select-String -Pattern '\"yaw\": -?\\\\d' | Select-Object -First 3 | ForEach-Object { $_.Line }; Write-Output \"\"; Write-Output \"=== F3-data summary ===\"; $events = Get-Content data/raw/demo_v2_smoketest/events.jsonl | ForEach-Object { $_ | ConvertFrom-Json }; $withYaw = \\($events | Where-Object { $_.yaw -ne $null }\\).Count; $total = $events.Count; Write-Output \"events with yaw populated: $withYaw / $total\"; Write-Output \"\"; Write-Output \"=== unique keys held ===\"; \\($events | ForEach-Object { $_.keys } | Sort-Object -Unique\\) -join \", \")",
+      "PowerShell($env:PYTHONIOENCODING = \"utf-8\"; python tools/replay_demo.py data/raw/demo_v2_smoketest --speed 1.0 2>&1 | Out-String)"
+    ]
+  }
+}

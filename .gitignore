@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Environment / secrets
+.env
+.env.local
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Claude local settings (keep shared settings.json)
+.claude/settings.local.json
+
+# Data: keep directory structure (.gitkeep) but ignore contents
+data/mc_assets/
+data/raw/*
+!data/raw/.gitkeep
+data/replays/*
+!data/replays/.gitkeep
+data/training/*
+!data/training/.gitkeep
+data/logs/*
+!data/logs/.gitkeep
+data/calibration/*.png
+data/calibration/*.npz
+
+# Model weights / large binaries
+models/*.pt
+models/*.pth
+models/*.onnx
+models/*.safetensors
+models/*.bin
+models/*.ckpt
+
+# Experiment outputs
+experiments/**/checkpoints/
+experiments/**/runs/
+experiments/**/wandb/

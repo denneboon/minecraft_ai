@@ -1,0 +1,89 @@
+{
+  "metadata": {
+    "version": "1.0.0",
+    "description": "Universal key/action mapping for Minecraft AI — supports hotkeys, movement, mouse, UI, and system actions."
+  },
+
+  "movement": {
+    "forward": "w",
+    "left": "a",
+    "backward": "s",
+    "right": "d",
+    "jump": "space",
+    "sneak": "shift",
+    "sprint": "control"
+  },
+
+  "combat": {
+    "attack": "mouse_left",
+    "use": "mouse_right",
+    "drop": "q",
+    "swap_offhand": "f"
+  },
+
+  "inventory": {
+    "open_inventory": "e",
+    "crafting_book": "k",
+    "drop_stack": "ctrl+q",
+    "sort_inventory": null,
+    "close_screen": "escape"
+  },
+
+  "interaction": {
+    "interact": "mouse_right",
+    "pick_block": "mouse_middle",
+    "open_chat": "t",
+    "open_command": "/",
+    "pause_menu": "escape"
+  },
+
+  "hotbar": {
+    "prefer_hotkeys": true,
+    "slots": [
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+      "6",
+      "7",
+      "8",
+      "9"
+    ],
+    "scroll_up": "scroll_up",
+    "scroll_down": "scroll_down"
+  },
+
+  "mouse": {
+    "left_click": "mouse_left",
+    "right_click": "mouse_right",
+    "middle_click": "mouse_middle",
+    "scroll_up": "scroll_up",
+    "scroll_down": "scroll_down",
+    "smooth_look": "mouse_move_relative"
+  },
+
+  "system": {
+    "emergency_stop": "<ctrl>+<shift>+x",
+    "toggle_debug_overlay": "f3",
+    "screenshot": "f2",
+    "reload_resource_packs": "f3+t",
+    "fullscreen_toggle": "f11"
+  },
+
+  "ui_navigation": {
+    "confirm": "enter",
+    "cancel": "escape",
+    "move_up": "up",
+    "move_down": "down",
+    "move_left": "left",
+    "move_right": "right",
+    "tab_complete": "tab"
+  },
+
+  "modifiers": {
+    "ctrl": "control",
+    "shift": "shift",
+    "alt": "alt"
+  }
+}

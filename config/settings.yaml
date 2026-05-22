@@ -1,0 +1,254 @@
+project:
+  name: minecraft_ai
+  version: 0.1.0
+  author: Dennis Zhang
+  description: Human-like Minecraft AI using pixel-only vision and simulated inputs.
+  created: '2026-02-25'
+capture:
+  backend: mss
+  window_title_query: Minecraft
+  fps_limit: 60
+  downscale: 1.0
+  ui_scale: 2
+  fov: 90
+  track_window_each_frame: true
+  strict_window_find: true
+  use_client_area: true
+  clamp_to_monitor: true
+  show_frame_stats: false
+  benchmark_on_start: false
+vision:
+  auto_exposure_normalization: false
+  color_correction: false
+  crop_hud: false
+  hud_regions:
+    health_bar:
+    - 778
+    - 1050
+    - 162
+    - 18
+    hunger_bar:
+    - 980
+    - 1050
+    - 162
+    - 18
+    hotbar_region:
+    - 778
+    - 1084
+    - 364
+    - 44
+    xp_bar:
+    - 778
+    - 1070
+    - 364
+    - 10
+    armor_bar:
+    - 778
+    - 1030
+    - 162
+    - 18
+    crosshair_center:
+    - 960
+    - 564
+  ocr:
+    enabled: false
+    language: eng
+    psm: 6
+    whitelist: 0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ:-_.,!/#
+  hud_extended:
+    hotbar_slot_rects:
+    - - 780
+      - 1086
+      - 40
+      - 40
+    - - 820
+      - 1086
+      - 40
+      - 40
+    - - 860
+      - 1086
+      - 40
+      - 40
+    - - 900
+      - 1086
+      - 40
+      - 40
+    - - 940
+      - 1086
+      - 40
+      - 40
+    - - 980
+      - 1086
+      - 40
+      - 40
+    - - 1020
+      - 1086
+      - 40
+      - 40
+    - - 1060
+      - 1086
+      - 40
+      - 40
+    - - 1100
+      - 1086
+      - 40
+      - 40
+    hotbar_slot_centers:
+    - - 800
+      - 1106
+    - - 840
+      - 1106
+    - - 880
+      - 1106
+    - - 920
+      - 1106
+    - - 960
+      - 1106
+    - - 1000
+      - 1106
+    - - 1040
+      - 1106
+    - - 1080
+      - 1106
+    - - 1120
+      - 1106
+control:
+  keyboard:
+    allow_repeat_press: false
+    strict_state: true
+    tap_default: 0.06
+    max_actions_per_sec: 120
+    debounce_ms: 10
+    sprint_mode: hold
+    sneak_mode: hold
+    autorun_enabled: false
+  mouse:
+    move_duration_ms: 40
+    flick_multiplier: 0.35
+    curve_steps: 10
+    default_click_duration: 0.05
+    max_events_per_sec: 240
+    enable_scroll: true
+safety:
+  check_focus_interval: 0.075
+  auto_stop_on_focus_loss: true
+  allow_run_without_focus: false
+  assume_focused_when_unknown: false
+  focus_loss_debounce_ms: 250
+  startup_focus_grace_ms: 800
+  debug_focus_trace: false
+  log_actions: true
+  log_focus_events: true
+  print_status_table: true
+  emergency_hotkey:
+  - <ctrl>
+  - <shift>
+  - <f12>
+logging:
+  level: info
+  save_to_file: true
+  file_path: logs/runtime.log
+  rotate_logs: true
+  overlays:
+    draw_crosshair: false
+    draw_block_outlines: false
+    draw_mob_detection: false
+    draw_hotbar_state: false
+agent:
+  # Name of the agent to run via `python main.py` (without --agent).
+  # Use 'none' (or omit the agent in CLI) to run the hardware smoke test.
+  # Registered agents: navigation
+  default_agent: navigation
+
+  # Hard wall-clock stop for the agent loop. Override per-run with --duration.
+  max_runtime_sec: 30
+
+  tick_rate: 20
+  action_rate: 60
+  allow_hotbar_scroll: false
+  prefer_hotkeys_for_hotbar: true
+  humanlike_reaction_time_ms: 60
+  jitter_ms: 20
+  planning:
+    enabled: false
+    planner_type: hierarchical
+    max_depth: 12
+  world_model:
+    enabled: false
+    imagination_rollouts: 0
+    use_latent_model: false
+
+  # NavigationAgent settings. target_x / target_z = null → walk 25 blocks
+  # forward from wherever the player happens to be facing at loop start.
+  navigation:
+    target_x: null
+    target_z: null
+    stop_distance: 2.5
+    yaw_tolerance_deg: 6.0
+    mouse_per_degree: 6.5
+    mouse_gain: 0.45
+    max_mouse_dx: 140
+    walk_when_aligned_within: 35.0
+    sprint: false
+    auto_target_forward_blocks: 25.0
+    # Eating is disabled for now — set eat_below_hunger > 0 to re-enable.
+    # When enabled, eating currently blocks all other actions until done,
+    # which is too coarse. A future "hunger background task" should
+    # interrupt navigation only for the brief moment of right-clicking.
+    eat_below_hunger: 0.0
+    food_slot: 9
+    eat_hold_ticks: 30
+training:
+  enable_training_mode: false
+  data_path: data/
+  batch_size: 32
+  image_size:
+  - 1920
+  - 1080
+  il:
+    enabled: false
+    dataset_path: data/training/
+    model_out: models/il_policy.pt
+  rl:
+    enabled: false
+    reward_shaping: true
+    max_steps: 20000
+debug:
+  god_mode: false
+  force_focus_true: false
+  print_every_action: false
+  show_mouse_vectors: false
+  show_keyboard_events: false
+  capture_profile: false
+developer:
+  enable_hot_reload: false
+  print_import_graph: false
+  disable_capture: false
+  disable_mouse: false
+  disable_keyboard: false
+  auto_focus_window: true
+  window_title_query: Minecraft
+  ensure_unpaused: true
+  unpause_max_attempts: 3
+  unpause_delay_ms: 120
+  fake_capture_frames: false
+  fake_window_focus: false
+calibration:
+  require_focus: true
+  try_auto_focus: true
+  try_unpause: true
+  fps_during_calibration: 30
+extensions:
+  openai_tools: false
+  internet_lookup: false
+  tutorial_learning: false
+  farm_builder: false
+  chunk_scanner: false
+vision_calibration:
+  last:
+    resolution:
+    - 1920
+    - 1128
+    ui_scale: 2
+    timestamp: 1779442093
+    source: vision.calibration_formula
