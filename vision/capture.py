@@ -179,6 +179,19 @@ class Capture:
             rgb = _downscale(rgb, self.cfg.downscale)
         return rgb
     
+    def window_origin(self) -> Tuple[int, int]:
+        """
+        Return the (x, y) desktop coordinates of the top-left corner of
+        the captured area. Useful for converting frame-pixel coordinates
+        (used by HUD readers, slot rects, etc.) into desktop-pixel
+        coordinates (used by absolute cursor moves).
+
+        Triggers a fresh rect lookup if the cache is empty.
+        """
+        with self._lock:
+            rect = self._ensure_rect()
+        return int(rect[0]), int(rect[1])
+
     def _ensure_rect(self):
         if self.cfg.hwnd:
             rect = _windows_get_client_rect(self.cfg.hwnd)

@@ -40,6 +40,9 @@ data/logs/*
 !data/logs/.gitkeep
 data/calibration/*.png
 data/calibration/*.npz
+data/calibration/*.json
+data/calibration/block_icons/
+data/calibration/slot_crops/
 
 # Model weights / large binaries
 models/*.pt
