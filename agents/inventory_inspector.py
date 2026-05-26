@@ -160,8 +160,16 @@ class InventoryInspector:
         desktop_y = window_origin[1] + cy
         set_cursor_xy(desktop_x, desktop_y)
 
+        # First attempt: wait the configured settle time. Subsequent
+        # attempts add a small linear backoff (capped) — the tooltip
+        # sometimes needs a frame or two more than expected, but
+        # multiplying the full settle each time is wasteful and pushes
+        # large-inventory inspections into multi-second territory.
+        base_s = self.cfg.hover_settle_ms / 1000.0
+        retry_bonus_s = max(0.05, base_s / 4.0)
         for attempt in range(1, self.cfg.max_retries + 2):
-            time.sleep(self.cfg.hover_settle_ms / 1000.0 * attempt)
+            wait_s = base_s + retry_bonus_s * (attempt - 1)
+            time.sleep(wait_s)
             try:
                 frame = self._capture.get_frame()
             except Exception:

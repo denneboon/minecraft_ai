@@ -147,7 +147,7 @@ class _PynputBackend(_IKeyboardBackend):
             "page_up": Key.page_up,
             "page_down": Key.page_down,
             "insert": Key.insert,
-            "print_screen": getattr(Key, "print_screen", None) or getattr(Key, "print_screen", None),
+            "print_screen": getattr(Key, "print_screen", None),
             "menu": getattr(Key, "menu", None),
         }
         # Function keys
@@ -286,10 +286,13 @@ class Keyboard:
                 self._vlog(f"PRESS  {key!r:>18}  SENT")
 
     def release(self, key_or_action: str) -> None:
-        if self._gate and not self._gate.allow():
-            if self.cfg.verbose:
-                self._vlog(f"REL    {key_or_action!r:>18}  skip(gate-closed)")
-            return
+        # NOTE: releases must NEVER be gated. The gate prevents NEW input
+        # while we're not allowed to act (e.g. focus lost), but if we
+        # already pressed a key earlier, a release call has to actually
+        # release it — otherwise the key stays in ``_pressed`` and the
+        # next focus-regain ``resync_pressed_keys`` re-emits it even
+        # though the agent wanted it released. See the gate-close stuck-
+        # key bug for the full story.
         key = self._resolve(key_or_action)
         # FAST PATH — same idea: a release on a key that isn't held is a
         # no-op under strict_state, so skip before paying the sleep.
@@ -308,11 +311,14 @@ class Keyboard:
                 self._pressed.discard(key)
                 self._stamp("release", key)
                 if self.cfg.verbose:
+                    import os as _os
                     import traceback as _tb
                     # Capture caller — knowing WHO releases W is the
-                    # whole point of this debug mode.
+                    # whole point of this debug mode. ``os.path.basename``
+                    # so the same code reports usable filenames on
+                    # Linux/macOS too, not just Windows.
                     caller = "  ".join(
-                        f"{f.filename.split(chr(92))[-1]}:{f.lineno}"
+                        f"{_os.path.basename(f.filename)}:{f.lineno}"
                         for f in _tb.extract_stack(limit=8)[:-1]
                     )
                     self._vlog(f"REL    {key!r:>18}  SENT  via {caller}")
@@ -403,8 +409,7 @@ class Keyboard:
         self.press(action_or_key)
 
     def release_action(self, action_or_key: str) -> None:
-        if self._gate and not self._gate.allow():
-            return
+        # Like ``release``, never gated — see the comment there.
         self.release(action_or_key)
 
     def tap_action(self, action_or_key: str, duration: Optional[float] = None) -> None:

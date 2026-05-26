@@ -14,7 +14,11 @@ import threading
 
 try:
     import pygetwindow as gw
-except Exception:
+except ImportError:
+    # pygetwindow isn't installed (Linux/macOS users without it). All
+    # window-finding helpers below already gracefully no-op when gw is
+    # None, but we narrow the except so genuine import-time failures
+    # (e.g. a corrupted install raising RuntimeError) still surface.
     gw = None
 
 from vision.capture_backends import ICaptureBackend
@@ -44,7 +48,11 @@ def _windows_get_client_rect(hwnd) -> Optional[Tuple[int, int, int, int]]:
         left, top = pt.x, pt.y
         right, bottom = left + (rect.right - rect.left), top + (rect.bottom - rect.top)
         return (left, top, right, bottom)
-    except Exception:
+    except (OSError, AttributeError, ValueError):
+        # OSError covers Windows API failures (invalid HWND, wrong proc);
+        # AttributeError covers cases where user32 isn't loaded (non-Win
+        # platform); ValueError covers ctypes type-coercion failures.
+        # Anything else (KeyboardInterrupt, MemoryError) should propagate.
         return None
 
 
@@ -68,7 +76,11 @@ def _find_window_rect_client_or_window(query: str, prefer_client: bool = True) -
 
         left, top = win.left, win.top
         return (left, top, left + win.width, top + win.height)
-    except Exception:
+    except (IndexError, AttributeError, OSError):
+        # IndexError: no windows matched the title after all.
+        # AttributeError: pygetwindow Win object missing expected fields
+        # (varies across the lib's minor versions).
+        # OSError: the underlying GetWindowRect call failed.
         return None
 
 
@@ -136,7 +148,10 @@ class _MSSBackend(ICaptureBackend):
     def stop(self) -> None:
         try:
             self.sct.close()
-        except Exception:
+        except (OSError, AttributeError):
+            # Best-effort close — mss's MSS.close() can raise OSError
+            # when the display handle has already been released or
+            # AttributeError after a partially-failed __init__.
             pass
 
 class Capture:
