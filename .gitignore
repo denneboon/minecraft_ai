@@ -1,58 +1,129 @@
-# Python
+# ---------------------------------------------------------------------------
+# Python build artefacts
+# ---------------------------------------------------------------------------
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
 *.egg-info/
+*.egg
+build/
+dist/
+wheels/
+pip-wheel-metadata/
+
+# ---------------------------------------------------------------------------
+# Test / lint / coverage caches
+# ---------------------------------------------------------------------------
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.hypothesis/
 
+# ---------------------------------------------------------------------------
 # Virtual environments
+# ---------------------------------------------------------------------------
 venv/
 .venv/
 env/
+ENV/
 
+# ---------------------------------------------------------------------------
 # Environment / secrets
+# ---------------------------------------------------------------------------
 .env
 .env.local
+.env.*.local
 
-# IDE / OS
+# ---------------------------------------------------------------------------
+# IDE / OS clutter
+# ---------------------------------------------------------------------------
 .vscode/
 .idea/
+*.code-workspace
 *.swp
+*.swo
+*~
 .DS_Store
 Thumbs.db
+desktop.ini
+.ipynb_checkpoints/
+.python-version
 
-# Claude local settings (keep shared settings.json)
+# ---------------------------------------------------------------------------
+# Claude Code local-only settings (the shared settings.json IS tracked)
+# ---------------------------------------------------------------------------
 .claude/settings.local.json
 
-# Data: keep directory structure (.gitkeep) but ignore contents
+# ---------------------------------------------------------------------------
+# Logs
+# ---------------------------------------------------------------------------
+*.log
+logs/
+
+# ---------------------------------------------------------------------------
+# data/ — keep the directory skeleton (.gitkeep), ignore generated content.
+#
+# Layout (all directories created in code or extracted by tools):
+#   data/mc_assets/    — extracted Minecraft jar assets, ignored entirely
+#   data/raw/          — raw captured frames, ignored
+#   data/replays/      — recorded episodes, ignored
+#   data/training/     — labelled datasets, ignored
+#   data/logs/         — agent runtime logs, ignored
+#   data/calibration/  — calibration outputs and run snapshots, mostly ignored
+# ---------------------------------------------------------------------------
 data/mc_assets/
+
 data/raw/*
 !data/raw/.gitkeep
+
 data/replays/*
 !data/replays/.gitkeep
+
 data/training/*
 !data/training/.gitkeep
+
 data/logs/*
 !data/logs/.gitkeep
-data/calibration/*.png
-data/calibration/*.npz
-data/calibration/*.json
-data/calibration/block_icons/
-data/calibration/slot_crops/
 
-# Model weights / large binaries
+data/manifests/*
+!data/manifests/.gitkeep
+
+data/meta/*
+!data/meta/.gitkeep
+
+# calibration/ holds tons of run-time PNG/JSON/SCHEM/TXT artefacts.
+# We ignore EVERYTHING here by default; tracked-by-intent files can be
+# whitelisted below if needed.
+data/calibration/*
+!data/calibration/.gitkeep
+
+# Inventory-sample dataset (auto-collected from hovers) — same pattern.
+data/samples/*
+!data/samples/.gitkeep
+
+# ---------------------------------------------------------------------------
+# Model weights / large binaries — Git LFS or out-of-tree only
+# ---------------------------------------------------------------------------
 models/*.pt
 models/*.pth
 models/*.onnx
 models/*.safetensors
 models/*.bin
 models/*.ckpt
+models/*.npz
 
-# Experiment outputs
+# ---------------------------------------------------------------------------
+# Experiment outputs (checkpoints, tensorboard runs, wandb caches)
+# ---------------------------------------------------------------------------
 experiments/**/checkpoints/
 experiments/**/runs/
 experiments/**/wandb/
+experiments/**/outputs/
