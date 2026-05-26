@@ -59,6 +59,26 @@ class AgentAction:
     look_dx: int = 0
     look_dy: int = 0
 
+    # Continuous camera VELOCITY in screen-pixels per second. Used by
+    # humanlike-motion agents (e.g. WorldExplorer) that prefer one
+    # smooth turn over many per-tick nudges. When set, the runtime
+    # routes through ``Mouse.set_velocity`` — a background thread
+    # emits sub-pixel-rate micro-motions until the next velocity
+    # update or a zero-velocity command. ``look_vx == look_vy == 0``
+    # halts continuous motion. ``look_dx``/``look_dy`` still work in
+    # parallel (one-shot easing) — agents typically use one OR the
+    # other.
+    look_vx: float = 0.0
+    look_vy: float = 0.0
+
+    # When True, the runtime ALWAYS dispatches ``set_velocity`` even
+    # if both velocity components are zero — used by agents that want
+    # to halt an in-progress velocity command without having to send
+    # any other field. Without this flag, ``(0, 0)`` would short-circuit
+    # the dispatcher (since zero velocity is the default no-op) and an
+    # earlier non-zero velocity would keep the camera spinning.
+    force_velocity: bool = False
+
     # One-shot interaction. Fires the moment it's set; the agent must
     # re-emit it the next tick if it wants to keep clicking.
     # Valid: "attack" | "use_item" | "drop_item" | None.
@@ -77,9 +97,12 @@ class AgentAction:
         return (
             not self.movement
             and self.look_dx == 0 and self.look_dy == 0
+            and self.look_vx == 0.0 and self.look_vy == 0.0
+            and not self.force_velocity
             and self.interact is None
             and self.hotbar is None
             and not self.inventory_toggle
+            and not self.extras
         )
 
 

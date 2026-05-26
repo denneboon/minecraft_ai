@@ -77,6 +77,14 @@ class GameState:
     # None if OCR was not run this tick (it runs at ~2–4 Hz, not every frame).
     f3: Optional[F3Info] = None
 
+    # ---- World perception (optional, off by default) ----
+    # Populated by ``vision.world.WorldPerception`` when the
+    # ``vision.world.enabled`` setting is on. The agent reads
+    # ``state.world.world_map`` for the persistent voxel/entity store.
+    # Typed loosely (Any) to avoid importing vision.world here and
+    # creating a cycle.
+    world: Optional[Any] = None
+
     # ---- Meta ----
     frame_index: int = 0            # monotonic counter, set by caller
     extras: Dict[str, Any] = field(default_factory=dict)  # for future signals

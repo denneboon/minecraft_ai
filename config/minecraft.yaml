@@ -1,0 +1,380 @@
+# config/minecraft.yaml
+#
+# Ground-truth snapshot of the in-game settings of the Prism-launcher
+# instance the AI plays on ("Minecraft AI", 1.21.11). Every field here
+# mirrors a setting that is visible in Minecraft's own option menus, and
+# the values match what's actually toggled in-game.
+#
+# Why this file exists
+# --------------------
+# The AI plays Minecraft through screen + audio only — it never reads
+# from Mojang's game state. So whenever a setting affects pixels or
+# input (FOV, mouse sensitivity, GUI scale, view bobbing, the HUD
+# overlay flags, key binds, …) the AI needs to know what value the
+# player has chosen so it can interpret the screen correctly. This file
+# is that knowledge.
+#
+# Why a separate file from settings.yaml
+# --------------------------------------
+# settings.yaml describes how *our* runtime behaves (capture FPS, agent
+# tick rate, safety policy, etc.). minecraft.yaml describes how the
+# *game* is configured. Splitting them keeps the runtime config small
+# and lets us version the "what does the player's game look like"
+# information independently. The keys here are intentionally grouped
+# 1:1 with Minecraft's own option screens so a human can scan the in-
+# game UI and check the YAML against it.
+#
+# Updating this file
+# ------------------
+# When the player changes a setting in-game, also change it here.
+# Eventually the bot will read the option screens via OCR and update
+# the file automatically — until then it's manually maintained.
+#
+# Mapping vs. the screenshots
+# ---------------------------
+# Sections below mirror the screenshots the user provided:
+#   * Video Settings
+#   * Accessibility Settings
+#   * Chat Settings
+#   * Controls
+#   * Key Binds
+#   * Mouse Settings
+#   * Music & Sound
+#   * Debug Options (Always-on debug screen text)
+#
+# Everything else lives in `inferred` at the bottom — values the AI
+# can derive from the above and from MC's defaults (e.g. game version,
+# input device, asset version).
+
+instance:
+  # Prism Launcher instance name and the on-disk minecraft version it
+  # ships. Used by ``vision/mc_assets.py`` to know which assets cache
+  # to load if multiple versions are extracted.
+  prism_instance_name: "Minecraft AI"
+  game_version:        "1.21.11"
+  game_edition:        "java"           # "java" | "bedrock"
+  game_mode:           "survival"       # "survival" | "creative" | "adventure" | "spectator"
+  difficulty:          "normal"         # "peaceful" | "easy" | "normal" | "hard"
+  multiplayer:         false
+
+# ---------------------------------------------------------------------------
+# Video Settings
+# ---------------------------------------------------------------------------
+video:
+  # Display
+  fullscreen_resolution:   "1920x1080@60"      # screen mode used in fullscreen
+  fullscreen_resolution_bit_depth: 24
+  max_framerate:           60
+  vsync:                   false
+  reduce_fps_when:         "minimized"          # "minimized" | "afk" | "off"
+  fullscreen:              false
+  brightness:              "bright"             # "moody" | "dark" | "bright"
+
+  # Quality & Performance
+  preset:                  "custom"
+  biome_blend:             "off_fastest"        # off_fastest | off | 5x5 | …
+  render_distance_chunks:  8
+  chunk_builder:           "semi_blocking"      # "fully_blocking" | "semi_blocking" | "threaded"
+  simulation_distance_chunks: 8
+  smooth_lighting:         false
+  clouds:                  false
+  particles:               "minimal"            # "all" | "decreased" | "minimal" | "off"  (Java exposes minimal)
+  mipmap_levels:           1
+  entity_shadows:          false
+  entity_distance_percent: 500
+  menu_background_blur:    false
+  cloud_distance_chunks:   64
+  see_through_leaves:      false
+  improved_transparency:   false
+  texture_filtering:       "RGSS"               # "off" | "FXAA" | "TAA" | "RGSS" (modern MC)
+  anisotropic_filtering:   2                    # 1 (off), 2, 4, 8, 16
+  weather_effect_radius_blocks: 3
+
+  # Preferences (lower half of the Video panel)
+  autosave_indicator:      false
+  show_vignette:           true                 # vignettes darken screen corners — affects perception
+  attack_indicator:        "crosshair"          # "off" | "crosshair" | "hotbar"
+  chunk_fade_seconds:      0.75
+
+# ---------------------------------------------------------------------------
+# Accessibility Settings
+# ---------------------------------------------------------------------------
+accessibility:
+  narrator:                "off"                # "off" | "all" | "chat" | "system"
+  closed_captions:         false
+  high_contrast:           false
+  menu_background_blur:    false                # shared with video panel
+  text_background_opacity_percent:   50
+  text_background:         "chat"               # "chat" | "everywhere"
+  chat_text_opacity_percent:         100
+  line_spacing_percent:    0
+  chat_delay_seconds:      0
+  notification_time_multiplier: 1.0
+  view_bobbing:            false                # OFF => stable POV, important for vision
+  distortion_effects:      false                # cleaner POV under nether/blindness
+  fov_effects:             false                # cleaner POV under speed/slowness
+  darkness_pulsing:        false
+  damage_tilt:             false                # POV stays level under damage
+  glint_speed_percent:     50
+  glint_strength_percent:  75
+  hide_sky_flashes:        true
+  monochrome_logo:         false
+  panorama_scroll_speed_percent: 100
+  hide_splash_texts:       false
+  narrator_hotkey:         true
+  rotate_with_minecarts:   false
+  high_contrast_block_outlines: false           # block outlines stay vanilla black
+
+# ---------------------------------------------------------------------------
+# Chat Settings
+# ---------------------------------------------------------------------------
+chat:
+  chat:                    "shown"              # "shown" | "commands" | "hidden"
+  colors:                  true
+  web_links:               true
+  prompt_on_links:         true
+  chat_text_opacity_percent:        100
+  text_background_opacity_percent:  50
+  chat_text_size_percent:           100
+  line_spacing_percent:    0
+  chat_delay_seconds:      0
+  width_px:                320
+  focused_height_px:       180
+  unfocused_height_px:     90
+  narrator:                "off"
+  command_suggestions:     true
+  hide_matched_names:      true                 # mutes the sub-window for partial name matches
+  reduced_debug_info:      false                # full F3 info is visible
+  only_show_secure_chat:   false
+  save_unsent_chats:       false
+
+# ---------------------------------------------------------------------------
+# Controls (top-level controls panel, BEFORE the Key Binds sub-screen)
+# ---------------------------------------------------------------------------
+controls:
+  sneak_mode:              "hold"               # "hold" | "toggle"
+  sprint_mode:             "hold"               # "hold" | "toggle"
+  attack_destroy_mode:     "hold"               # "hold" | "toggle"
+  use_place_mode:          "hold"               # "hold" | "toggle"
+  auto_jump:               false
+  sprint_window:           false
+  operator_items_tab:      false
+
+# ---------------------------------------------------------------------------
+# Key Binds
+# ---------------------------------------------------------------------------
+# This is the GROUND TRUTH that ``config/keymap.json`` is derived from.
+# If you remap a key in-game, update it here AND in keymap.json so the
+# control layer presses the right hardware key. The grouping matches
+# MC's own categories so the in-game UI is easy to cross-reference.
+key_binds:
+  movement:
+    jump:              "space"
+    sneak:             "left_shift"
+    sprint:            "left_control"
+    strafe_left:       "a"
+    strafe_right:      "d"
+    walk_backward:     "s"
+    walk_forward:      "w"
+  miscellaneous:
+    advancements:      "l"
+    quick_actions:     null              # "Not Bound"
+    take_screenshot:   "f2"
+    toggle_cinematic_camera: null
+    toggle_fullscreen: "f11"
+    toggle_gui:        "f1"
+    toggle_perspective: "f5"
+    toggle_spectator_shader_effects: "f4"
+  multiplayer:
+    list_players:      "tab"
+    open_chat:         "t"
+    open_command:      "/"
+    social_interactions_screen: "p"
+  gameplay:
+    attack_destroy:    "mouse_left"
+    pick_block:        "mouse_middle"
+    use_item_place_block: "mouse_right"
+  inventory:
+    drop_selected_item: "q"
+    hotbar_slot_1:     "1"
+    hotbar_slot_2:     "2"
+    hotbar_slot_3:     "3"
+    hotbar_slot_4:     "4"
+    hotbar_slot_5:     "5"
+    hotbar_slot_6:     "6"
+    hotbar_slot_7:     "7"
+    hotbar_slot_8:     "8"
+    hotbar_slot_9:     "9"
+    open_close_inventory: "e"
+    swap_item_with_off_hand: "f"
+  creative_mode:
+    load_hotbar_activator: null         # "Not Bound"
+    save_hotbar_activator: "c"
+  spectator:
+    highlight_players: null             # "Not Bound"
+    select_on_hotbar:  "mouse_middle"
+  debug:
+    toggle_overlay:    "f3"
+    debug_modifier_key: "f3"
+    clear_chat:        "d"              # F3+D
+    copy_data:         "i"              # F3+I
+    copy_location:     "c"              # F3+C
+    cycle_spectator:   "n"              # F3+N
+    debug_crash:       "c"              # F3+C   (shared chord, second one)
+    debug_options:     "f6"
+    dump_dynamic_textures: "s"          # F3+S
+    dump_version_info: "v"              # F3+V
+    game_mode_switcher: "f4"
+    reload_chunks:     "a"              # F3+A
+    reload_resource_packs: "t"          # F3+T
+    show_advanced_tooltips: "h"         # F3+H
+    show_chunk_boundaries: "g"          # F3+G
+    show_hitboxes:     "b"              # F3+B
+    start_stop_profiling: "l"           # F3+L
+    toggle_lost_focus_pause: "p"        # F3+P
+    profiling_chart:   "1"              # F3+1
+    fps_charts:        "2"              # F3+2
+    network_charts:    "3"              # F3+3
+
+# ---------------------------------------------------------------------------
+# Mouse Settings
+# ---------------------------------------------------------------------------
+mouse:
+  sensitivity_percent:     100                  # vanilla 100% — base sensitivity
+  touchscreen_mode:        false
+  scroll_sensitivity:      1.0
+  discrete_scrolling:      false
+  invert_mouse_x:          false
+  invert_mouse_y:          false
+  allow_cursor_changes:    true
+  raw_input:               true
+
+# ---------------------------------------------------------------------------
+# Music & Sound
+# ---------------------------------------------------------------------------
+# Volume sliders go 0..100. Music is intentionally off in this instance
+# so the AI's audio pipeline doesn't have to filter Mojang music out of
+# everything else; the world sounds (blocks, mobs, weather, players)
+# are at their default 100%.
+sound:
+  master_volume_percent:           100
+  music_volume_percent:            0          # MUSIC: OFF in this instance
+  jukebox_note_blocks_percent:     100
+  weather_percent:                 100
+  blocks_percent:                  100
+  hostile_mobs_percent:            100
+  friendly_mobs_percent:           100
+  players_percent:                 100
+  ambient_environment_percent:     100
+  narrator_voice_percent:          100
+  ui_percent:                      100
+  device:                          "system_default"
+  closed_captions:                 false
+  directional_audio:               false
+  music_frequency:                 "default"
+  music_toast:                     "never"
+
+# ---------------------------------------------------------------------------
+# Debug Options (the in-game F6 screen)
+# ---------------------------------------------------------------------------
+# Each entry is one of:
+#   "off"        — never rendered
+#   "in_overlay" — visible only when F3 is held (the dark debug panel)
+#   "always"     — rendered on top of gameplay at all times
+#
+# The "always" entries are particularly important for the AI: those
+# lines appear without the F3 panel and can therefore be OCR'd at any
+# time. ``player_position`` and ``player_section_position`` are kept on
+# Always so the AI's XYZ/yaw/pitch readout never depends on the user
+# pressing F3.
+debug_screen_text:
+  biome:                       "in_overlay"
+  chunk_generation_stats:      "off"
+  chunk_render_stats:          "off"
+  chunk_source_stats:          "off"
+  entity_render_stats:         "off"
+  entity_spawn_counts:         "off"
+  fps:                         "in_overlay"
+  game_version:                "in_overlay"
+  gpu_utilization:             "off"
+  heightmap:                   "off"
+  light_levels:                "off"
+  local_difficulty:            "off"
+  looking_at_block:            "always"        # ground-truth labels for world classifier
+  looking_at_entity:           "off"
+  looking_at_fluid:            "off"
+  memory:                      "in_overlay"
+  particle_render_stats:       "off"
+  player_position:             "always"        # XYZ visible at all times
+  player_section_position:     "always"        # Section-relative visible at all times
+  post_effect:                 "off"
+  simple_performance_impactors: "in_overlay"
+  sound_mood:                  "off"
+  system_specs:                "in_overlay"
+  tps:                         "in_overlay"
+
+debug_renderers:
+  three_d_crosshair:           "in_overlay"
+  chunk_borders:               "off"
+  chunk_section_octree:        "off"
+  chunk_section_paths:         "off"
+  chunk_section_visibility:    "off"
+  entity_hitboxes:             "off"
+  visualize_block_light_levels: "off"
+  visualize_chunks_on_server:  "off"
+  visualize_collision_boxes:   "off"
+  visualize_entity_supporting_block: "off"
+  visualize_heightmap:         "off"
+  visualize_sky_light_levels:  "off"
+  visualize_sky_light_sections: "off"
+  visualize_solid_faces:       "off"
+  visualize_water_levels:      "off"
+  debug_profile:               "default"        # "default" | "performance"
+
+# ---------------------------------------------------------------------------
+# Inferred / derived (read by code, written by hand)
+# ---------------------------------------------------------------------------
+# These are NOT direct in-game settings but constants that depend on
+# them and that the perception code needs to know.
+inferred:
+  # FOV in degrees. MC defaults to 70; the user's settings.yaml
+  # capture.fov is 90 — we mirror that here so future code reading
+  # only minecraft.yaml gets the right value.
+  fov_degrees: 90
+
+  # Aspect ratio of the captured frame (width / height). Combined with
+  # fov_degrees this is enough to back out the camera intrinsics
+  # needed for projecting world coords ↔ screen coords.
+  aspect_ratio: 1.7777778        # 16/9
+
+  # Vertical FOV at the user's setting. Computed by code as
+  #   vfov = 2 * atan(tan(fov/2) / aspect)
+  # but stored explicitly for clarity.
+  vfov_degrees: ~
+
+  # Whether MC's debug overlay panel (dark translucent background)
+  # is ever visible without the user pressing F3. With the "Always"
+  # debug lines, parts of the text appear ON GAMEPLAY (no panel).
+  # The F3 panel only appears while F3 is held.
+  panel_visible_without_f3: false
+  always_visible_debug_lines:
+    - "player_position"
+    - "player_section_position"
+    - "looking_at_block"            # provides the AI's ground truth labels
+  # The F3 overlay renders these debug lines in two on-screen columns
+  # in MC 1.20+. The AI's OCR is configured to scan both — see
+  # ``settings.yaml: vision.ocr.enable_right_column``.
+  f3_two_columns: true
+  f3_columns:
+    left:    ["looking_at_block", "biome", "fps", "memory",
+              "system_specs", "tps", "simple_performance_impactors"]
+    right:   ["player_position", "block_position", "chunk_position",
+              "facing", "dimension", "player_section_position"]
+
+  # Resource pack stack at load time. Vanilla only; if the user adds
+  # custom textures, vision template matching breaks.
+  resource_packs:
+    - "vanilla"
+
+  # Shaderpack — affects every rendered pixel. Vanilla = none.
+  shader_pack: null

@@ -20,10 +20,15 @@ from control.action_wrapper import ActionWrapper
 from vision.capture import Capture, CaptureConfig
 from vision.processing import build_processor, FrameProcessor, ScreenState
 from vision.ocr import build_f3_reader, F3Reader
+from vision.pose_filter import PoseFilter
 from utils.focus import activate_minecraft, _find_minecraft_hwnd
 
 from vision.menu_detect import MenuDetector, MenuDetection, build_menu_detector
 from vision.mcfont import ensure_font_cache
+
+# World perception is optional and off by default. We import lazily
+# inside _maybe_build_world_perception so a missing assets cache
+# doesn't break the rest of the agent.
 
 from brain.interfaces import AgentAction, BaseAgent
 from agents import build_agent, available_agents
@@ -160,6 +165,29 @@ def build_mouse(settings: Dict[str, Any], gate=None) -> Mouse:
         enable_scroll=bool(_get(settings, "control.mouse.enable_scroll", True)),
     )
     return Mouse(config=mc, gate=gate)
+
+
+def _maybe_build_world_perception(settings: Dict[str, Any]):
+    """
+    Build a ``vision.world.WorldPerception`` if enabled in settings.
+
+    Returns the perception instance, or ``None`` when the feature flag
+    is off or the build failed (missing assets cache, etc.). World
+    perception runs alongside the existing pipeline — never blocks
+    capture / HUD / OCR / action dispatch.
+    """
+    enabled = bool(_get(settings, "vision.world.enabled", False))
+    if not enabled:
+        return None
+    try:
+        from vision.world import build_world_perception
+        wp = build_world_perception(settings)
+        print(f"[MAIN] WorldPerception enabled "
+              f"({wp.block_classifier.template_count()} block signatures).")
+        return wp
+    except Exception as e:
+        print(f"[MAIN][WARN] WorldPerception disabled — could not build: {e}")
+        return None
 
 
 def build_capture(settings: Dict[str, Any]) -> Capture:
@@ -369,7 +397,22 @@ def _dispatch_action(
     if action.inventory_toggle:
         actions.execute("open_inventory")
 
-    # Camera (smooth easing inside Mouse.track_target)
+    # Camera. Two paths:
+    #   * Continuous velocity (look_vx/vy in px/sec): forwards to the
+    #     mouse's background velocity worker for genuinely smooth
+    #     motion — no per-tick gaps. Even ``set_velocity(0, 0)`` is
+    #     dispatched so the worker stops when the agent commands a
+    #     halt.
+    #   * One-shot delta (look_dx/dy in px): the legacy eased motion.
+    # An agent can use either; humanlike agents like WorldExplorer
+    # should prefer the velocity API.
+    has_velocity_field = (action.look_vx != 0.0 or action.look_vy != 0.0
+                          or action.force_velocity)
+    if has_velocity_field:
+        try:
+            mouse.set_velocity(float(action.look_vx), float(action.look_vy))
+        except Exception as e:
+            print(f"[AGENT][WARN] mouse.set_velocity failed: {e}")
     if action.look_dx or action.look_dy:
         mouse.track_target(int(action.look_dx), int(action.look_dy))
 
@@ -393,6 +436,7 @@ def _run_agent_loop(
     agent: BaseAgent,
     settings: Dict[str, Any],
     max_runtime_sec: float,
+    world_perception: Optional[Any] = None,
 ) -> None:
     """
     Main perception → decision → action loop.
@@ -414,6 +458,10 @@ def _run_agent_loop(
     print(f"[AGENT] Starting '{agent.name}' loop at {tick_rate} ticks/sec "
           f"(max {max_runtime_sec:.0f}s). Ctrl+Shift+F12 = emergency stop.")
     agent.reset()
+    # Pose filter: rejects physically-impossible OCR reads
+    # (teleporting hundreds of blocks per frame, pitch > 90°, etc.)
+    # so a single garbled tick can't poison the perception layer.
+    pose_filter = PoseFilter()
 
     start_ts       = time.perf_counter()
     last_tick      = start_ts
@@ -427,6 +475,7 @@ def _run_agent_loop(
     # if we're hitting the target rate (default 20 Hz) or slipping.
     profile_ticks  = 0
     profile_window_start = start_ts
+    total_ticks    = 0   # monotonic counter for the shutdown summary
 
     try:
         while True:
@@ -459,6 +508,11 @@ def _run_agent_loop(
                     and state.screen_state == ScreenState.PLAYING):
                 try:
                     fresh = f3_reader.read(frame)
+                    # Validate the raw read against physical priors.
+                    # Outlier rejection prevents a single misread from
+                    # teleporting the perception eye 100 blocks and
+                    # polluting the curiosity queue.
+                    fresh = pose_filter.accept(fresh, now=now)
                     if fresh is not None and fresh.x is not None:
                         last_f3 = fresh
                     state.f3 = fresh
@@ -467,6 +521,17 @@ def _run_agent_loop(
                 last_f3_ts = time.perf_counter()
             if state.f3 is None:
                 state.f3 = last_f3
+
+            # --- World perception (optional) ---
+            # Runs alongside the existing pipeline — adds a WorldFrame
+            # to state.world that downstream agents can consume. Failures
+            # never abort the loop; perception is best-effort.
+            if world_perception is not None:
+                try:
+                    state.world = world_perception.update(frame, state.f3)
+                except Exception as e:
+                    if keyboard.cfg.verbose:
+                        print(f"[AGENT][WARN] world perception failed: {e}")
 
             # --- Log screen-state transitions ---
             if state.screen_state != prev_screen:
@@ -509,11 +574,17 @@ def _run_agent_loop(
             # --- Dispatch (gated by safety + screen state) ---
             dispatch_ok = gate_now and state.screen_state == ScreenState.PLAYING
             if keyboard.cfg.verbose:
-                # Snapshot one line per tick: gate / screen / movement / look / interact
+                # Snapshot one line per tick: gate / screen / movement /
+                # look / interact. ``look_dx/dy`` is the one-shot easing
+                # path; ``look_vx/vy`` is the continuous velocity path
+                # used by the WorldExplorer. Velocity-mode agents
+                # otherwise leave dx/dy at 0 — log both so verbose
+                # runs don't silently miss what the agent is doing.
                 mv = decision.movement
                 print(f"[TICK]  gate={gate_now}  screen={state.screen_state}  "
                       f"dispatch={dispatch_ok}  movement={mv}  "
-                      f"look=({decision.look_dx},{decision.look_dy})  "
+                      f"look_d=({decision.look_dx},{decision.look_dy})  "
+                      f"look_v=({decision.look_vx:+.0f},{decision.look_vy:+.0f})  "
                       f"interact={decision.interact}  hotbar={decision.hotbar}")
             if dispatch_ok:
                 try:
@@ -538,6 +609,7 @@ def _run_agent_loop(
             last_tick = time.perf_counter()
 
             profile_ticks += 1
+            total_ticks   += 1
             if last_tick - profile_window_start >= 1.0:
                 rate = profile_ticks / (last_tick - profile_window_start)
                 if keyboard.cfg.verbose:
@@ -563,11 +635,10 @@ def _run_agent_loop(
         # Always shown (regardless of --debug) — useful for noticing
         # if a frame-processing change tanked the loop rate.
         wall = time.perf_counter() - start_ts
-        # profile_ticks holds only the in-window count; reconstruct
-        # total via tick budget rather than maintaining a second counter.
-        approx_total_ticks = int(wall * tick_rate)  # target ticks
+        actual_rate = (total_ticks / wall) if wall > 0 else 0.0
         print(f"[AGENT] Loop ended after {wall:.1f}s "
-              f"(target {tick_rate:.0f} Hz, ~{approx_total_ticks} ticks).")
+              f"({total_ticks} ticks, {actual_rate:.1f} Hz actual / "
+              f"{tick_rate:.0f} Hz target).")
 
 
 # ---------------------------------------------------------------------------
@@ -683,6 +754,10 @@ def main(argv: Optional[list] = None) -> int:
     processor = build_processor(settings)
     f3_reader = build_f3_reader(settings)
     actions   = ActionWrapper(keyboard=keyboard, mouse=mouse, gate=gate)
+    # Optional world perception layer. Off unless vision.world.enabled
+    # is set in settings.yaml. Built up-front so the heavy classifier
+    # init doesn't land inside the first agent tick.
+    world_perception = _maybe_build_world_perception(settings)
 
     # Wire --debug → keyboard verbose flag. (Mouse verbose can be
     # added the same way later if we ever need to debug camera issues.)
@@ -708,12 +783,30 @@ def main(argv: Optional[list] = None) -> int:
         try:
             agent = build_agent(agent_name, settings)
             print(f"[MAIN] Agent: {agent_name}")
+            # Some agents (currently the WorldExplorer) want a direct
+            # reference to the WorldPerception so they can read the
+            # curiosity queue + confirmed-voxel set.
+            if (hasattr(agent, "attach_perception")
+                    and world_perception is not None):
+                try:
+                    agent.attach_perception(world_perception)
+                    print("[MAIN] Attached WorldPerception to agent.")
+                except Exception as e:
+                    print(f"[MAIN][WARN] attach_perception failed: {e}")
         except Exception as e:
             print(f"[MAIN][WARN] build_agent({agent_name!r}) failed: {e}. "
                   f"Falling back to smoke test.")
             agent = None
 
     def emergency():
+        # Force-release every held key/button BEFORE we tear capture
+        # down. Both ``emergency_stop`` calls bypass the input gate so
+        # they fire even when focus has already been lost.
+        for sub in (keyboard, mouse):
+            try:
+                sub.emergency_stop()
+            except Exception:
+                pass
         for sub in (keyboard, mouse, capture):
             try:
                 sub.stop()
@@ -777,8 +870,77 @@ def main(argv: Optional[list] = None) -> int:
                 actions=actions, mouse=mouse, keyboard=keyboard,
                 safety=safety, agent=agent, settings=settings,
                 max_runtime_sec=max_runtime,
+                world_perception=world_perception,
             )
     finally:
+        # Dump the WorldMap (and a rendered iso 3D snapshot) so the
+        # user can inspect what the perception layer built during the
+        # run. Best-effort — never block shutdown on render errors.
+        if world_perception is not None:
+            try:
+                import os as _os
+                from datetime import datetime as _dt
+                out_dir = _os.path.join(ROOT, "data", "calibration")
+                _os.makedirs(out_dir, exist_ok=True)
+                ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+                # Compact JSON (palette-deduped, sparse coords).
+                # Drop-in replacement for the old verbose dump — ~8x
+                # smaller for typical session sizes.
+                try:
+                    from vision.world import write_compact_json, write_schematic
+                    json_path = _os.path.join(
+                        out_dir, f"world_map_{ts}.json"
+                    )
+                    write_compact_json(world_perception.world_map, json_path)
+                    # Sponge .schem: open in Amulet Editor (free,
+                    # standalone, full game textures) or import into
+                    # MC via Litematica / WorldEdit.
+                    schem_path = _os.path.join(
+                        out_dir, f"world_map_{ts}.schem"
+                    )
+                    write_schematic(world_perception.world_map, schem_path)
+                    print(f"[MAIN] World map exported:")
+                    print(f"         compact JSON -> {json_path}")
+                    print(f"         schematic    -> {schem_path}")
+                    print(f"         Open the .schem in Amulet Editor "
+                          f"(https://amuletmc.com) or Litematica.")
+                except Exception as e:
+                    print(f"[MAIN][WARN] compact export failed: {e}")
+                    world_perception.world_map.dump_json(
+                        _os.path.join(out_dir, f"world_map_{ts}.json")
+                    )
+                try:
+                    import cv2 as _cv2
+                    from vision.world import (
+                        IsoWorldRenderer, IsoRenderConfig,
+                        WorldMapRenderer, MapRenderConfig,
+                    )
+                    iso = IsoWorldRenderer(IsoRenderConfig())
+                    top = WorldMapRenderer(MapRenderConfig())
+                    last_pose = None
+                    try:
+                        last_pose = world_perception.last_pose()
+                    except Exception:
+                        last_pose = None
+                    stats = world_perception.stats()
+                    extra = [f"solid={sum(1 for _ in world_perception.world_map.iter_solid_blocks())}",
+                             f"curi={stats.get('curiosity_size',0)}",
+                             f"conf'd={stats.get('confirmed_count',0)}",
+                             f"samp={(stats.get('sample_store') or {}).get('total_samples',0)}"]
+                    img_iso = iso.render(world_perception.world_map, last_pose,
+                                          extra_lines=extra)
+                    img_top = top.render(world_perception.world_map, last_pose,
+                                          extra_lines=extra)
+                    _cv2.imwrite(_os.path.join(out_dir, f"world_iso_{ts}.png"),
+                                  _cv2.cvtColor(img_iso, _cv2.COLOR_RGB2BGR))
+                    _cv2.imwrite(_os.path.join(out_dir, f"world_top_{ts}.png"),
+                                  _cv2.cvtColor(img_top, _cv2.COLOR_RGB2BGR))
+                    print(f"[MAIN] World map snapshots written to {out_dir}/world_*_{ts}.*")
+                except Exception as e:
+                    print(f"[MAIN][WARN] Could not render map snapshot: {e}")
+            except Exception as e:
+                print(f"[MAIN][WARN] world_map dump failed: {e}")
+
         print("[MAIN] Stopping subsystems…")
         try:
             actions.release_all_movement()

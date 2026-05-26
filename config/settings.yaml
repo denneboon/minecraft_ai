@@ -18,20 +18,71 @@ capture:
   show_frame_stats: false
   benchmark_on_start: false
 vision:
-  auto_exposure_normalization: false
-  color_correction: false
-  crop_hud: false
+  world:
+    enabled: true
+    block_classifier: baseline
+    entity_classifier: null
+    h_fov_deg: 90
+    patch_grid_size:
+    - 6
+    - 4
+    patch_size_px: 24
+    margin_left_px: 80
+    margin_right_px: 80
+    margin_top_px: 120
+    margin_bottom_px: 180
+    max_walk_distance: 16.0
+    crosshair_reach_blocks: 5.0
+    min_block_confidence: 0.25
+    entity_detect_every_n_ticks: 4
+    use_sample_recognizer: true
+    auto_sample_from_looking_at: true
+    sample_cooldown_ticks: 6
+    sample_capture_px: 32
+    sample_reload_every_n_saves: 3
+    # CONSERVATIVE MODE: only blocks the AI directly looked at via F3
+    # "Targeted Block" go into the WorldMap. Vision-patch guesses,
+    # sample-NN matches, inverse-renderer cross-validation, and
+    # F3-seed neighbour expansion are all DISABLED — they exist in
+    # code but are gated behind this flag for future re-enablement
+    # after the heuristic-quality issues are sorted out.
+    commit_only_from_looking_at: true
+
+    # ── HUD / hand exclusion zones ───────────────────────────────
+    # Pixel rectangles where the camera sees the player's HOTBAR or
+    # their first-person HAND — patches that fall inside are
+    # ignored. Tuned for the calibrated 1920x1129 capture; adjust
+    # via tools/window_inspector.py if the GUI scale changes.
+    exclude_rects:
+      - [760, 1030, 410, 100]      # hotbar + health/hunger bars
+      - [1200,  700, 720, 430]     # first-person hand bottom-right
+
+    strict_commit_gate: true
+    sample_commit_confidence: 0.92
+    min_samples_for_commit: 30   # require this many labelled samples on
+                                  # disk before sample-NN can commit a block
+    curiosity_queue_max: 256
+    # Inverse-rendering ground-truth expansion. When F3 confirms a
+    # voxel, project neighbouring voxels' visible faces to the
+    # screen, sample the actual pixels, and compare against the
+    # canonical texture for the same block. Confident matches commit
+    # as "extrapolation" — one F3 confirm becomes many confirmed
+    # neighbours for floors / walls / tree trunks.
+    use_inverse_renderer:           true
+    expand_score_min:               0.55
+    expand_neighbour_radius:        2
+    expand_max_voxels_per_tick:     32
+    # Cross-validate curiosity-queue entries every tick against the
+    # inverse renderer: when patch sweep + texture geometry agree
+    # on the same block id, commit (no F3 needed).
+    inverse_validate_curiosity:     true
+    inverse_validate_score_min:     0.62
+    inverse_validate_max_per_tick:  8
+    carve_air_along_sightlines: true
+    use_f3_depth_anchor: true
+    default_anchor_depth: 4.0
+    depth_search_radius: 6.0
   hud_regions:
-    health_bar:
-    - 778
-    - 1050
-    - 162
-    - 18
-    hunger_bar:
-    - 980
-    - 1050
-    - 162
-    - 18
     hotbar_region:
     - 778
     - 1084
@@ -42,6 +93,16 @@ vision:
     - 1070
     - 364
     - 10
+    health_bar:
+    - 778
+    - 1050
+    - 162
+    - 18
+    hunger_bar:
+    - 980
+    - 1050
+    - 162
+    - 18
     armor_bar:
     - 778
     - 1030
@@ -50,11 +111,6 @@ vision:
     crosshair_center:
     - 960
     - 564
-  ocr:
-    enabled: false
-    language: eng
-    psm: 6
-    whitelist: 0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ:-_.,!/#
   hud_extended:
     hotbar_slot_rects:
     - - 780
@@ -123,11 +179,17 @@ control:
     sneak_mode: hold
     autorun_enabled: false
   mouse:
-    move_duration_ms: 40
+    # Tuned for humanlike camera control. The agent ticks at 20 Hz
+    # (50 ms / tick); each ``track_target`` call eases the requested
+    # delta over ~48 ms with 20 micro-steps, so the cursor is
+    # continuously moving with very fine per-frame increments. Lower
+    # ``curve_steps`` produces a more stepped feel; higher costs CPU.
+    move_duration_ms: 48
     flick_multiplier: 0.35
-    curve_steps: 10
+    curve_steps: 20
     default_click_duration: 0.05
-    max_events_per_sec: 240
+    max_events_per_sec: 480           # high cap so the easing micro-steps
+                                       # are never rate-limited
     enable_scroll: true
 safety:
   check_focus_interval: 0.075
@@ -155,14 +217,8 @@ logging:
     draw_mob_detection: false
     draw_hotbar_state: false
 agent:
-  # Name of the agent to run via `python main.py` (without --agent).
-  # Use 'none' (or omit the agent in CLI) to run the hardware smoke test.
-  # Registered agents: navigation
   default_agent: navigation
-
-  # Hard wall-clock stop for the agent loop. Override per-run with --duration.
   max_runtime_sec: 30
-
   tick_rate: 20
   action_rate: 60
   allow_hotbar_scroll: false
@@ -177,9 +233,31 @@ agent:
     enabled: false
     imagination_rollouts: 0
     use_latent_model: false
-
-  # NavigationAgent settings. target_x / target_z = null → walk 25 blocks
-  # forward from wherever the player happens to be facing at loop start.
+  world_explorer:
+    # All mouse-motion knobs tuned for HUMANLIKE easing (no flicks).
+    # Effective speed limits (at MC sensitivity 100 %, ~6.5 px/°):
+    #   * yaw scan rate         ≈ 9°/sec  (2 px/tick × 20 Hz / 6.5 px/°)
+    #   * max yaw correction    ≈ 25 px/tick ≈ 3.8°/tick
+    #   * approach gain         0.20 → most yaw errors converge in 5–8 ticks
+    # This is well below the "twitch" range; should read as a smooth
+    # human glance, not a flick.
+    mouse_per_degree: 6.5
+    mouse_gain: 0.20
+    max_mouse_dx: 25
+    max_mouse_dy: 20
+    aim_tolerance_deg: 1.4
+    investigate_dwell_ticks: 12
+    investigate_max_ticks: 140       # extra budget for the gentler gain
+    close_confirm_grace_ticks: 12
+    max_reach_blocks: 5.0
+    scan_yaw_pixels_per_tick: 2      # ~9°/sec — slow, deliberate pan
+    scan_pitch_amplitude_deg: 25.0
+    scan_pitch_period_ticks: 360     # 18 s sweep
+    scan_pitch_center_deg: 25.0      # biased downward
+    scan_ticks_before_investigate: 14
+    no_target_pitch_down_after_ticks: 30
+    no_target_pitch_down_per_tick: 4  # gentle pitch-down
+    queue_priority: closest
   navigation:
     target_x: null
     target_z: null
@@ -191,10 +269,6 @@ agent:
     walk_when_aligned_within: 35.0
     sprint: false
     auto_target_forward_blocks: 25.0
-    # Eating is disabled for now — set eat_below_hunger > 0 to re-enable.
-    # When enabled, eating currently blocks all other actions until done,
-    # which is too coarse. A future "hunger background task" should
-    # interrupt navigation only for the brief moment of right-clicking.
     eat_below_hunger: 0.0
     food_slot: 9
     eat_hold_ticks: 30
@@ -250,5 +324,5 @@ vision_calibration:
     - 1920
     - 1128
     ui_scale: 2
-    timestamp: 1779442093
+    timestamp: 1779561191
     source: vision.calibration_formula

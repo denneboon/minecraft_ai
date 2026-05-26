@@ -131,12 +131,33 @@ class OCRConfig:
     text_start_y:   int = 2
     text_start_x:   int = 2
     line_margin_px: int = 1
+    # Stride between successive line crops. Defaults to MC's natural
+    # line stride (~20 px at ui_scale 2 = 10 base px). build_f3_reader
+    # rewrites this from ui_scale.
+    line_step_px:   int = 20
 
-    # Read at most this many lines from the top of the F3 panel.
-    # Players can toggle individual debug options to Always, so the
-    # actual line count varies — scanning generously costs us nothing.
-    max_lines: int = 12
+    # Read at most this many lines from each F3 column. Players can
+    # toggle individual debug options to Always, so the actual line
+    # count varies — scanning generously costs us nothing (the OCR's
+    # column-walker is cheap on blank crops). For F3-only commit
+    # mode (the current default), we only need the FIRST 4-5 lines
+    # of each column: LEFT = "Targeted Block:" + block id, RIGHT =
+    # XYZ / Block / Chunk / Facing. Drop ``max_lines`` low to cut
+    # OCR time by ~3-5x.
+    max_lines:     int = 5
     line_width_px: int = 700
+
+    # ── Multi-column layout (MC 1.20+) ─────────────────────────────
+    # Modern MC renders F3 text in two columns:
+    #   * LEFT  : looking-at, biome, FPS, system info
+    #   * RIGHT : XYZ, Block, Chunk, Facing, dimension, section
+    # Both can be "Always" on, so the reader must crop and OCR both.
+    # The RIGHT column is right-aligned to the window edge; the crop
+    # below grabs a generous slab ending at the right edge so the
+    # widest expected line still fits.
+    enable_right_column: bool = True
+    right_column_width_px: int = 620   # crop width from right edge
+    right_column_margin_px: int = 2    # blank pixels at the right edge
 
     # Glyph OCR settings (forwarded to GlyphOCRConfig).
     ui_scale:        int   = 2
@@ -158,12 +179,36 @@ CARDINALS = ("north", "south", "east", "west")
 # Per-line parsers — each tries to extract a piece of F3Info from any line.
 # ---------------------------------------------------------------------------
 
-_RE_XYZ_DEC   = re.compile(r'(-?\d+(?:\.\d+)?)\s*/\s*(-?\d+(?:\.\d+)?)\s*/\s*(-?\d+(?:\.\d+)?)')
+# Three signed decimal numbers separated by *something* that isn't a
+# digit. Tolerant separator handles OCR degrade modes where "/" reads
+# as ".?" or just "?" — common on bright/busy backgrounds where the
+# diagonal stroke gets eaten by the shadow filter.
+#
+# At least ONE of the three captures must have a decimal point. Without
+# this guard the regex also matches the Block line ("Block: -110 70 -200")
+# which is three integers — and if the actual XYZ line failed to OCR
+# this tick, the block ints would be silently committed as the player's
+# float coordinates.
+_RE_XYZ_DEC   = re.compile(
+    r'(-?\d+(?:\.\d+)?)[^\d-]{1,6}(-?\d+(?:\.\d+)?)[^\d-]{1,6}(-?\d+(?:\.\d+)?)'
+)
+_RE_HAS_DECIMAL = re.compile(r'\d\.\d')
 _RE_BLOCK_INT = re.compile(r'(-?\d+)\s+(-?\d+)\s+(-?\d+)')
-_RE_DIM       = re.compile(r'minecraft:[a-z_]+', re.IGNORECASE)
+# Dimension id is one of a small fixed set of vanilla worlds. Restricting
+# the match prevents block ids / tags (``minecraft:grass_block``,
+# ``#minecraft:sniffer_diggable_block``) from being read as dimensions
+# when the LEFT-column F3 lines (Targeted Block + tags) bleed into the
+# OCR output alongside the RIGHT-column dimension line.
+_RE_DIM       = re.compile(
+    r'\bminecraft:(overworld|the_nether|the_end|nether|end)\b',
+    re.IGNORECASE,
+)
 _RE_FPS       = re.compile(r'(\d+)\s*fps', re.IGNORECASE)
 _RE_FACING    = re.compile(r'facing[:\s]+(north|south|east|west)\b', re.IGNORECASE)
-_RE_ANGLES    = re.compile(r'(-?\d+\.\d+)\s*/\s*(-?\d+\.\d+)')
+# yaw / pitch on the Facing line. Same tolerant separator as XYZ.
+_RE_ANGLES    = re.compile(
+    r'(-?\d+\.\d+)[^\d-]{1,6}(-?\d+\.\d+)'
+)
 
 _Y_MIN, _Y_MAX = -64, 320
 _XZ_LIMIT      = 30_000_000
@@ -171,6 +216,73 @@ _XZ_LIMIT      = 30_000_000
 
 def _coords_in_bounds(x: float, y: float, z: float) -> bool:
     return abs(x) < _XZ_LIMIT and _Y_MIN <= y <= _Y_MAX and abs(z) < _XZ_LIMIT
+
+
+def _ocr_repair_digits(s: str) -> str:
+    """
+    Repair common glyph-OCR digit confusions in MC's 5×7 bitmap font.
+
+    The font has several near-identical glyph pairs that the
+    template matcher routinely confuses on noisy / busy backgrounds:
+      * ``1`` ↔ ``L`` ↔ ``l`` ↔ ``|`` ↔ ``I``
+      * ``0`` ↔ ``O`` ↔ ``o`` ↔ ``D`` (less common but happens)
+      * ``5`` ↔ ``S`` ↔ ``s``
+      * ``8`` ↔ ``B``
+      * ``2`` ↔ ``Z`` ↔ ``z``
+
+    Applied to numeric-only substrings: we walk the string and any
+    character that looks letter-like sitting between two digits (or
+    next to a digit / decimal point / sign) gets coerced to its
+    digit twin. Pure-text substrings are untouched.
+    """
+    if not s:
+        return s
+    NEIGHBOURS = set("0123456789.-+/")
+    # Repair table (letter → digit).
+    REPAIR = {
+        "L": "1", "l": "1", "|": "1", "I": "1",
+        "O": "0", "o": "0", "D": "0",
+        "S": "5", "s": "5",
+        "B": "8",
+        "Z": "2", "z": "2",
+    }
+    out_chars: List[str] = []
+    chars = list(s)
+    for i, ch in enumerate(chars):
+        if ch in REPAIR:
+            prev = chars[i - 1] if i > 0 else ""
+            nxt  = chars[i + 1] if i + 1 < len(chars) else ""
+            if prev in NEIGHBOURS or nxt in NEIGHBOURS:
+                out_chars.append(REPAIR[ch])
+                continue
+        out_chars.append(ch)
+    return "".join(out_chars)
+
+
+def _try_xyz_dec(line: str) -> Optional[Tuple[float, float, float]]:
+    """
+    Attempt the XYZ regex on ``line``. Try the repaired copy FIRST so
+    that letter-corrupted digits become numbers BEFORE the regex
+    matches — otherwise a partial like ``-L10.500`` parses as the
+    sub-string ``10.500`` (wrong sign and magnitude) instead of
+    ``-110.500``.
+    """
+    for candidate in (_ocr_repair_digits(line), line):
+        m = _RE_XYZ_DEC.search(candidate)
+        if not m:
+            continue
+        # Require at least one decimal point in the matched span — a
+        # line of three integers is the Block line, not XYZ. Guards
+        # against integer coords ever populating ``info.x/y/z``.
+        if not _RE_HAS_DECIMAL.search(m.group(0)):
+            continue
+        try:
+            x, y, z = float(m.group(1)), float(m.group(2)), float(m.group(3))
+        except ValueError:
+            continue
+        if _coords_in_bounds(x, y, z):
+            return x, y, z
+    return None
 
 
 def _parse_lines(lines: List[str]) -> F3Info:
@@ -182,16 +294,13 @@ def _parse_lines(lines: List[str]) -> F3Info:
             continue
         ll = line.lower()
 
-        # XYZ position (decimals separated by /)
+        # XYZ position (decimals separated by /). Uses a repair pass
+        # to recover from common OCR digit/letter confusions before
+        # giving up on the line.
         if info.x is None:
-            m = _RE_XYZ_DEC.search(line)
-            if m:
-                try:
-                    x, y, z = float(m.group(1)), float(m.group(2)), float(m.group(3))
-                    if _coords_in_bounds(x, y, z):
-                        info.x, info.y, info.z = x, y, z
-                except ValueError:
-                    pass
+            triple = _try_xyz_dec(line)
+            if triple is not None:
+                info.x, info.y, info.z = triple
 
         # Block coords (whole numbers, follows "Block:")
         if info.block_x is None and ll.startswith("block"):
@@ -241,11 +350,15 @@ def _parse_lines(lines: List[str]) -> F3Info:
                                 pass
                         break
 
-        # Dimension
+        # Dimension. Match the full ``minecraft:<dim>`` string with
+        # canonical casing/aliases (so OCR'd ``nether`` is normalised
+        # to ``minecraft:the_nether`` like Mojang's tag).
         if info.dimension is None:
             md = _RE_DIM.search(line)
             if md:
-                info.dimension = md.group(0).lower()
+                dim = md.group(1).lower()
+                alias = {"nether": "the_nether", "end": "the_end"}
+                info.dimension = f"minecraft:{alias.get(dim, dim)}"
 
         # FPS
         if info.fps is None:
@@ -334,7 +447,25 @@ class F3Reader:
         while lines and not lines[-1].strip():
             lines.pop()
 
-        info = _parse_lines(lines)
+        # De-duplicate (overlapping crops produce the same line twice).
+        # We preserve the FIRST occurrence so positional context for the
+        # multi-line "Targeted Block" parser is preserved.
+        seen: set = set()
+        deduped: List[str] = []
+        for ln in lines:
+            stripped = ln.strip()
+            # Keep blank entries as separators so the line-order-aware
+            # parsers (looking_at_block) can still see grouping breaks.
+            if not stripped:
+                if deduped and deduped[-1] != "":
+                    deduped.append("")
+                continue
+            if stripped in seen:
+                continue
+            seen.add(stripped)
+            deduped.append(ln)
+
+        info = _parse_lines(deduped)
         info.backend = backend
         return info
 
@@ -396,40 +527,81 @@ class F3Reader:
     _PANEL_MEAN_MAX = 110
     _PANEL_STD_MIN  = 40
 
+    # Drop-shadow text-detection thresholds. The same structural rule
+    # the glyph OCR uses (bright pixel with significantly darker
+    # below-right neighbour) is the most reliable pre-check: it fires
+    # on real MC text in every lighting/biome condition and ignores
+    # sky / snow / leaves / sand. Threshold tuned generously so that
+    # even a single-line always-on overlay (5-10 shadow pixels per
+    # glyph × ~20 glyphs = ~100 signatures) reliably triggers, while
+    # a leafy gameplay scene (≤ 5 spurious matches per 30 K-pixel
+    # sample window) does not.
+    _SHADOW_BRIGHT_MIN  = 200   # this pixel ≥ here
+    _SHADOW_DROP_MIN    = 90    # below-right pixel must be that much darker
+    _SHADOW_MIN_COUNT   = 6     # >= this many shadow signatures = "text here"
+
     def _f3_panel_visible(self, frame: np.ndarray) -> bool:
+        """
+        Return True if the captured frame appears to contain F3 text
+        anywhere in the top region — left OR right column. Uses the
+        drop-shadow signature so it works in any background condition
+        (dark panel, bright sky, snow biome, deep cave).
+        """
         h, w = frame.shape[:2]
         if h < 30 or w < 100:
             return False
+        # Sample a top strip wide enough to cover BOTH columns.
+        # Using the same 60-px height as before keeps the cost low.
         sample = frame[2:min(self._PANEL_SAMPLE_H, h),
-                       2:min(self._PANEL_SAMPLE_W, w)]
+                        2:w - 2]
         if sample.ndim == 3:
-            gray = cv2.cvtColor(sample, cv2.COLOR_RGB2GRAY)
+            gray = cv2.cvtColor(sample, cv2.COLOR_RGB2GRAY).astype(np.int16)
         else:
-            gray = sample
-        return bool(
-            gray.mean() < self._PANEL_MEAN_MAX
-            and gray.std()  > self._PANEL_STD_MIN
-        )
+            gray = sample.astype(np.int16)
+        bright_here  = gray >= self._SHADOW_BRIGHT_MIN
+        drop_to_br   = np.zeros_like(gray, dtype=bool)
+        drop_to_br[:-1, :-1] = (gray[:-1, :-1] - gray[1:, 1:]) >= self._SHADOW_DROP_MIN
+        return int((bright_here & drop_to_br).sum()) >= self._SHADOW_MIN_COUNT
 
     def _crop_lines(self, frame: np.ndarray) -> List[np.ndarray]:
+        """
+        Return one crop per visible F3 line. Modern MC renders two
+        columns of debug text — we crop and return crops from both
+        the LEFT and RIGHT slabs (interleaved by line index) so a
+        single ``read()`` recovers fields from either side.
+
+        The downstream :func:`_parse_lines` function walks all
+        returned lines and accumulates fields wherever they appear,
+        so the LEFT/RIGHT ordering does not matter.
+        """
         cfg = self.cfg
         fh, fw = frame.shape[:2]
-        lh = cfg.line_height_px
-        lg = cfg.line_gap_px
-        m  = cfg.line_margin_px
+        crop_h = cfg.line_height_px + 2 * cfg.line_margin_px
+        step   = max(1, cfg.line_step_px)
 
         crops: List[np.ndarray] = []
-        for i in range(cfg.max_lines):
-            y0 = cfg.text_start_y + i * (lh + lg) - m
-            y1 = y0 + lh + 2 * m
-            x0 = cfg.text_start_x
-            x1 = x0 + cfg.line_width_px
+        # Right-column slab x-range (computed once).
+        right_x1 = fw - cfg.right_column_margin_px
+        right_x0 = max(0, right_x1 - cfg.right_column_width_px)
 
+        for i in range(cfg.max_lines):
+            y0 = cfg.text_start_y + i * step - cfg.line_margin_px
+            y1 = y0 + crop_h
             y0 = max(0, y0); y1 = min(fh, y1)
-            x0 = max(0, x0); x1 = min(fw, x1)
-            if y1 <= y0 or x1 <= x0:
+            if y1 <= y0 or (y1 - y0) < cfg.line_height_px // 2:
                 break
-            crops.append(frame[y0:y1, x0:x1])
+
+            # LEFT column.
+            lx0 = cfg.text_start_x
+            lx1 = min(fw, lx0 + cfg.line_width_px)
+            if lx1 > lx0:
+                crops.append(frame[y0:y1, lx0:lx1])
+
+            # RIGHT column (only when enabled and there is room).
+            if cfg.enable_right_column and right_x1 > right_x0:
+                if right_x0 >= lx1:
+                    crops.append(frame[y0:y1, right_x0:right_x1])
+
         return crops
 
     # ------------------------------------------------------------------
@@ -490,11 +662,12 @@ def build_f3_reader(settings: Dict[str, Any],
 
     cfg = OCRConfig(
         ui_scale       = ui_scale,
-        line_height_px = 8 * ui_scale,
+        line_height_px = 8 * ui_scale,         # 16 at scale 2 (one glyph row)
         line_gap_px    = max(1, ui_scale),
         text_start_y   = max(1, ui_scale),
         text_start_x   = max(1, ui_scale),
         line_margin_px = 1,
+        line_step_px   = 9 * ui_scale,         # 18 at scale 2 = MC F3 stride
     )
     if "text_threshold" in ocr_cfg:
         cfg.text_threshold = int(ocr_cfg["text_threshold"])
@@ -504,6 +677,14 @@ def build_f3_reader(settings: Dict[str, Any],
         cfg.max_lines = int(ocr_cfg["max_lines"])
     if "line_width_px" in ocr_cfg:
         cfg.line_width_px = int(ocr_cfg["line_width_px"])
+    if "line_step_px" in ocr_cfg:
+        cfg.line_step_px = int(ocr_cfg["line_step_px"])
+    if "enable_right_column" in ocr_cfg:
+        cfg.enable_right_column = bool(ocr_cfg["enable_right_column"])
+    if "right_column_width_px" in ocr_cfg:
+        cfg.right_column_width_px = int(ocr_cfg["right_column_width_px"])
+    if "right_column_margin_px" in ocr_cfg:
+        cfg.right_column_margin_px = int(ocr_cfg["right_column_margin_px"])
     if "enable_tesseract_fallback" in ocr_cfg:
         cfg.enable_tesseract_fallback = bool(ocr_cfg["enable_tesseract_fallback"])
 

@@ -53,6 +53,25 @@ class GlyphOCRConfig:
     y_drift_px: int = 1           # search ± this many GUI px vertically
     line_glyph_h_gui_px: int = 8  # MC default font cell height (GUI px)
 
+    # ── Background-robust binarisation (only kicks in on noisy crops) ──
+    # We discriminate by the MEDIAN brightness of the line crop. Text
+    # pixels are < 10 % of any crop, so the median is dominated by
+    # the BACKGROUND. A dark-panel F3 sits at median ≈ 20; a dark-
+    # forest background at median ≈ 60–80; a daytime / leafy / snow
+    # background at median ≥ 120. We use the shadow-gated path only
+    # for the bright-background case, where the simple bright-
+    # threshold binary would let too much foliage / sky through.
+    #
+    # Why not ink-density: a line that's mostly text characters can
+    # have a high ink density even on a dark background, which would
+    # mis-route XYZ-style lines through shadow gating and break the
+    # thin diagonal glyphs (``/``) those rely on.
+    background_robust:           bool  = True
+    bright_background_median:    int   = 110
+    shadow_drop_min_grey: int = 90
+    shadow_bright_min:    int = 200
+    shadow_region_gui_px: int = 8
+
 
 # ---------------------------------------------------------------------------
 # Main class
@@ -145,11 +164,69 @@ class GlyphOCR:
     # ------------------------------------------------------------------
 
     def _binarize(self, line_img: np.ndarray) -> np.ndarray:
+        """
+        Binarise a line crop to {0, 1} glyph ink. Two-path:
+
+          1. Simple bright-threshold (cheap; what we want on dark
+             backgrounds where text is uniquely bright).
+          2. Shadow-gated: keep only bright pixels with a dark pixel
+             one row down + one column right (MC's text drop-shadow
+             signature). Used when the simple path lights up too many
+             pixels — a sign of bright/noisy background contaminating
+             the binary.
+
+        Real-world impact: night-time + dark forest crops stay on the
+        fast path; daytime sky / leaves / snow crops automatically
+        switch to shadow gating so background noise is filtered out
+        without breaking the existing pipeline.
+        """
         if line_img.ndim == 3:
             gray = cv2.cvtColor(line_img, cv2.COLOR_RGB2GRAY)
         else:
             gray = line_img
-        return (gray >= self.cfg.text_threshold).astype(np.uint8)
+        bright = (gray >= self.cfg.text_threshold)
+        if not self.cfg.background_robust:
+            return bright.astype(np.uint8)
+        # Background median picks the binariser: dark backgrounds
+        # (panel, dark forest) use the simple path; bright backgrounds
+        # (sky, leaves, snow) trigger shadow gating.
+        median_bg = (int(np.median(gray)) if gray.size else 0)
+        if median_bg < self.cfg.bright_background_median:
+            return bright.astype(np.uint8)
+        return self._shadow_binarize(gray, bright)
+
+    def _shadow_binarize(self,
+                          gray: np.ndarray,
+                          bright_mask: np.ndarray,
+                          ) -> np.ndarray:
+        """
+        Shadow-gated binarisation. Drop-shadow signature is a structural
+        invariant of MC's text renderer; using it as a *region detector*
+        (then keeping the original bright pattern inside those regions)
+        preserves glyph shape so the existing templates still match.
+        """
+        cfg = self.cfg
+        gi = gray.astype(np.int16)
+        is_bright_here = (gi >= cfg.shadow_bright_min)
+        is_dark_drop = np.zeros_like(gi, dtype=bool)
+        is_dark_drop[:-1, :-1] = (
+            (gi[:-1, :-1] - gi[1:, 1:]) >= cfg.shadow_drop_min_grey
+        )
+        has_shadow = is_bright_here & is_dark_drop
+        if not has_shadow.any():
+            # No text-like signature found; nothing to keep.
+            return np.zeros_like(bright_mask, dtype=np.uint8)
+
+        # Generously expand each shadow pixel UP+LEFT to cover one
+        # glyph's worth of neighbourhood (the glyph BODY lies above-
+        # left of its bottom-right shadow). Anchor at bottom-right.
+        scale = max(1, int(cfg.ui_scale))
+        k = max(1, cfg.shadow_region_gui_px * scale)
+        kernel = np.ones((k + 1, k + 1), dtype=np.uint8)
+        anchor = (k, k)
+        text_region = cv2.dilate(has_shadow.astype(np.uint8), kernel,
+                                  anchor=anchor, iterations=1).astype(bool)
+        return (bright_mask & text_region).astype(np.uint8)
 
     def _find_y_top(self, binary: np.ndarray) -> Optional[int]:
         """Pick the y-row where the densest band of glyph pixels begins."""
