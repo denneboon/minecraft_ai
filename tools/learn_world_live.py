@@ -150,12 +150,16 @@ def main() -> int:
             truth = wf.looking_at.block_id
             discovered.add(truth)
             h, w = frame.shape[:2]
-            # Crop EXACTLY like the auto-sampler trains on: sample_capture_px
-            # (NOT patch_size_px) + crosshair inpaint, or the patch is at a
-            # different scale than the model ever saw. The crosshair is at
-            # screen centre.
-            patch = wp._crop_patch(frame, w // 2, h // 2,
-                                   wp.cfg.sample_capture_px)
+            # Crop EXACTLY like the auto-sampler trains on: distance-
+            # normalised size at the target's distance + crosshair inpaint.
+            lp = wf.looking_at.pos
+            dist = (((lp[0] + 0.5 - wf.pose.x) ** 2
+                     + (lp[1] + 0.5 - wf.pose.eye_y) ** 2
+                     + (lp[2] + 0.5 - wf.pose.z) ** 2) ** 0.5)
+            sr = getattr(wp, "_screen_ray", None)
+            intr = sr.intrinsics if sr is not None else None
+            cap_px = wp._apparent_crop_px(intr, dist)
+            patch = wp._crop_patch(frame, w // 2, h // 2, cap_px)
             if patch is not None and wp.cfg.mask_crosshair_in_samples:
                 try:
                     patch = wp._mask_crosshair(patch)

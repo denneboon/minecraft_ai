@@ -118,6 +118,14 @@ class WorldSampleStoreConfig:
     # cheap.
     max_samples_per_block: int = 80
 
+    # When the cap is hit, evict the OLDEST sample to make room for the
+    # new one (sliding window) instead of refusing the new capture. This
+    # lets the store keep refreshing itself as the player/agent sees
+    # blocks under newer / better conditions — and lets a capture-scheme
+    # change (e.g. switching to distance-normalised crops) gradually
+    # replace stale samples instead of being frozen out at the cap.
+    evict_oldest_when_full: bool = True
+
 
 class WorldSampleStore:
     """
@@ -135,8 +143,43 @@ class WorldSampleStore:
         self.cfg = config or WorldSampleStoreConfig()
         self._lock = threading.Lock()
         self.root.mkdir(parents=True, exist_ok=True)
+        # In-memory per-block PNG counts (short_id -> n). Lazily built
+        # from disk on first save so the per-block cap check and the
+        # manifest don't re-glob the whole tree on every single sample —
+        # that cost is O(blocks × files) and grows with the dataset this
+        # feature is meant to accumulate. The manifest file is rewritten
+        # on a throttle (it's only an external-inspection artifact;
+        # ``manifest()`` reads the live cache).
+        self._counts: Optional[Dict[str, int]] = None
+        self._saves_since_manifest = 0
+        self._manifest_every = 10
 
     # ── Mutators ──────────────────────────────────────────────────
+
+    def _evict_oldest_locked(self, block_dir: Path, short: str,
+                             counts: Dict[str, int], *, keep: int) -> bool:
+        """Delete oldest PNGs (and their .json sidecars) for ``short`` until
+        at most ``keep`` remain. Caller holds ``self._lock``. Returns True
+        if there's now room (count <= keep). Best-effort: a failed unlink
+        just leaves that file and tries the next."""
+        try:
+            pngs = sorted(block_dir.glob("*.png"),
+                          key=lambda p: p.stat().st_mtime)
+        except Exception:
+            return False
+        removed = 0
+        for p in pngs:
+            if len(pngs) - removed <= keep:
+                break
+            try:
+                p.with_suffix(".json").unlink(missing_ok=True)
+                p.unlink()
+                removed += 1
+            except Exception:
+                continue
+        if removed:
+            counts[short] = max(0, counts.get(short, removed) - removed)
+        return counts.get(short, 0) <= keep
 
     def save(self,
              block_id: str,
@@ -162,16 +205,31 @@ class WorldSampleStore:
         block_dir = self.root / short
         with self._lock:
             block_dir.mkdir(parents=True, exist_ok=True)
-            # Just count — we don't need a sorted list, only the size.
-            n = sum(1 for _ in block_dir.glob("*.png"))
+            counts = self._ensure_counts_locked()
+            n = counts.get(short, 0)
             if n >= self.cfg.max_samples_per_block:
-                return None
+                if not self.cfg.evict_oldest_when_full:
+                    return None
+                # Sliding window: drop the oldest sample(s) to make room.
+                if not self._evict_oldest_locked(block_dir, short, counts,
+                                                 keep=self.cfg.max_samples_per_block - 1):
+                    return None
             h = _hash_pixels(norm)
             path = block_dir / f"{h}.png"
             if path.is_file():
                 return None
             bgr = cv2.cvtColor(norm, cv2.COLOR_RGB2BGR)
-            cv2.imwrite(str(path), bgr)
+            ok = cv2.imwrite(str(path), bgr)
+            if not ok:
+                # cv2.imwrite returns False on encoder error, disk full,
+                # invalid extension, etc. Without surfacing this we'd
+                # silently lose every sample of the affected block id.
+                if not getattr(self, "_imwrite_warn_emitted", False):
+                    self._imwrite_warn_emitted = True
+                    print(f"[sample_store][WARN] cv2.imwrite returned False "
+                          f"for {path} — sample lost. (further occurrences "
+                          f"will stay silent)")
+                return None
             if metadata:
                 meta_path = path.with_suffix(".json")
                 try:
@@ -179,25 +237,53 @@ class WorldSampleStore:
                         json.dumps(metadata, sort_keys=True, default=str),
                         encoding="utf-8",
                     )
-                except Exception:
-                    pass
-            self._write_manifest_unlocked()
+                except Exception as e:
+                    # Metadata is best-effort — the PNG label is the
+                    # primary signal — but a permission / encoding
+                    # error here means EVERY future sidecar will also
+                    # fail. Surface the first occurrence so we can
+                    # diagnose; stay silent after that.
+                    if not getattr(self, "_meta_warn_emitted", False):
+                        self._meta_warn_emitted = True
+                        print(f"[sample_store][WARN] metadata sidecar "
+                              f"write failed for {meta_path.name}: {e!r}")
+            counts[short] = n + 1
+            self._saves_since_manifest += 1
+            if self._saves_since_manifest >= self._manifest_every:
+                self._saves_since_manifest = 0
+                self._write_manifest_unlocked()
             return path
 
     # ── Readers ───────────────────────────────────────────────────
 
-    def load_all(self) -> List[StoredWorldSample]:
-        """Load every sample on disk into memory."""
+    def load_all(self, skip_paths: Optional[set] = None
+                 ) -> List[StoredWorldSample]:
+        """Load samples on disk into memory. Corrupt PNGs are
+        skipped, but a non-zero corruption count is surfaced once per
+        load — a partial dataset silently shrinking past a power-loss
+        event would otherwise stay invisible until the gate's per-block
+        floor stopped firing.
+
+        ``skip_paths`` (optional) is a set of ``Path`` already held in
+        memory by the caller; those files are not re-read. This lets the
+        sample recogniser reload INCREMENTALLY (read only newly-saved
+        patches) instead of re-decoding the entire — and ever-growing —
+        dataset from disk on every reload.
+        """
         out: List[StoredWorldSample] = []
         if not self.root.is_dir():
             return out
+        n_corrupt = 0
         for block_dir in sorted(self.root.iterdir()):
             if not block_dir.is_dir():
                 continue
             block_id = f"minecraft:{block_dir.name}"
             for p in sorted(block_dir.glob("*.png")):
+                if skip_paths is not None and p in skip_paths:
+                    continue
                 bgr = cv2.imread(str(p), cv2.IMREAD_COLOR)
                 if bgr is None:
+                    n_corrupt += 1
                     continue
                 rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
                 if rgb.shape[:2] != (SAMPLE_SIZE, SAMPLE_SIZE):
@@ -205,10 +291,17 @@ class WorldSampleStore:
                                      interpolation=cv2.INTER_AREA)
                 out.append(StoredWorldSample(block_id=block_id, path=p,
                                              rgb=rgb.astype(np.uint8)))
+        if n_corrupt:
+            print(f"[sample_store][WARN] skipped {n_corrupt} corrupt PNG(s) "
+                  f"under {self.root}. Loaded {len(out)} valid samples.")
         return out
 
     def manifest(self) -> Dict[str, int]:
-        """Return ``{block_id: sample_count}`` based on what's on disk."""
+        """Return ``{block_id: sample_count}``. Uses the in-memory count
+        cache once it's been built (single-process authoritative); falls
+        back to a disk scan before the first save."""
+        if self._counts is not None:
+            return {f"minecraft:{k}": v for k, v in self._counts.items() if v}
         out: Dict[str, int] = {}
         if not self.root.is_dir():
             return out
@@ -227,16 +320,24 @@ class WorldSampleStore:
 
     # ── Internal ──────────────────────────────────────────────────
 
+    def _ensure_counts_locked(self) -> Dict[str, int]:
+        """Lazily build the per-block PNG-count cache from disk (once).
+        Caller must hold ``self._lock``."""
+        if self._counts is None:
+            counts: Dict[str, int] = {}
+            if self.root.is_dir():
+                for block_dir in self.root.iterdir():
+                    if block_dir.is_dir():
+                        counts[block_dir.name] = sum(
+                            1 for _ in block_dir.glob("*.png"))
+            self._counts = counts
+        return self._counts
+
     def _write_manifest_unlocked(self) -> None:
-        """Refresh ``_manifest.json``. Caller must hold ``self._lock``."""
+        """Refresh ``_manifest.json`` from the in-memory count cache (no
+        disk re-glob). Caller must hold ``self._lock``."""
         manifest_path = self.root / "_manifest.json"
-        m: Dict[str, int] = {}
-        for block_dir in self.root.iterdir():
-            if not block_dir.is_dir():
-                continue
-            n = sum(1 for _ in block_dir.glob("*.png"))
-            if n:
-                m[f"minecraft:{block_dir.name}"] = n
+        m = {f"minecraft:{k}": v for k, v in (self._counts or {}).items() if v}
         manifest_path.write_text(json.dumps(m, indent=2, sort_keys=True),
                                  encoding="utf-8")
 

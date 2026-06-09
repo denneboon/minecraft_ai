@@ -112,7 +112,24 @@ class WorldPerceptionConfig:
 
     # Each patch is this many pixels (square) sampled from the frame.
     # Smaller → faster + noisier; larger → slower + more representative.
+    # Only used as a fallback when distance_normalized_crops is off or no
+    # depth is known.
     patch_size_px: int = 16
+
+    # ── Distance-normalised cropping ──────────────────────────────
+    # A block's apparent on-screen size shrinks with distance: a 1-block
+    # face at distance D spans ~fx/D pixels. A FIXED-size crop therefore
+    # captures a whole near block but a multi-block jumble of a far one,
+    # so the recogniser (trained on ~one-block-face patches) fails at
+    # range. When enabled, both the auto-sampler and the patch sweep size
+    # their crop to the block's apparent size at its measured distance, so
+    # every patch frames ~``crop_block_span`` block-widths regardless of
+    # distance — then resize to SAMPLE_SIZE. This is the single biggest
+    # lever on in-world recognition accuracy (live-test finding).
+    distance_normalized_crops: bool = True
+    crop_block_span: float = 1.0      # block-widths to frame per patch
+    crop_px_min: int = 24             # floor (crosshair-mask + resolution)
+    crop_px_max: int = 140            # ceiling (near blocks fill the crop)
 
     # How far along the ray (in blocks) to project each patch before
     # giving up. Default matches MC's survival reach + a little for
@@ -1453,9 +1470,13 @@ class WorldPerception:
         if self._tick - last < self.cfg.sample_cooldown_ticks:
             return
         intr = sr.intrinsics
+        # Size the crop to the block's apparent size at its distance so the
+        # stored sample frames ~one block face — matching the sweep's
+        # distance-normalised crops, so prototypes and queries share scale.
+        dist = (metadata or {}).get("distance_blocks")
+        cap_px = self._apparent_crop_px(intr, dist)
         patch = self._crop_patch(frame_rgb,
-                                 int(intr.cx), int(intr.cy),
-                                 self.cfg.sample_capture_px)
+                                 int(intr.cx), int(intr.cy), cap_px)
         if patch is None:
             return
         # Remove the crosshair before persisting — see the long
@@ -1537,6 +1558,10 @@ class WorldPerception:
         depth = (anchor_depth if anchor_depth is not None
                  else self.cfg.default_anchor_depth)
         depth = max(1.0, min(depth, self.cfg.max_walk_distance))
+        # Distance-normalised crop size for this sweep (all patches share
+        # the anchor depth) — frames ~one block face, matching the scale
+        # the recogniser's samples were captured at.
+        sweep_cap_px = self._apparent_crop_px(sr.intrinsics, depth)
 
         n_cols, n_rows = self.cfg.patch_grid_size
         if n_cols < 1 or n_rows < 1:
@@ -1598,13 +1623,11 @@ class WorldPerception:
                 # hotbar, hand, future inventory overlays.
                 if _point_in_any_rect(px, py, excludes):
                     continue
-                # Crop at sample_capture_px — the SAME screen-area size the
-                # recogniser was trained on. (Using the smaller
-                # patch_size_px here fed the classifier sub-block fragments
-                # at a different scale than its training crops — a 3×
-                # train/inference scale mismatch that wrecked accuracy.)
-                patch = self._crop_patch(frame_rgb, px, py,
-                                         self.cfg.sample_capture_px)
+                # Crop at the distance-normalised size (frames ~one block
+                # face at the anchor depth), matching the scale the
+                # recogniser's samples were captured at. (A fixed size here
+                # mismatched the model's training scale and wrecked accuracy.)
+                patch = self._crop_patch(frame_rgb, px, py, sweep_cap_px)
                 if patch is None:
                     continue
                 # Skip obvious sky / void patches without paying to classify.
@@ -1693,6 +1716,22 @@ class WorldPerception:
         if x1 - x0 < 4 or y1 - y0 < 4:
             return None
         return frame[y0:y1, x0:x1]
+
+    def _apparent_crop_px(self, intr, distance: Optional[float]) -> int:
+        """Pixel size of a crop framing ~``crop_block_span`` block-widths
+        at ``distance`` blocks, given the camera focal length. A 1-block
+        face at distance D spans ~fx/D px (pinhole). Clamped to
+        [crop_px_min, crop_px_max]. Falls back to ``sample_capture_px``
+        when distance-normalisation is off or distance is unknown."""
+        if (not self.cfg.distance_normalized_crops or distance is None
+                or not math.isfinite(distance) or distance <= 0.0
+                or intr is None):
+            return self.cfg.sample_capture_px
+        fx = float(getattr(intr, "fx", 0.0) or 0.0)
+        if fx <= 0.0:
+            return self.cfg.sample_capture_px
+        px = fx * self.cfg.crop_block_span / max(1.0, float(distance))
+        return int(max(self.cfg.crop_px_min, min(self.cfg.crop_px_max, round(px))))
 
     def _mask_crosshair(self, patch_rgb: np.ndarray) -> np.ndarray:
         """
