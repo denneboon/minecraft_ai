@@ -837,6 +837,20 @@ def main(argv=None) -> int:
                     help="How long each right-click is held during the "
                          "bridge. Short (12 ms) so discrete clicks fire "
                          "rapidly instead of one slow 50 ms press.")
+    ap.add_argument("--move-pulse-ms", type=int, default=0,
+                    help="No-sneak bridge ONLY. 0 = hold S+strafe "
+                         "continuously (fast, but the player outruns the "
+                         "placement and walks off the bridge's leading "
+                         "edge after ~10 blocks over a void). >0 = STEPPED "
+                         "movement: each cycle places a block then pulses "
+                         "S+strafe for this many ms (~90 ≈ a third of a "
+                         "block) so the player advances in small steps the "
+                         "placement always stays ahead of — a reliable "
+                         "no-sneak bridge. Ignored when --keep-sneak.")
+    ap.add_argument("--move-gap-ms", type=int, default=40,
+                    help="Stepped mode (--move-pulse-ms>0): pause after "
+                         "each movement pulse to let the block place and "
+                         "the player settle before the next step.")
     ap.add_argument("--strafe", type=str, default="left",
                     choices=("left", "right"),
                     help="Which back-strafe direction to hold. left=S+A "
@@ -997,6 +1011,15 @@ def main(argv=None) -> int:
 
     # ── Recorder loop ────────────────────────────────────────────────
     stop_evt = threading.Event()
+    # When set, the recorder SKIPS its F3 OCR. The glyph scan is Python-
+    # level and holds the GIL ~150 ms out of every ~250 ms recorder
+    # cycle (measured), which starves the tight bridge click loop and
+    # drops placements. Over flat ground a dropped placement just steps
+    # the player down to the floor (cosmetic), but over a VOID a single
+    # missed placement = a fall. So we pause the recorder's OCR for the
+    # duration of the bridge click loop. Frame capture for replay
+    # continues; the drift check uses the cached pose from just before.
+    bridge_active = threading.Event()
     full_w = full_h = out_w = out_h = 0
     last_yaw = last_pitch = None
     last_xyz: Optional[Tuple[float, float, float]] = None
@@ -1023,7 +1046,8 @@ def main(argv=None) -> int:
                     out_h = max(1, int(round(full_h * args.downscale)))
                 else:
                     out_w, out_h = full_w, full_h
-            if (t0 - last_f3_ts) >= F3_OCR_INTERVAL_SEC:
+            if (not bridge_active.is_set()
+                    and (t0 - last_f3_ts) >= F3_OCR_INTERVAL_SEC):
                 try:
                     _rl = getattr(f3_reader, "_read_lock", None)
                     if _rl is not None:
@@ -1322,11 +1346,18 @@ def main(argv=None) -> int:
         # the player moves straight (building a wrong / double-wide path)
         # before the diagonal starts. press_together emits both key-downs
         # back-to-back with no gap.
-        keyboard.press_together(back_key, strafe_key)
+        # Stepped mode pulses the keys each cycle, so don't latch them on
+        # here. Continuous mode holds S+strafe for the whole loop.
+        stepped = (args.move_pulse_ms > 0) and not args.keep_sneak
+        if not stepped:
+            keyboard.press_together(back_key, strafe_key)
+        bridge_active.set()   # free the click loop from recorder-OCR GIL stalls
 
         # 8. Click in rhythm; periodic yaw drift correction; optional jump.
         deadline = time.perf_counter() + float(args.max_seconds)
         cooldown = max(0.0, args.place_cooldown_ms / 1000.0)
+        move_pulse = max(0.0, args.move_pulse_ms / 1000.0)
+        move_gap = max(0.0, args.move_gap_ms / 1000.0)
         jump_interval = (args.jump_every_ms / 1000.0
                          if args.jump_every_ms > 0 else None)
         last_jump_ts = time.perf_counter()
@@ -1357,7 +1388,19 @@ def main(argv=None) -> int:
                 last_jump_ts = time.perf_counter()
             mouse.right_click(duration=max(0.001, args.click_hold_ms / 1000.0))
             fired += 1
-            if cooldown > 0:
+            if stepped:
+                # Place-then-step: the block just placed is behind/under
+                # the next position; pulse S+strafe a fraction of a block
+                # onto it, then release and let it settle. The player
+                # never gets ahead of the placement, so they can't walk
+                # off the leading edge over a void.
+                keyboard.press_together(back_key, strafe_key)
+                time.sleep(move_pulse)
+                keyboard.release(strafe_key)
+                keyboard.release(back_key)
+                if move_gap > 0:
+                    time.sleep(move_gap)
+            elif cooldown > 0:
                 time.sleep(cooldown)
             # Periodic yaw drift check — and report off-axis xz drift.
             # CRITICAL: read the recorder thread's CACHED pose (a free
@@ -1402,6 +1445,7 @@ def main(argv=None) -> int:
                     dz = cur_xyz[2] - first_bridge_xyz[2]
                     off_axis = abs(dx * px_ + dz * pz_)
                     max_off_axis_blocks = max(max_off_axis_blocks, off_axis)
+        bridge_active.clear()   # resume recorder pose logging
         pose_log["places_fired"] = fired
         pose_log["yaw_corrections"] = yaw_corrections
         pose_log["max_off_axis_drift_blocks"] = round(max_off_axis_blocks, 3)
@@ -1426,6 +1470,7 @@ def main(argv=None) -> int:
     except StopIteration:
         pass  # graceful abort path used by the F3 unreadable case
     finally:
+        bridge_active.clear()   # ensure recorder OCR resumes on any exit
         try:
             for k in ("w", "a", "s", "d", "control", "ctrl", "shift", "space"):
                 try: keyboard.release(k)
