@@ -165,10 +165,15 @@ def _augment(rgb: np.ndarray, rng: np.random.Generator) -> np.ndarray:
     img = rgb.astype(np.float32)
     h, w = img.shape[:2]
 
-    # Geometric: small rotation + scale about centre, reflect border.
-    if rng.random() < 0.8:
-        ang = float(rng.uniform(-12.0, 12.0))
-        scl = float(rng.uniform(0.85, 1.18))
+    # Geometric: rotation + WIDE scale about centre, reflect border. The
+    # wide scale range (0.6-1.6) is deliberate: the recogniser meets each
+    # block at very different distances in-world (a 48px crop spans most
+    # of a near block but only a fragment of a far one), so training must
+    # span that zoom range or it overfits the collection distance and
+    # fails on the live sweep.
+    if rng.random() < 0.85:
+        ang = float(rng.uniform(-15.0, 15.0))
+        scl = float(rng.uniform(0.6, 1.6))
         M = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), ang, scl)
         img = cv2.warpAffine(img, M, (w, h), borderMode=cv2.BORDER_REFLECT_101)
     if rng.random() < 0.5:
@@ -420,8 +425,9 @@ class CNNBlockRecognizer:
             with self._lock:
                 self._emb = None
                 self._emb_ids = []
-                # No real samples yet → cold-start on texture prototypes.
-                self._proto = dict(self._texture_proto)
+                # No real samples → no classifiable prototypes (texture
+                # prototypes don't transfer; we abstain & fall back).
+                self._proto = {}
             return
         with self._lock:
             samples = list(self._samples)
@@ -438,8 +444,9 @@ class CNNBlockRecognizer:
         with self._lock:
             self._emb = emb
             self._emb_ids = ids
-            # Real-sample prototypes override texture cold-start ones.
-            self._proto = {**self._texture_proto, **real}
+            # Classify against REAL-sample prototypes only (texture
+            # prototypes don't transfer to real renders).
+            self._proto = dict(real)
 
     def _embed_into_index(self, new: List[StoredWorldSample]) -> None:
         """Append new sample embeddings and refresh affected prototypes —
@@ -663,7 +670,14 @@ class CNNBlockRecognizer:
             tp = ckpt.get("texture_proto") or {}
             self._texture_proto = {k: np.asarray(v, dtype=np.float32)
                                    for k, v in tp.items()}
-            self._proto = dict(self._texture_proto)
+            # NB: texture prototypes are NOT classified against — they
+            # measured 0% transfer to real renders and only produced
+            # confident-WRONG guesses (grass_block→acacia_leaves@1.0). They
+            # survive purely as the "not yet fine-tuned on real data"
+            # trigger signal; the loaded embedding is the real payoff
+            # (warm-start). _proto stays empty until real training fills it,
+            # so a texture-only model abstains and perception falls back.
+            self._proto = {}
         except Exception as e:
             self._epoch_note = f"load-error: {e!r}"
             self._model = None

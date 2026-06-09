@@ -1598,8 +1598,13 @@ class WorldPerception:
                 # hotbar, hand, future inventory overlays.
                 if _point_in_any_rect(px, py, excludes):
                     continue
+                # Crop at sample_capture_px — the SAME screen-area size the
+                # recogniser was trained on. (Using the smaller
+                # patch_size_px here fed the classifier sub-block fragments
+                # at a different scale than its training crops — a 3×
+                # train/inference scale mismatch that wrecked accuracy.)
                 patch = self._crop_patch(frame_rgb, px, py,
-                                         self.cfg.patch_size_px)
+                                         self.cfg.sample_capture_px)
                 if patch is None:
                     continue
                 # Skip obvious sky / void patches without paying to classify.
