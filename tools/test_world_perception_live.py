@@ -44,6 +44,9 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+from utils.console import ensure_utf8_stdout
+ensure_utf8_stdout()   # F3 raw dumps carry non-cp1252 glyphs on Windows
+
 
 OUT_DIR = os.path.join(ROOT, "data", "calibration")
 os.makedirs(OUT_DIR, exist_ok=True)

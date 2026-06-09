@@ -559,7 +559,12 @@ class WorldPerception:
                 raw = (f3.raw_text or "").replace("\n", " | ")
                 if len(raw) > 1600:
                     raw = raw[:1597] + "..."
-                print(f"[F3]   raw: {raw!r}")
+                # ascii(): garbled OCR text routinely contains box-drawing
+                # / symbol glyphs (─, ∙, …) that a cp1252 Windows console
+                # can't encode — a bare print(raw!r) raises UnicodeEncodeError
+                # and would crash the whole perception tick. ascii() escapes
+                # non-ASCII to \uXXXX so the diagnostic is always printable.
+                print(f"[F3]   raw: {ascii(raw)}")
 
         pose = self._pose_from_f3(f3)
         if pose is None:
