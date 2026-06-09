@@ -230,7 +230,12 @@ class CNNBlockRecognizer:
         self.cfg = config or CNNBlockRecognizerConfig()
         self._lock = threading.RLock()
         self._model = None                       # _SmallBlockCNN | None
-        self._proto: Dict[str, np.ndarray] = {}  # block_id -> mean embedding
+        self._proto: Dict[str, np.ndarray] = {}  # block_id -> ACTIVE prototype
+        # Cold-start prototypes computed from GAME TEXTURES at pre-train
+        # time (covers blocks with zero real samples). Real-sample
+        # prototypes override these per-block; they're dropped once online
+        # fine-tuning shifts the embedding and makes them stale.
+        self._texture_proto: Dict[str, np.ndarray] = {}
         self._emb: Optional[np.ndarray] = None   # (N, D) per-sample embeddings
         self._emb_ids: List[str] = []
         self._samples: List[StoredWorldSample] = []
@@ -379,7 +384,8 @@ class CNNBlockRecognizer:
             with self._lock:
                 self._emb = None
                 self._emb_ids = []
-                self._proto = {}
+                # No real samples yet → cold-start on texture prototypes.
+                self._proto = dict(self._texture_proto)
             return
         with self._lock:
             samples = list(self._samples)
@@ -387,16 +393,17 @@ class CNNBlockRecognizer:
         if emb is None:
             return
         ids = [s.block_id for s in samples]
-        proto: Dict[str, np.ndarray] = {}
+        real: Dict[str, np.ndarray] = {}
         for bid in set(ids):
             mask = np.array([i == bid for i in ids])
             m = emb[mask].mean(axis=0)
             n = np.linalg.norm(m)
-            proto[bid] = (m / n).astype(np.float32) if n > 1e-6 else m.astype(np.float32)
+            real[bid] = (m / n).astype(np.float32) if n > 1e-6 else m.astype(np.float32)
         with self._lock:
             self._emb = emb
             self._emb_ids = ids
-            self._proto = proto
+            # Real-sample prototypes override texture cold-start ones.
+            self._proto = {**self._texture_proto, **real}
 
     def _embed_into_index(self, new: List[StoredWorldSample]) -> None:
         """Append new sample embeddings and refresh affected prototypes —
@@ -429,8 +436,13 @@ class CNNBlockRecognizer:
         classes = self._trainable_classes()
         if len(classes) < self.cfg.min_blocks_to_train:
             return
-        # Train if we've never trained, or enough new samples accumulated.
+        # Train if: never trained; or the model is still TEXTURE-only
+        # (texture_proto non-empty = not yet fine-tuned on this player's
+        # real captures, so adapt it now that real data exists — real
+        # training drops the texture prototypes, so this fires once); or
+        # enough new samples have accumulated since the last retrain.
         need = (not self._trained
+                or len(self._texture_proto) > 0
                 or self._saves_since_retrain >= self.cfg.retrain_every_n)
         if not need:
             return
@@ -462,7 +474,25 @@ class CNNBlockRecognizer:
         finally:
             self._training = False
 
-    def _train_blocking(self) -> None:
+    def pretrain_textures(self, texture_samples: List[StoredWorldSample]) -> bool:
+        """Pre-train the embedding on synthetic patches generated from GAME
+        TEXTURES and promote the resulting per-block prototypes to the
+        texture cold-start set, so a fresh world can name 1000+ blocks
+        before any real F3 sample is collected. Real samples later
+        override per-block; online fine-tuning warm-starts from this
+        embedding. Used by tools/pretrain_block_cnn.py."""
+        if not _TORCH_OK or len(texture_samples) < 8:
+            return False
+        with self._lock:
+            self._samples = list(texture_samples)
+        self._training = True
+        try:
+            self._train_blocking(is_pretrain=True)
+            return self._trained
+        finally:
+            self._training = False
+
+    def _train_blocking(self, *, is_pretrain: bool = False) -> None:
         cfg = self.cfg
         with self._lock:
             samples = list(self._samples)
@@ -496,6 +526,16 @@ class CNNBlockRecognizer:
             cfg_bs = cfg.batch_size
 
         model = _SmallBlockCNN(cfg.embed_dim)
+        # WARM-START from the current embedding (texture pre-training or a
+        # previous online retrain) so general block knowledge composes
+        # with the new real-capture data instead of being thrown away.
+        with self._lock:
+            prev = self._model
+        if prev is not None:
+            try:
+                model.load_state_dict(prev.state_dict())
+            except Exception:
+                pass            # arch mismatch → fresh init, harmless
         # A throwaway classification head trains the embedding via
         # cross-entropy; we keep only the embedding afterwards.
         head = nn.Linear(cfg.embed_dim, len(classes))
@@ -531,9 +571,22 @@ class CNNBlockRecognizer:
         with self._lock:
             self._model = model
             self._trained = True
-        self._rebuild_index()
-        self._epoch_note = (f"trained {len(classes)} blocks on {n} samples "
-                            f"in {dt:.1f}s")
+        if is_pretrain:
+            # Compute pure texture prototypes (no real samples in play yet)
+            # and promote them to the cold-start set.
+            self._texture_proto = {}
+            self._rebuild_index()                  # _proto = texture protos
+            with self._lock:
+                self._texture_proto = dict(self._proto)
+        else:
+            # Online real-data training shifted the embedding, so any
+            # texture prototypes (from the old embedding) are now stale —
+            # drop them; real-sample prototypes take over.
+            with self._lock:
+                self._texture_proto = {}
+            self._rebuild_index()                  # _proto = real only
+        self._epoch_note = (f"{'pretrained' if is_pretrain else 'trained'} "
+                            f"{len(classes)} blocks on {n} samples in {dt:.1f}s")
         self._save_model(classes)
 
     # ── Persistence ────────────────────────────────────────────────
@@ -548,7 +601,11 @@ class CNNBlockRecognizer:
                 "embed_dim": self.cfg.embed_dim,
                 "input_size": self.cfg.input_size,
                 "classes": classes,
-                "version": 1,
+                # Texture cold-start prototypes (block_id -> embedding).
+                # Stored as plain lists for portability.
+                "texture_proto": {k: v.tolist()
+                                  for k, v in self._texture_proto.items()},
+                "version": 2,
             }, self.cfg.model_path)
         except Exception as e:
             self._epoch_note = f"save-error: {e!r}"
@@ -567,6 +624,10 @@ class CNNBlockRecognizer:
             model.eval()
             self._model = model
             self._trained = True
+            tp = ckpt.get("texture_proto") or {}
+            self._texture_proto = {k: np.asarray(v, dtype=np.float32)
+                                   for k, v in tp.items()}
+            self._proto = dict(self._texture_proto)
         except Exception as e:
             self._epoch_note = f"load-error: {e!r}"
             self._model = None

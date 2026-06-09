@@ -88,8 +88,8 @@ def main():
     print(" CNN block recogniser — offline accuracy vs raw-pixel NN")
     print("=" * 64)
     if not _TORCH_OK:
-        bad("PyTorch not available — CNN recogniser cannot run")
-        return 1
+        print("  [skip] PyTorch not available — CNN recogniser inactive")
+        return 0
 
     store = build_world_sample_store()
     alls = store.load_all()
@@ -97,16 +97,26 @@ def main():
     print(f"  data: {len(alls)} samples; split -> train {len(train)}, "
           f"test {len(test)}, over {len(classes)} blocks (>=10 samples each)")
     if len(classes) < 3 or not test:
-        bad("not enough sample data to run a meaningful split")
-        return 1
+        print("  [skip] not enough world_samples on disk for a split "
+              "(data/training/ is gitignored / local-only)")
+        return 0
 
     # --- Raw-pixel NN baseline (trained on the train split) ---
     nn = SampleBlockRecognizer(store, config=SampleBlockRecognizerConfig())
     nn._samples = list(train); nn._rebuild_tensor()      # restrict to train
 
     # --- CNN (trained on the same train split) ---
-    cnn = CNNBlockRecognizer(store, config=CNNBlockRecognizerConfig(epochs=50),
-                             auto_train=False)
+    # Use a throwaway model path so the test never clobbers the runtime
+    # model (data/calibration/block_cnn.pt). Start from scratch (ignore any
+    # pre-trained checkpoint) so the accuracy numbers reflect this split.
+    import tempfile, os
+    tmp_model = os.path.join(tempfile.gettempdir(), "_test_block_cnn.pt")
+    if os.path.exists(tmp_model):
+        os.remove(tmp_model)
+    cnn = CNNBlockRecognizer(
+        store, config=CNNBlockRecognizerConfig(epochs=50, model_path=tmp_model),
+        auto_train=False)
+    cnn._model = None; cnn._trained = False; cnn._texture_proto = {}
     cnn._samples = list(train)
     print("  training CNN (background-style, synchronous here)…")
     cnn.train_now()
