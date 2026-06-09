@@ -34,7 +34,7 @@ import json
 import os
 import sys
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import cv2
 import numpy as np
@@ -168,6 +168,15 @@ def main() -> int:
                         help="dump per-patch top guesses on the first frame "
                              "regardless of confidence (helps diagnose why "
                              "the classifier is rejecting in-world surfaces)")
+    parser.add_argument("--self-teach", action="store_true",
+                        help="SELF-TEACHING MONITOR: each tick, compare the "
+                             "recogniser's guess for the block under the "
+                             "crosshair against the F3 'Targeted Block' truth, "
+                             "and report running accuracy as the model learns. "
+                             "Point the crosshair at different blocks (F3 on) "
+                             "and watch accuracy climb. Read-only / safe; the "
+                             "perception layer auto-collects samples & retrains "
+                             "in the background as it always does.")
     args = parser.parse_args()
 
     if not _ensure_minecraft_running():
@@ -264,6 +273,11 @@ def main() -> int:
     _print(f"[ok] WorldPerception built with "
            f"{wp.block_classifier.template_count()} block signatures")
 
+    # --- Self-teaching monitor state -----------------------------
+    st_seen = st_hits = st_abstain = 0          # guess-vs-F3-truth tally
+    st_recent: list = []                        # last-20 hit/miss (sliding acc)
+    st_start_samples = None
+
     # --- Tick the perception loop --------------------------------
     n_with_pose = 0
     n_blocks_added = 0
@@ -299,10 +313,60 @@ def main() -> int:
         else:
             _print(f"[tick {tick:2d}] no pose (F3 not visible in panel)  "
                    f"map={n_now}  ({last_dt_ms:.1f} ms)")
+
+        # --- Self-teaching monitor: guess vs F3 truth -------------
+        if args.self_teach and wf.looking_at is not None:
+            truth = wf.looking_at.block_id
+            patch = wp._crop_patch(frame, w // 2, h // 2,
+                                   wp.cfg.patch_size_px)
+            guess, conf = (None, 0.0)
+            if patch is not None:
+                guess, conf = wp.block_classifier.classify(patch)
+            st_seen += 1
+            if guess is None:
+                st_abstain += 1
+                mark = "abstain"
+            elif guess == truth:
+                st_hits += 1
+                st_recent.append(1)
+                mark = "HIT"
+            else:
+                st_recent.append(0)
+                mark = f"miss (guessed {guess})"
+            st_recent = st_recent[-20:]
+            acc = st_hits / st_seen if st_seen else 0.0
+            racc = (sum(st_recent) / len(st_recent)) if st_recent else 0.0
+            cnn_status = ""
+            cnn = getattr(wp.block_classifier, "cnn", None)
+            if cnn is not None:
+                if st_start_samples is None:
+                    st_start_samples = cnn.sample_count()
+                cnn_status = (f"  | samples={cnn.sample_count()} "
+                              f"{'(training…)' if cnn._training else ''}")
+            _print(f"    └─ SELF-TEACH: truth={truth} guess={guess} "
+                   f"conf={conf:.2f} → {mark}  | acc={acc:.0%} "
+                   f"recent20={racc:.0%}{cnn_status}")
+
         if tick < args.ticks:
             time.sleep(args.interval)
 
     cap.stop()
+
+    # --- Self-teaching summary -----------------------------------
+    if args.self_teach:
+        acc = st_hits / st_seen if st_seen else 0.0
+        cnn = getattr(wp.block_classifier, "cnn", None)
+        grew = ""
+        if cnn is not None and st_start_samples is not None:
+            grew = (f"; sample store {st_start_samples} -> "
+                    f"{cnn.sample_count()} (+{cnn.sample_count() - st_start_samples})")
+        _print("")
+        _print(f"[self-teach] {st_hits}/{st_seen} correct ({acc:.0%}), "
+               f"{st_abstain} abstained{grew}")
+        if cnn is not None:
+            _print(f"[self-teach] recogniser: {cnn.status()}")
+        _print("[self-teach] tip: run with more --ticks while panning F3 over "
+               "many blocks; accuracy climbs as samples accrue & it retrains.")
 
     # --- Dump WorldMap snapshot ----------------------------------
     try:
@@ -314,7 +378,7 @@ def main() -> int:
     # --- Summary -------------------------------------------------
     stats = wp.world_map.stats()
     lines = [
-        f"World perception live test summary",
+        "World perception live test summary",
         f"capture          : {CAPTURE_PATH}",
         f"frame size       : {w}x{h}",
         f"F3 backend       : {f3_reader.backend}",
