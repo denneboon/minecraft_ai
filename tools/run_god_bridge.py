@@ -945,6 +945,14 @@ def main(argv=None) -> int:
                     help="Fixed pause after releasing sneak and before the "
                          "bridge starts — lets the crouch-release micro-"
                          "shift die out 'to be sure' (user's recipe).")
+    ap.add_argument("--yaw-tolerance-deg", type=float, default=0.06,
+                    help="Max allowed YAW residual. Default 0.06° demands an "
+                         "EXACT on-grid read (yaw reads exactly ±45.0/±135.0, "
+                         "not 0.1° off): a 0.1° yaw error shifts the crosshair "
+                         "off the block corner and the bridge falls "
+                         "(user-confirmed). Reachable when px/° ≥ 10 (1 px ≤ "
+                         "0.1°); if it can't hit exact it ABORTS rather than "
+                         "bridge wrong. Pitch uses --align-tolerance-deg.")
     ap.add_argument("--align-tolerance-deg", type=float, default=0.2,
                     help="Max allowed residual (degrees) for the precise "
                          "yaw AND pitch set. 0.2° is essentially exact (≈one "
@@ -1301,7 +1309,13 @@ def main(argv=None) -> int:
         # an off-by-1° aim places against the wrong face (or nothing).
         # If either axis can't be made perfect, we ABORT rather than
         # bridge with a wrong aim and silently fail / fall.
-        tol = float(args.align_tolerance_deg)
+        # YAW must be EXACT — a 0.1° yaw error shifts the crosshair off
+        # the block corner and the bridge falls (user-confirmed: 135.1°
+        # vs 135.0° drops you). PITCH tolerates ~one OCR step (0.1° pitch
+        # off was fine in practice and isn't always reachable at coarse
+        # px/°). Both abort rather than bridge with a wrong aim.
+        yaw_tol = float(args.yaw_tolerance_deg)
+        pitch_tol = float(args.align_tolerance_deg)
         if not args.no_yaw_align:
             cur_yaw_now, _, _ = _retry_pose(capture, f3_reader)
             target_yaw = _nearest_corner_yaw(
@@ -1311,7 +1325,8 @@ def main(argv=None) -> int:
                 capture, f3_reader, mouse,
                 target_deg=target_yaw,
                 px_per_deg_yaw=rate_yaw,
-                verify_and_refine=True, tolerance_deg=tol,
+                verify_and_refine=True, tolerance_deg=yaw_tol,
+                max_iterations=20,
             )
             pose_log["yaw_final"] = y_final
             yaw_res = (abs(_norm_yaw_delta(target_yaw - y_final))
@@ -1320,19 +1335,20 @@ def main(argv=None) -> int:
                   f"{(y_final if y_final is not None else float('nan')):+.2f}° "
                   f"(target {target_yaw:+.1f}°, residual "
                   f"{('%.2f°' % yaw_res) if yaw_res is not None else 'N/A'})")
-            if yaw_res is None or yaw_res > tol:
-                print(f"[run_god_bridge][ERROR] yaw did not converge to "
-                      f"within {tol:.2f}° of {target_yaw:+.1f}° "
-                      f"(residual {('%.2f°' % yaw_res) if yaw_res is not None else 'unreadable'}). "
-                      f"Aborting before the bridge — refusing to bridge "
-                      f"with a wrong aim.")
+            if yaw_res is None or yaw_res > yaw_tol:
+                print(f"[run_god_bridge][ERROR] yaw did not reach EXACTLY "
+                      f"{target_yaw:+.1f}° (got residual "
+                      f"{('%.2f°' % yaw_res) if yaw_res is not None else 'unreadable'}). "
+                      f"A 0.1° yaw error drops the bridge, so aborting. "
+                      f"(If this keeps happening, raise MC mouse sensitivity "
+                      f"so 1 px ≤ 0.1° — needs px/° ≥ 10.)")
                 aborted = True
                 raise StopIteration
         p_final = set_pitch_to(
             capture, f3_reader, mouse,
             target_deg=args.target_pitch,
             px_per_deg_pitch=rate_pitch,
-            verify_and_refine=True, tolerance_deg=tol,
+            verify_and_refine=True, tolerance_deg=pitch_tol,
         )
         pose_log["pitch_final"] = p_final
         pitch_res = (abs(args.target_pitch - p_final)
@@ -1341,9 +1357,9 @@ def main(argv=None) -> int:
               f"{(p_final if p_final is not None else float('nan')):+.2f}° "
               f"(target {args.target_pitch:+.1f}°, residual "
               f"{('%.2f°' % pitch_res) if pitch_res is not None else 'N/A'})")
-        if pitch_res is None or pitch_res > tol:
+        if pitch_res is None or pitch_res > pitch_tol:
             print(f"[run_god_bridge][ERROR] pitch did not converge to "
-                  f"within {tol:.2f}° of {args.target_pitch:+.1f}° "
+                  f"within {pitch_tol:.2f}° of {args.target_pitch:+.1f}° "
                   f"(residual {('%.2f°' % pitch_res) if pitch_res is not None else 'unreadable'}). "
                   f"Aborting before the bridge — refusing to bridge with "
                   f"a wrong aim.")
@@ -1451,17 +1467,14 @@ def main(argv=None) -> int:
             jump_enabled = False
         else:
             jump_enabled = True
-        jump_lead_blocks = 1.0                  # fire ~1 block before the Nth
         if args.jump_every_ms > 0:
             jump_period = args.jump_every_ms / 1000.0   # explicit override
         else:
-            jump_period = max(0.3, (args.jump_every_blocks - jump_lead_blocks)
-                              / _WALK_BPS)
+            jump_period = max(0.3, args.jump_every_blocks / _WALK_BPS)
         if jump_enabled:
             print(f"[run_god_bridge] jump: every {jump_period:.3f}s "
-                  f"(≈{args.jump_every_blocks - jump_lead_blocks:.1f} blocks at "
-                  f"{_WALK_BPS} b/s) — fires RIGHT BEFORE block "
-                  f"{args.jump_every_blocks:.0f}, mouse held still")
+                  f"(= {args.jump_every_blocks:.0f} blocks at {_WALK_BPS} b/s), "
+                  f"mouse held still")
         drift_check_n = max(0, int(args.drift_check_every))
         # Target yaw / pitch we converged to in step 6.
         bridge_target_yaw = pose_log.get("yaw_target") or 0.0
