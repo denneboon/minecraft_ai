@@ -58,16 +58,36 @@ class GlyphOCRConfig:
     # pixels are < 10 % of any crop, so the median is dominated by
     # the BACKGROUND. A dark-panel F3 sits at median ≈ 20; a dark-
     # forest background at median ≈ 60–80; a daytime / leafy / snow
-    # background at median ≥ 120. We use the shadow-gated path only
-    # for the bright-background case, where the simple bright-
+    # background at median ≥ 120. The bright-background path (see
+    # ``bright_method``) handles the case where the simple bright-
     # threshold binary would let too much foliage / sky through.
     #
     # Why not ink-density: a line that's mostly text characters can
     # have a high ink density even on a dark background, which would
-    # mis-route XYZ-style lines through shadow gating and break the
+    # mis-route XYZ-style lines through the bright path and break the
     # thin diagonal glyphs (``/``) those rely on.
     background_robust:           bool  = True
     bright_background_median:    int   = 110
+
+    # Which binariser to use on a bright background.
+    #   "adaptive" — local-mean adaptive threshold (a pixel is ink iff
+    #                it's brighter than its local neighbourhood mean by
+    #                ``adaptive_bias``). Invariant to the absolute
+    #                background brightness, so it reads MC text on a
+    #                desert / snow biome where the translucent debug
+    #                panel is actually DARKER than the surrounding bright
+    #                terrain (global thresholds fail there because the
+    #                bare terrain exceeds the threshold while the boxed
+    #                glyphs sit below it). This is the F3 reader default.
+    #   "shadow"   — keep only bright pixels carrying MC's drop-shadow
+    #                signature (bright pixel with a darker down-right
+    #                neighbour). Cheaper, and the historical default for
+    #                the inventory / tooltip / menu readers whose crops
+    #                are small and uniformly lit; kept for back-compat.
+    bright_method:        str   = "shadow"
+    # Adaptive-threshold params (used when bright_method == "adaptive").
+    adaptive_block_gui_px: int  = 5    # local window, GUI px (→ odd screen px)
+    adaptive_bias:        int   = 10   # ink iff pixel > local_mean + bias
     shadow_drop_min_grey: int = 90
     shadow_bright_min:    int = 200
     shadow_region_gui_px: int = 8
@@ -110,6 +130,37 @@ class GlyphOCR:
         # Pre-binarize templates so matching is a fast equality test.
         self._tpl_bin = [(t > 0) for t in self._templates]
 
+        # ── Width-grouped, pre-stacked templates for vectorised matching ──
+        # ``_best_template`` used to call ``np.mean`` once per template
+        # (100+ Python-level reductions per scanned column). cProfile
+        # showed that as ~0.5 s per F3 read — the single biggest live-
+        # loop cost. Instead we group templates of identical (height,
+        # width), stack each group into one ``(k, th, tw)`` bool array,
+        # and score the whole group against the band region in ONE
+        # numpy op. Groups are processed widest-first and, within a
+        # group, chars stay in ascending order — so ``argmax`` + a
+        # strict ``>`` running-best reproduces the old tie-break exactly
+        # (widest wins, then lowest char value).
+        from collections import OrderedDict
+        groups: "OrderedDict[Tuple[int, int], Tuple[List[str], List[np.ndarray]]]" = \
+            OrderedDict()
+        for ch, tb in zip(self._chars, self._tpl_bin, strict=True):
+            if tb.ndim != 2 or tb.size == 0:
+                continue
+            key = (tb.shape[0], tb.shape[1])
+            chars_list, tpls_list = groups.setdefault(key, ([], []))
+            chars_list.append(ch)
+            tpls_list.append(tb)
+        # Width-descending so a wider template wins ties (matches the old
+        # ``sort(key=(-width, char))`` + strict ``>`` semantics).
+        self._width_groups: List[Tuple[int, int, List[str], np.ndarray]] = []
+        for (th, tw), (chars_list, tpls_list) in sorted(
+            groups.items(), key=lambda kv: -kv[0][1]
+        ):
+            self._width_groups.append(
+                (th, tw, chars_list, np.stack(tpls_list).astype(bool))
+            )
+
         self._glyph_h_screen = self.cfg.line_glyph_h_gui_px * scale
 
     # ------------------------------------------------------------------
@@ -117,21 +168,120 @@ class GlyphOCR:
     # ------------------------------------------------------------------
 
     def recognize_line(self, line_img: np.ndarray) -> str:
-        """Decode a single F3 line. Returns "" if no text was found."""
-        binary = self._binarize(line_img)
-        if not binary.any():
-            return ""
+        """Decode a single F3 line. Returns "" if no text was found.
 
+        Robust multi-binarisation: the bright-background binariser has a
+        single tuning (adaptive window / drop threshold) that reads MOST
+        views, but a busy local background (e.g. a coloured block bleeding
+        into the line over bright terrain) can defeat any single setting.
+        Rather than gamble on one, we decode with the primary binariser
+        and, ONLY IF that came out garbled (unrecognised ``?`` glyphs or
+        empty), retry with a few alternative binarisations and keep the
+        cleanest decode. The downstream regex parsers are the final
+        arbiter; this just maximises the chance a readable line is read.
+        The fast/dark path (uniform background) parses on the first try
+        and never pays for the alternatives."""
+        best = self._decode_binary(self._binarize(line_img))
+        if not self._is_garbled(best):
+            return best
+        # Retry 1: alternative binarisations of the FULL crop.
+        for alt in self._alternative_binaries(line_img):
+            cand = self._decode_binary(alt)
+            if self._decode_quality(cand) > self._decode_quality(best):
+                best = cand
+                if not self._is_garbled(best):
+                    return best
+        # Retry 2: horizontally-anchored SUB-CROPS. F3 columns are left-
+        # or right-aligned, so the empty side of a wide line crop is bare
+        # terrain. Over bright sand that empty side produces adaptive
+        # noise that fools the line-band finder (it locks onto the sand's
+        # top edge instead of the text). Decoding a crop anchored to the
+        # text side excludes that noise and recovers the line. We try a
+        # few widths on each side and keep the cleanest, fullest decode.
+        for sub in self._anchored_subcrops(line_img):
+            cand = self._decode_binary(self._binarize(sub))
+            if self._decode_quality(cand) > self._decode_quality(best):
+                best = cand
+                if not self._is_garbled(best):
+                    return best
+        return best
+
+    def _anchored_subcrops(self, line_img: np.ndarray):
+        """Yield right-anchored then left-anchored horizontal sub-crops of
+        a line, widest-first, to isolate left-/right-aligned F3 text from
+        bare-terrain noise on the empty side (see :meth:`recognize_line`)."""
+        w = line_img.shape[1]
+        if w < 80:
+            return
+        for frac in (0.62, 0.48, 0.36):          # right-anchored
+            x0 = int(w * (1.0 - frac))
+            if w - x0 >= 40:
+                yield line_img[:, x0:]
+        for frac in (0.62, 0.48):                # left-anchored
+            x1 = int(w * frac)
+            if x1 >= 40:
+                yield line_img[:, :x1]
+
+    def _decode_binary(self, binary: np.ndarray) -> str:
+        """Run band-finding + glyph scan on an already-binarised line."""
+        if binary is None or not binary.any():
+            return ""
         y_top = self._find_y_top(binary)
         if y_top is None:
             return ""
-
         band = binary[y_top : y_top + self._glyph_h_screen, :]
         if band.shape[0] < self._glyph_h_screen:
             pad = self._glyph_h_screen - band.shape[0]
             band = np.pad(band, ((0, pad), (0, 0)), mode="constant")
-
         return self._scan_band(band)
+
+    @staticmethod
+    def _is_garbled(text: str) -> bool:
+        """A decode is 'garbled' if it's empty or carries any unmatched
+        ``?`` marker — either is a signal worth a second binarisation
+        attempt. (A clean F3 line decodes with zero ``?``.)"""
+        return (not text) or ("?" in text)
+
+    @staticmethod
+    def _decode_quality(text: str) -> float:
+        """Higher is better. Rewards recognised characters and penalises
+        unmatched ``?`` markers, so the alternative with the cleanest
+        decode wins. Length breaks ties (a fuller line is usually the
+        better read)."""
+        if not text:
+            return -1e9
+        q = text.count("?")
+        recognised = sum(1 for c in text if c not in "? ")
+        return recognised - 3.0 * q + 0.01 * len(text)
+
+    def _alternative_binaries(self, line_img: np.ndarray):
+        """Yield alternative binarisations to try when the primary decode
+        is garbled. Only meaningful on the bright path (uniform/dark
+        backgrounds already parse first try); we vary the adaptive window
+        size — a SMALLER window isolates glyphs from a busy local
+        background, a LARGER one rides through fine texture — and fall
+        back to the structural drop-shadow gate. Cheap: each is one
+        threshold pass, and we only get here on a line that already
+        failed."""
+        if line_img.ndim == 3:
+            gray = cv2.cvtColor(line_img, cv2.COLOR_RGB2GRAY)
+        else:
+            gray = line_img
+        gray_u8 = gray if gray.dtype == np.uint8 else gray.astype(np.uint8)
+        scale = max(1, int(self.cfg.ui_scale))
+        bias = int(self.cfg.adaptive_bias)
+        # A SMALLER local window than the default — isolates glyphs from a
+        # busy local background (a coloured block bleeding into the line).
+        block = max(3, 3 * scale)
+        if block % 2 == 0:
+            block += 1
+        yield cv2.adaptiveThreshold(
+            gray_u8, 1, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY,
+            block, -bias).astype(np.uint8)
+        # Structural drop-shadow gate as a last resort (works where local
+        # contrast is ambiguous but the text still carries its shadow).
+        yield self._shadow_binarize(gray_u8.astype(np.int16),
+                                    gray_u8 >= self.cfg.text_threshold)
 
     def recognize_frame_lines(
         self,
@@ -169,16 +319,16 @@ class GlyphOCR:
 
           1. Simple bright-threshold (cheap; what we want on dark
              backgrounds where text is uniquely bright).
-          2. Shadow-gated: keep only bright pixels with a dark pixel
-             one row down + one column right (MC's text drop-shadow
-             signature). Used when the simple path lights up too many
-             pixels — a sign of bright/noisy background contaminating
-             the binary.
+          2. Bright-background path (``bright_method``): "adaptive"
+             local-mean thresholding (robust to the absolute terrain
+             brightness) or "shadow" drop-shadow gating. Used when the
+             simple path lights up too many pixels — a sign of
+             bright/noisy background contaminating the binary.
 
         Real-world impact: night-time + dark forest crops stay on the
-        fast path; daytime sky / leaves / snow crops automatically
-        switch to shadow gating so background noise is filtered out
-        without breaking the existing pipeline.
+        fast path; daytime sky / leaves / snow / desert crops
+        automatically switch to the bright path so background noise is
+        filtered out without breaking the existing pipeline.
         """
         if line_img.ndim == 3:
             gray = cv2.cvtColor(line_img, cv2.COLOR_RGB2GRAY)
@@ -189,11 +339,37 @@ class GlyphOCR:
             return bright.astype(np.uint8)
         # Background median picks the binariser: dark backgrounds
         # (panel, dark forest) use the simple path; bright backgrounds
-        # (sky, leaves, snow) trigger shadow gating.
+        # (sky, leaves, snow, sand) trigger the bright path.
         median_bg = (int(np.median(gray)) if gray.size else 0)
         if median_bg < self.cfg.bright_background_median:
             return bright.astype(np.uint8)
+        if self.cfg.bright_method == "adaptive":
+            return self._adaptive_binarize(gray)
         return self._shadow_binarize(gray, bright)
+
+    def _adaptive_binarize(self, gray: np.ndarray) -> np.ndarray:
+        """
+        Local-mean adaptive threshold: a pixel is glyph ink iff it is
+        brighter than the mean of its local neighbourhood by
+        ``adaptive_bias``. Because the threshold tracks the local
+        background, this reads MC text regardless of the absolute
+        terrain brightness — including the desert/snow case where the
+        translucent debug panel is DARKER than the surrounding bright
+        terrain, so the bare terrain exceeds any global bright-threshold
+        while the boxed glyphs sit below it. The bright glyph bodies
+        still stand out from their immediate (panel-box) background, so
+        a local comparison recovers them cleanly.
+        """
+        scale = max(1, int(self.cfg.ui_scale))
+        block = max(3, self.cfg.adaptive_block_gui_px * scale)
+        if block % 2 == 0:
+            block += 1                      # cv2 requires an odd block size
+        gray_u8 = gray if gray.dtype == np.uint8 else gray.astype(np.uint8)
+        binary = cv2.adaptiveThreshold(
+            gray_u8, 1, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY,
+            block, -int(self.cfg.adaptive_bias),
+        )
+        return binary.astype(np.uint8)
 
     def _shadow_binarize(self,
                           gray: np.ndarray,
@@ -229,18 +405,73 @@ class GlyphOCR:
         return (bright_mask & text_region).astype(np.uint8)
 
     def _find_y_top(self, binary: np.ndarray) -> Optional[int]:
-        """Pick the y-row where the densest band of glyph pixels begins."""
-        # Sum per row, then find the contiguous tallest run with text. The
-        # first row of that run is our band's top.
-        rows_with_text = binary.any(axis=1)
-        if not rows_with_text.any():
+        """
+        Pick the y-row where the densest band of glyph pixels begins.
+
+        Two pitfalls we explicitly defend against:
+
+        1. **Noise above the text** — bright biome pixels that survived
+           the shadow-gated binariser (a few foliage leaves, a sky
+           gradient pixel, a glint highlight) put scattered ink at the
+           top of the crop. The previous version of this method
+           looked for the LONGEST contiguous run of "any-ink rows",
+           which a few scattered noise pixels would inflate to span
+           the entire crop, pulling ``y_top`` to row 0. The matcher
+           band was then 3-4 px misaligned vs. the templates and every
+           glyph score collapsed below the match threshold — that's
+           what made the `minecraft:<id>` line of the F3 panel render
+           as a single ``?`` while the surrounding lines parsed fine.
+
+        2. **Drop-shadow tail** — every MC glyph has a 1-GUI-px
+           shadow one row down-right of the glyph body. That row
+           IS real text, so we don't want to discard it; we want
+           the y_top to land on the top of the glyph BODY, with the
+           shadow row trailing inside the band.
+
+        Strategy: classify rows by their ink-DENSITY (column count),
+        find the densest contiguous block, return its top. A row
+        with one stray pixel (1 / 700 = 0.1 %) does not count as a
+        text row; a row of glyph pixels (typically 15-30 % density)
+        does. The threshold scales with the actual densest row so
+        it adapts to short lines (`minecraft:dirt`, ~20 chars) as
+        well as long ones (~50 chars).
+        """
+        if binary.size == 0:
             return None
-        # Find the longest run of True; the top of that run is our anchor.
-        idx = np.where(rows_with_text)[0]
-        # Group consecutive indices
+        col_counts = binary.sum(axis=1).astype(np.int32)
+        if col_counts.max() == 0:
+            return None
+
+        # Distinguish text rows from foliage-noise rows by ABSOLUTE ink
+        # WIDTH per row, not by relative density:
+        #
+        # * A real glyph row spans most of the line's character width
+        #   (think the middle bar of ``m``, ``n``, ``e``) — typically
+        #   100+ inked pixels in a 700-px-wide crop.
+        # * Foliage / sky / glint noise that survives the shadow gate
+        #   is sparse — a few pixels scattered through the row.
+        #
+        # We use ``min_ink_width`` = 2 % of the crop width (with a hard
+        # floor of 10 px so very narrow debug crops still work). The
+        # noise from one or two stray leaves comes in below this; the
+        # descender row of ``p`` / ``y`` / ``g`` STAYS above it (a
+        # descender is one or two columns wide × the descender length,
+        # producing ~5-10 inked pixels per character — and there's
+        # usually more than one descender in a 30-char line). And even
+        # if a particular descender row falls below the threshold, the
+        # band is anchored at the TOP of the text so the descender
+        # rows are still INSIDE the 16-px-tall band regardless.
+        W = binary.shape[1]
+        min_ink_width = max(10, W // 50)
+        text_rows = col_counts >= min_ink_width
+        if not text_rows.any():
+            return None
+
+        # Find the longest run of dense-text rows.
+        idx = np.where(text_rows)[0]
         gaps = np.diff(idx)
         run_starts = [int(idx[0])]
-        run_ends   = []
+        run_ends:   List[int] = []
         for i, g in enumerate(gaps):
             if g > 1:
                 run_ends.append(int(idx[i]))
@@ -248,7 +479,28 @@ class GlyphOCR:
         run_ends.append(int(idx[-1]))
         best = max(range(len(run_starts)),
                    key=lambda k: run_ends[k] - run_starts[k])
-        return run_starts[best]
+        visible_top = run_starts[best]
+        visible_bot = run_ends[best]
+
+        # Lowercase-only lines (no ascender, no capital, no descender)
+        # have visible text spanning ONLY the x-height portion of the
+        # cell — typically 9-10 rows at GUI scale 2. Cap-and-body lines
+        # span 14-15 rows. The templates encode the FULL cell (16 rows)
+        # with empty top rows reserved for ascenders, so a band aligned
+        # to "visible text top" of a lowercase-only line places the
+        # text at band-row 0 — but the templates expect that text at
+        # band-row ``cap_offset``. Detect this case and shift the
+        # returned y_top UP by the cap offset so the band-row 0 always
+        # corresponds to the CELL top regardless of which glyph
+        # heights actually got rendered on this line.
+        scale = max(1, int(self.cfg.ui_scale))
+        full_cell_span = 13 * scale // 2     # ~13 rows at scale 2; 6 at scale 1
+        cap_offset     = 4 * scale // 2      # ~4 rows at scale 2; 2 at scale 1
+        span = visible_bot - visible_top + 1
+        if span < full_cell_span:
+            shifted = max(0, visible_top - cap_offset)
+            return shifted
+        return visible_top
 
     def _scan_band(self, band: np.ndarray) -> str:
         h, w = band.shape
@@ -290,23 +542,35 @@ class GlyphOCR:
     def _best_template(self,
                        band: np.ndarray,
                        x: int) -> Optional[Tuple[str, int]]:
-        h, w = band.shape
-        best_ch:    Optional[str]   = None
-        best_score: float           = self.cfg.match_threshold
-        best_w:     int             = 0
+        """Find the best-matching glyph template starting at column ``x``.
 
-        for ch, tpl_bin in zip(self._chars, self._tpl_bin):
-            th, tw = tpl_bin.shape
-            if th > h or x + tw > w + 0:
-                continue
-            if x + tw > w:
+        Vectorised: for each width-group that fits, the band region is
+        compared against ALL stacked templates of that width in a single
+        numpy reduction. Equivalent to (but ~5-10× faster than) the old
+        per-template ``np.mean`` loop; the widest-first group order plus
+        the strict ``>`` running-best reproduce the original tie-break
+        (widest wins, then lowest char value).
+        """
+        h, w = band.shape
+        best_ch:    Optional[str] = None
+        best_score: float         = self.cfg.match_threshold
+        best_w:     int           = 0
+
+        for th, tw, chars_list, stack in self._width_groups:
+            if th > h or x + tw > w:
                 continue
             region = band[:th, x:x + tw].astype(bool)
-            # Fraction of pixels that agree (both set or both unset)
-            score = float(np.mean(region == tpl_bin))
-            if score > best_score:
-                best_score = score
-                best_ch    = ch
+            # Agreement fraction per template (both set or both unset),
+            # computed for the whole group at once. ``stack`` is
+            # (k, th, tw) bool; broadcasting compares the single region
+            # against every template, then we mean over the glyph pixels.
+            agree = (stack == region).reshape(stack.shape[0], -1)
+            scores = agree.mean(axis=1)
+            ki = int(scores.argmax())   # first max => lowest char on ties
+            s = float(scores[ki])
+            if s > best_score:
+                best_score = s
+                best_ch    = chars_list[ki]
                 best_w     = tw
 
         if best_ch is None:

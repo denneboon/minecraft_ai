@@ -20,7 +20,7 @@ import threading
 import time
 import platform
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 # --------------------------
 # Configuration
@@ -284,6 +284,37 @@ class Keyboard:
             self._stamp("press", key)
             if self.cfg.verbose:
                 self._vlog(f"PRESS  {key!r:>18}  SENT")
+
+    def press_together(self, *keys_or_actions: str) -> None:
+        """Press several keys as SIMULTANEOUSLY as the OS allows.
+
+        The normal :meth:`press` routes each key through the global
+        rate-limiter (``max_actions_per_sec``), which sleeps ~8 ms
+        between successive actions — enough that two keys pressed in
+        consecutive calls land on DIFFERENT Minecraft ticks. For a key
+        COMBINATION where the timing matters that's wrong: e.g. S+A for a
+        diagonal bridge — if A lands a tick before S, the player first
+        moves straight left (building a wrong / double-wide path) before
+        the diagonal kicks in. This emits all key-down events back-to-
+        back under one lock with NO inter-key rate-limit gap, so they hit
+        the same tick. State tracking (``_pressed``) is still updated, so
+        a later :meth:`release` behaves normally."""
+        if self._gate and not self._gate.allow():
+            return
+        keys = [self._resolve(k) for k in keys_or_actions]
+        with self._lock:
+            for key in keys:
+                if self._is_blocked_in_context(key):
+                    continue
+                if (self.cfg.strict_state
+                        and not self.cfg.allow_repeat_press
+                        and key in self._pressed):
+                    continue
+                self._backend.press(key)
+                self._pressed.add(key)
+                self._stamp("press", key)
+                if self.cfg.verbose:
+                    self._vlog(f"PRESS  {key!r:>18}  SENT(chord)")
 
     def release(self, key_or_action: str) -> None:
         # NOTE: releases must NEVER be gated. The gate prevents NEW input
@@ -562,12 +593,29 @@ class Keyboard:
             return
         with self._lock:
             held = list(self._pressed)
+            failed: list[str] = []
             for key in held:
                 try:
                     self._backend.press(key)
-                except Exception:
-                    pass
+                except Exception as e:
+                    failed.append(f"{key}={e!r}")
             self._last_action_ts = time.perf_counter()
+            if failed:
+                # A backend-error during resync means the key is now in
+                # an INCONSISTENT state: ``self._pressed`` says held but
+                # MC's input layer never received the press. The
+                # fast-path will then skip re-emitting it (because we
+                # already think it's held), so it stays divergent
+                # forever. Surface the first occurrence so we can
+                # diagnose (Window closed? Permission revoked?
+                # Driver-level keyboard hook crashed?). The hot path
+                # silences repeats.
+                if not getattr(self, "_resync_warn_emitted", False):
+                    self._resync_warn_emitted = True
+                    print(f"[KB][WARN] resync failed for "
+                          f"{len(failed)}/{len(held)} keys: "
+                          f"{', '.join(failed)} — held-state may be "
+                          f"stuck. Further errors silenced.")
             if self.cfg.verbose:
                 self._vlog(f"RESYNC re-emitted {held}")
 

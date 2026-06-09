@@ -31,6 +31,7 @@ from __future__ import annotations
 import os
 import platform
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -136,15 +137,25 @@ class OCRConfig:
     # rewrites this from ui_scale.
     line_step_px:   int = 20
 
-    # Read at most this many lines from each F3 column. Players can
-    # toggle individual debug options to Always, so the actual line
-    # count varies — scanning generously costs us nothing (the OCR's
-    # column-walker is cheap on blank crops). For F3-only commit
-    # mode (the current default), we only need the FIRST 4-5 lines
-    # of each column: LEFT = "Targeted Block:" + block id, RIGHT =
-    # XYZ / Block / Chunk / Facing. Drop ``max_lines`` low to cut
-    # OCR time by ~3-5x.
-    max_lines:     int = 5
+    # Read at most this many lines from each F3 column.
+    #
+    # The right number depends entirely on whether the F3 panel is
+    # held vs. just the "always-visible" debug lines:
+    #
+    #   * Always-only (panel hidden): targeted block + XYZ etc. live
+    #     in the FIRST 4-6 lines at the top of the screen → max_lines
+    #     of 5 is sufficient and OCR cost is tiny.
+    #   * Full F3 panel held: those same lines live ~18-25 lines down,
+    #     under the version / biome / FPS / server header. Need to
+    #     scan deep enough to reach them.
+    #
+    # We default to 25 so both setups work out of the box — the OCR's
+    # column-walker is cheap on blank crops, and the few extra ticks
+    # of OCR cost are paid back the first time the agent successfully
+    # commits a block. Override to 5 in settings.yaml if you've
+    # verified your MC uses always-only and want every millisecond
+    # back.
+    max_lines:     int = 25
     line_width_px: int = 700
 
     # ── Multi-column layout (MC 1.20+) ─────────────────────────────
@@ -163,6 +174,13 @@ class OCRConfig:
     ui_scale:        int   = 2
     text_threshold:  int   = 180
     match_threshold: float = 0.90
+    # Bright-background binariser for the glyph OCR. The F3 panel is
+    # frequently viewed over bright terrain (desert, snow, daytime sky)
+    # where the translucent panel is darker than its surroundings;
+    # "adaptive" (local-mean threshold) reads through that case where
+    # the global-threshold "shadow" path drops glyphs. See
+    # GlyphOCRConfig.bright_method.
+    bright_method:   str   = "adaptive"
 
     # Tesseract fallback toggle.
     enable_tesseract_fallback: bool = True
@@ -184,15 +202,16 @@ CARDINALS = ("north", "south", "east", "west")
 # as ".?" or just "?" — common on bright/busy backgrounds where the
 # diagonal stroke gets eaten by the shadow filter.
 #
-# At least ONE of the three captures must have a decimal point. Without
-# this guard the regex also matches the Block line ("Block: -110 70 -200")
-# which is three integers — and if the actual XYZ line failed to OCR
-# this tick, the block ints would be silently committed as the player's
-# float coordinates.
+# The XYZ-acceptance gate (``_try_xyz_dec`` below) additionally
+# requires ALL THREE captured numbers to contain a literal ``.`` —
+# MC's F3 always renders ``-90.787 / 91.00000 / -95.836`` with three
+# decimal-point numbers. Without that gate the regex would also match
+# the version line ("Minecraft 1.21.11 (1.21.11/vanilla)") as
+# ``(121.11, 1.21, 11)`` and the Block line ("Block: -91 91 -96") as
+# three bare integers — both have polluted ``info.x`` in past runs.
 _RE_XYZ_DEC   = re.compile(
     r'(-?\d+(?:\.\d+)?)[^\d-]{1,6}(-?\d+(?:\.\d+)?)[^\d-]{1,6}(-?\d+(?:\.\d+)?)'
 )
-_RE_HAS_DECIMAL = re.compile(r'\d\.\d')
 _RE_BLOCK_INT = re.compile(r'(-?\d+)\s+(-?\d+)\s+(-?\d+)')
 # Dimension id is one of a small fixed set of vanilla worlds. Restricting
 # the match prevents block ids / tags (``minecraft:grass_block``,
@@ -271,13 +290,19 @@ def _try_xyz_dec(line: str) -> Optional[Tuple[float, float, float]]:
         m = _RE_XYZ_DEC.search(candidate)
         if not m:
             continue
-        # Require at least one decimal point in the matched span — a
-        # line of three integers is the Block line, not XYZ. Guards
-        # against integer coords ever populating ``info.x/y/z``.
-        if not _RE_HAS_DECIMAL.search(m.group(0)):
+        # Require ALL THREE captured numbers to have a decimal point.
+        # MC's F3 XYZ line always renders all three coords as
+        # ``-90.787 / 91.00000 / -95.836`` (three decimals); a triple
+        # of bare integers means the OCR ate the digits *between* a
+        # dot and the next separator (``-90.'?87`` → ``-90`` + ``87``).
+        # Without this strict three-decimal gate, partial parses
+        # would commit garbage like (-90, 87, 91) instead of falling
+        # back to the integer Block-line position which IS accurate.
+        x_s, y_s, z_s = m.group(1), m.group(2), m.group(3)
+        if not (("." in x_s) and ("." in y_s) and ("." in z_s)):
             continue
         try:
-            x, y, z = float(m.group(1)), float(m.group(2)), float(m.group(3))
+            x, y, z = float(x_s), float(y_s), float(z_s)
         except ValueError:
             continue
         if _coords_in_bounds(x, y, z):
@@ -294,16 +319,26 @@ def _parse_lines(lines: List[str]) -> F3Info:
             continue
         ll = line.lower()
 
-        # XYZ position (decimals separated by /). Uses a repair pass
-        # to recover from common OCR digit/letter confusions before
-        # giving up on the line.
-        if info.x is None:
+        # XYZ position (decimals separated by /). ONLY try this on
+        # lines that contain "xyz" — otherwise the full F3 panel's
+        # version line ("Minecraft 1.21.11 (1.21.11/vanilla)") gets
+        # parsed as xyz=(121.11, 1.21, 11), poisoning ``info.x`` so
+        # the real XYZ line later in the panel never updates it. The
+        # MC F3 always renders this line with the "XYZ:" prefix, and
+        # the OCR captures the prefix reliably (we observed it intact
+        # in every dump even when the numeric tail was garbled).
+        if info.x is None and "xyz" in ll:
             triple = _try_xyz_dec(line)
             if triple is not None:
                 info.x, info.y, info.z = triple
 
-        # Block coords (whole numbers, follows "Block:")
-        if info.block_x is None and ll.startswith("block"):
+        # Block coords (whole numbers, follows "Block:"). The OCR
+        # sometimes garbles the capital ``B`` to ``?`` or similar
+        # so we accept any line that CONTAINS "lock:" (covers
+        # ``Block:``, ``?lock:``, ``|?lock:``) and has three
+        # integers — neither the targeted-block line (which has
+        # only commas) nor the version line matches that.
+        if info.block_x is None and "lock:" in ll:
             m = _RE_BLOCK_INT.search(line)
             if m:
                 try:
@@ -324,30 +359,39 @@ def _parse_lines(lines: List[str]) -> F3Info:
                 except ValueError:
                     pass
 
-        # Facing + yaw/pitch
+        # Facing line yaw/pitch. The authoritative source is the
+        # ``Facing: <card> (Towards ...) (yaw / pitch)`` line.
+        #
+        # CRUCIAL: the yaw/pitch ANGLES must be extractable even when the
+        # cardinal WORD is OCR-garbled. Over bright terrain the word
+        # ``south`` reads as e.g. ``sout|:?`` while the ``(45.0 / 45.0)``
+        # angle pair stays perfectly clean — tying angle extraction to a
+        # readable cardinal threw away good angles and left yaw/pitch
+        # None (which stalled the god-bridge's precise-yaw step). So we
+        # extract the angles whenever the line is IDENTIFIABLE as the
+        # Facing line — it contains ``facing`` or ``toward`` (the two
+        # structural words, far more OCR-robust than the cardinal) — AND
+        # carries an angle pair. The angle pair (two signed decimals) is
+        # itself specific enough that block-state property lines
+        # (``east: true``) never match, so we keep the old guard against
+        # them implicitly.
+        if info.yaw is None:
+            ma = _RE_ANGLES.search(line)
+            if ma is not None and (("facing" in ll) or ("toward" in ll)):
+                try:
+                    info.yaw   = float(ma.group(1))
+                    info.pitch = float(ma.group(2))
+                except ValueError:
+                    pass
+        # Cardinal name — best-effort, independent of the angle parse.
         if info.facing_name is None:
             mf = _RE_FACING.search(line)
             if mf:
                 info.facing_name = mf.group(1).lower()
-                ma = _RE_ANGLES.search(line)
-                if ma:
-                    try:
-                        info.yaw   = float(ma.group(1))
-                        info.pitch = float(ma.group(2))
-                    except ValueError:
-                        pass
-            elif info.facing_name is None:
-                # Cardinal name without explicit "Facing:" prefix
+            elif _RE_ANGLES.search(line) is not None:
                 for card in CARDINALS:
                     if card in ll:
                         info.facing_name = card
-                        ma = _RE_ANGLES.search(line)
-                        if ma:
-                            try:
-                                info.yaw   = float(ma.group(1))
-                                info.pitch = float(ma.group(2))
-                            except ValueError:
-                                pass
                         break
 
         # Dimension. Match the full ``minecraft:<dim>`` string with
@@ -368,6 +412,36 @@ def _parse_lines(lines: List[str]) -> F3Info:
                     info.fps = int(mfps.group(1))
                 except ValueError:
                     pass
+
+    # Fallback: if the float XYZ line was too OCR-degraded to parse
+    # cleanly but the integer Block line came through, populate the
+    # float position from the block coords. Better to navigate at
+    # one-block precision than not at all. ``block_*`` is the floor
+    # of the float position anyway in MC's F3 output, so this is at
+    # most 0.999 blocks off and never wrong-signed.
+    if (info.x is None and info.block_x is not None
+            and info.block_y is not None and info.block_z is not None):
+        info.x = float(info.block_x)
+        info.y = float(info.block_y)
+        info.z = float(info.block_z)
+
+    # Sanity cross-check (AFTER the fallback so a block-derived position
+    # never trips it — it matches by construction). MC always renders
+    # ``Block = floor(XYZ)``, so on every axis ``0 <= xyz - block < 1``.
+    # If a genuinely-parsed float XYZ disagrees GROSSLY with the integer
+    # Block (> 1.5 on any axis) one line is OCR-corrupted — almost always
+    # a DROPPED MINUS SIGN (``-8.0`` read as ``8.0``, flipping the
+    # coordinate) or an eaten digit. We can't tell which line is wrong,
+    # so we reject the position entirely rather than hand back a
+    # teleported pose; callers retry and get clean values a frame or two
+    # later. This specifically guards the god-bridge, where a single
+    # sign-flipped y/z would read as the player having fallen/jumped.
+    if (info.x is not None and info.block_x is not None
+            and info.block_y is not None and info.block_z is not None):
+        if (abs(info.x - info.block_x) > 1.5
+                or abs(info.y - info.block_y) > 1.5
+                or abs(info.z - info.block_z) > 1.5):
+            info.x = info.y = info.z = None
 
     info.raw_text = "\n".join(lines)
     return info
@@ -399,6 +473,7 @@ class F3Reader:
                     ui_scale=int(self.cfg.ui_scale),
                     text_threshold=int(self.cfg.text_threshold),
                     match_threshold=float(self.cfg.match_threshold),
+                    bright_method=str(self.cfg.bright_method),
                 ),
             )
 
@@ -441,6 +516,17 @@ class F3Reader:
         else:
             lines = [self._tesseract_line(c) for c in crops]
             backend = "tesseract"
+
+        # Debug dump: when enabled, save every line crop + its OCR
+        # output to disk so we can post-mortem WHY a line failed to
+        # parse (wrong y-offset, dim text colour, anti-aliasing
+        # boundary, etc.). Triggered via the
+        # ``F3Reader.set_debug_dump_dir(path)`` setter — the live
+        # ``main.py`` does not enable this by default since the
+        # writes cost ~10 ms per OCR call.
+        dump_dir = getattr(self, "_dump_dir", None)
+        if dump_dir is not None:
+            self._dump_crops(dump_dir, crops, lines)
 
         # Strip empty/short trailing lines (the F3 panel ends; the rest is
         # whatever shows through from gameplay, which we don't want).
@@ -506,6 +592,61 @@ class F3Reader:
     def backend(self) -> str:
         return "glyph" if self._glyph_ocr is not None else "tesseract"
 
+    def set_debug_dump_dir(self, path) -> None:
+        """
+        Enable per-call crop dumps to ``path``. Each ``read()`` writes
+        ``f3_<tick>_<i>_<col>.png`` for every line crop plus a sidecar
+        ``f3_<tick>_ocr.txt`` listing what each crop OCR'd as. Useful
+        for diagnosing "why does this line read as ?": opening the
+        PNGs shows whether the y-offset is right, whether the line
+        even contains the expected text, etc.
+
+        Pass ``None`` to disable.
+        """
+        self._dump_dir = path
+        self._dump_seq = 0
+
+    def _dump_crops(self, dump_dir, crops, lines) -> None:
+        """Persist every line crop + the OCR result so the user can
+        examine which line failed to parse and why. Best-effort —
+        any I/O error is swallowed so the dump itself can't break
+        the read path."""
+        try:
+            os.makedirs(dump_dir, exist_ok=True)
+            self._dump_seq = getattr(self, "_dump_seq", 0) + 1
+            tag = f"{self._dump_seq:04d}"
+            n_cols = 2 if self.cfg.enable_right_column else 1
+            with open(os.path.join(dump_dir, f"f3_{tag}_ocr.txt"),
+                      "w", encoding="utf-8") as fh:
+                for i, (crop, text) in enumerate(zip(crops, lines, strict=True)):
+                    # crops alternate LEFT, RIGHT, LEFT, RIGHT, ...
+                    col = "L" if (i % n_cols == 0) else "R"
+                    row = i // n_cols
+                    crop_name = f"f3_{tag}_r{row}_{col}.png"
+                    fh.write(f"row={row} col={col}  ocr={text!r}\n")
+                    # Save the colour crop AND the binarized view side-by-
+                    # side so we can see both the source pixels and what
+                    # the matcher actually compared against.
+                    try:
+                        bgr = cv2.cvtColor(crop, cv2.COLOR_RGB2BGR)
+                    except Exception:
+                        bgr = crop
+                    if self._glyph_ocr is not None:
+                        binary = self._glyph_ocr.debug_binary(crop)
+                        bin_bgr = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
+                        if bin_bgr.shape[0] == bgr.shape[0]:
+                            stacked = np.concatenate([bgr, bin_bgr], axis=1)
+                        else:
+                            stacked = bgr
+                    else:
+                        stacked = bgr
+                    cv2.imwrite(os.path.join(dump_dir, crop_name), stacked)
+        except Exception as e:
+            # Print once so the user sees the failure but stays running.
+            if not getattr(self, "_dump_warned", False):
+                print(f"[F3Reader][WARN] crop dump failed: {e!r}")
+                self._dump_warned = True
+
     # ------------------------------------------------------------------
     # Line cropping
     # ------------------------------------------------------------------
@@ -537,7 +678,18 @@ class F3Reader:
     # a leafy gameplay scene (≤ 5 spurious matches per 30 K-pixel
     # sample window) does not.
     _SHADOW_BRIGHT_MIN  = 200   # this pixel ≥ here
-    _SHADOW_DROP_MIN    = 90    # below-right pixel must be that much darker
+    # below-right pixel must be that much darker. Over BRIGHT terrain
+    # (desert sand, snow) the translucent debug box is only modestly
+    # darker than the surrounding bright pixels, so the glyph→shadow
+    # drop measures ~60-85 there (vs ~120+ over a dark panel). The old
+    # 90 cutoff sat just ABOVE that, so the pre-check reported "no
+    # panel" and skipped OCR entirely on exactly the bright biomes the
+    # adaptive binariser was added to handle — a false negative that
+    # cost correctness, not just perf. 45 sits comfortably below the
+    # measured text contrast while staying well above smooth-terrain
+    # gradient noise; a false POSITIVE only costs one cheap OCR pass
+    # that then finds nothing, so we bias toward sensitivity.
+    _SHADOW_DROP_MIN    = 45
     _SHADOW_MIN_COUNT   = 6     # >= this many shadow signatures = "text here"
 
     def _f3_panel_visible(self, frame: np.ndarray) -> bool:
@@ -633,6 +785,112 @@ class F3Reader:
 
 
 # ---------------------------------------------------------------------------
+# Background OCR worker
+# ---------------------------------------------------------------------------
+
+class F3ReaderWorker:
+    """
+    Runs F3 OCR on a background thread so the ~70 ms read never blocks
+    the agent loop.
+
+    It pulls the most-recent frame from a (threaded) Capture, runs
+    ``F3Reader.read`` + an optional ``PoseFilter`` at a target cadence,
+    and publishes the latest GOOD pose. The control loop calls
+    :meth:`latest` once per tick — an O(1) lock read — instead of paying
+    the OCR cost inline.
+
+    This is strictly less pose/frame skew than the old design (which
+    carried a cached F3 pose up to ~330 ms old across 3 Hz reads): the
+    worker re-reads as fast as its cadence allows (default ~8 Hz), so a
+    panning camera's pose is fresher AND the loop runs faster.
+
+    Requires the Capture to be in threaded mode — ``capture.get_frame``
+    must be safe to call from this worker thread concurrently with the
+    control loop. (Synchronous Capture enforces single-owner-thread and
+    would raise.)
+    """
+
+    def __init__(self,
+                 reader: "F3Reader",
+                 capture,
+                 *,
+                 pose_filter=None,
+                 interval_sec: float = 0.12,
+                 only_when_playing=None,
+                 name: str = "f3-ocr"):
+        self._reader = reader
+        self._capture = capture
+        self._pose_filter = pose_filter
+        self._interval = max(0.0, float(interval_sec))
+        # Optional callable() -> bool gate. When supplied and it returns
+        # False, the worker skips the (cheap) read that tick — used so we
+        # don't OCR while a menu is open. Default: always read (the
+        # F3-panel pre-check makes a non-playing read ~1 ms anyway).
+        self._only_when_playing = only_when_playing
+        self._name = name
+
+        self._thread: Optional[threading.Thread] = None
+        self._stop: Optional[threading.Event] = None
+        self._lock: Optional[threading.Lock] = None
+        self._last_good: Optional[F3Info] = None
+        self._reads = 0
+        self._warned = False
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._thread = threading.Thread(
+            target=self._loop, name=self._name, daemon=True)
+        self._thread.start()
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            t0 = time.perf_counter()
+            try:
+                if self._only_when_playing is None or self._only_when_playing():
+                    frame = self._capture.get_frame()
+                    info = self._reader.read(frame)
+                    if self._pose_filter is not None:
+                        info = self._pose_filter.accept(info, now=time.perf_counter())
+                    if info is not None and info.x is not None:
+                        with self._lock:
+                            self._last_good = info
+                            self._reads += 1
+            except Exception as e:
+                if not self._warned:
+                    self._warned = True
+                    print(f"[f3-worker][WARN] OCR worker error: {e!r} "
+                          f"(further errors silenced)")
+            dt = time.perf_counter() - t0
+            if self._interval > dt:
+                self._stop.wait(self._interval - dt)
+
+    def latest(self) -> Optional[F3Info]:
+        """Most recent good F3Info (pose with x set), or None if none yet.
+
+        Returns the SAME object across calls until a new good read
+        arrives, so consumers can use ``F3Info.timestamp`` to detect
+        freshness exactly as they did with the old inline path."""
+        if self._lock is None:
+            return self._last_good
+        with self._lock:
+            return self._last_good
+
+    def reads(self) -> int:
+        return self._reads
+
+    def stop(self) -> None:
+        if self._stop is not None:
+            self._stop.set()
+        th = self._thread
+        if th is not None:
+            th.join(timeout=1.0)
+        self._thread = None
+
+
+# ---------------------------------------------------------------------------
 # Builder used by main.py + pipeline_test.py
 # ---------------------------------------------------------------------------
 
@@ -667,7 +925,11 @@ def build_f3_reader(settings: Dict[str, Any],
         text_start_y   = max(1, ui_scale),
         text_start_x   = max(1, ui_scale),
         line_margin_px = 1,
-        line_step_px   = 9 * ui_scale,         # 18 at scale 2 = MC F3 stride
+        # MC's F3 panel line stride (Font.LINE_HEIGHT in MC's source).
+        # Verified empirically on 1.21.x: crop 0 captures the full
+        # cell at binary rows 3-17, and the second crop catches the
+        # next line at the same relative offset.
+        line_step_px   = 9 * ui_scale,         # 18 at scale 2
     )
     if "text_threshold" in ocr_cfg:
         cfg.text_threshold = int(ocr_cfg["text_threshold"])
@@ -687,6 +949,8 @@ def build_f3_reader(settings: Dict[str, Any],
         cfg.right_column_margin_px = int(ocr_cfg["right_column_margin_px"])
     if "enable_tesseract_fallback" in ocr_cfg:
         cfg.enable_tesseract_fallback = bool(ocr_cfg["enable_tesseract_fallback"])
+    if "bright_method" in ocr_cfg:
+        cfg.bright_method = str(ocr_cfg["bright_method"])
 
     if font_cache_path is None:
         root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
