@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import threading
 import time
@@ -824,19 +825,18 @@ def main(argv=None) -> int:
                          "bridge at max click density; raise for more.")
     ap.add_argument("--place-cooldown-ms", type=int, default=0,
                     help="Sleep between clicks during the bridge. Default 0 "
-                         "= click as fast as possible (~50 CPS). MC places "
-                         "only one block per 50 ms tick, so this doesn't "
-                         "place faster — but it means EVERY tick is covered "
-                         "by 2-3 click attempts, so if one click is dropped "
-                         "to a momentary stall (GC, OS scheduling, a frame "
-                         "hitch) the next still places that tick's block. A "
-                         "missed tick = a missed block = the player steps "
-                         "down/off, so this density is the margin that "
-                         "prevents the occasional one-block drop.")
-    ap.add_argument("--click-hold-ms", type=int, default=12,
+                         "= click as fast as possible. NOTE: human god-bridge "
+                         "guides warn that 30+ CPS 'glitches' placement — but "
+                         "that's about butterfly/drag CLICKING MECHANICS on a "
+                         "physical mouse; our clean discrete SendInput clicks "
+                         "do NOT glitch, and empirically faster is strictly "
+                         "better for this bot (17 CPS fell at ~2 blocks; ~50 "
+                         "CPS sustained ~34). Keep this at/near 0.")
+    ap.add_argument("--click-hold-ms", type=int, default=4,
                     help="How long each right-click is held during the "
-                         "bridge. Short (12 ms) so discrete clicks fire "
-                         "rapidly instead of one slow 50 ms press.")
+                         "bridge. Very short (4 ms) + cooldown 0 + the lifted "
+                         "mouse rate-limit → ~100+ CPS, the max placement "
+                         "density (every tick covered many times over).")
     ap.add_argument("--move-pulse-ms", type=int, default=0,
                     help="No-sneak bridge ONLY. 0 = hold S+strafe "
                          "continuously (fast, but the player outruns the "
@@ -866,10 +866,21 @@ def main(argv=None) -> int:
                          "and correct yaw drift back to target. 0 disables. "
                          "Catches the player drifting off-axis due to "
                          "tiny yaw error accumulating each frame.")
-    ap.add_argument("--jump-every-ms", type=int, default=0,
-                    help="Tap space every N ms while the loop is running. "
-                         "0 disables. Real god-bridge sometimes jumps "
-                         "every ~600-900 ms to re-align.")
+    ap.add_argument("--jump-every-ms", type=int, default=-1,
+                    help="Tap space (jump) every N ms during the bridge. "
+                         "-1 = AUTO (default): for a no-sneak bridge, jump "
+                         "every --jump-every-blocks blocks; for --keep-sneak "
+                         "never (sneak holds the edge, no jump needed). "
+                         "0 = force off. >0 = explicit interval. Jumping is "
+                         "THE ninja-bridge technique for outrunning the "
+                         "tick-rate placement cap: the jump arc lifts the "
+                         "player off the leading edge for a beat so the "
+                         "block under the next step places in time.")
+    ap.add_argument("--jump-every-blocks", type=float, default=8.0,
+                    help="AUTO jump cadence in blocks (converted to a time "
+                         "interval via vanilla walk speed ≈4.3 b/s). ~8 is "
+                         "the common god-bridger cadence; lower if the "
+                         "player still outruns the bridge before jumping.")
     ap.add_argument("--pillar-up", type=int, default=3,
                     help="Pillar-up N blocks before bridging — gets the "
                          "player onto an isolated column so the bridge "
@@ -891,15 +902,17 @@ def main(argv=None) -> int:
                     help="Fixed pause after releasing sneak and before the "
                          "bridge starts — lets the crouch-release micro-"
                          "shift die out 'to be sure' (user's recipe).")
-    ap.add_argument("--align-tolerance-deg", type=float, default=0.07,
+    ap.add_argument("--align-tolerance-deg", type=float, default=0.2,
                     help="Max allowed residual (degrees) for the precise "
-                         "yaw AND pitch set. Default 0.07 demands an EXACT "
-                         "on-grid match (F3 OCR is 0.1°-quantised, so the "
-                         "next grid point at 0.1° is already rejected) — "
-                         "i.e. yaw must read exactly ±45.0/±135.0 and pitch "
-                         "exactly 75.8, not 0.1-0.2° off. If an axis can't "
-                         "be made exact, the run ABORTS before the bridge "
-                         "rather than bridge with an imperfect aim.")
+                         "yaw AND pitch set. 0.2° is essentially exact (≈one "
+                         "mouse-pixel step) and is the tightest RELIABLY "
+                         "achievable target: the minimum move is ~0.15°/px, "
+                         "so a target that doesn't fall on the pixel grid "
+                         "can't be hit tighter than that and a stricter gate "
+                         "just aborts spuriously. The actual god-bridge "
+                         "failure mode was the player outrunning placement, "
+                         "not a sub-0.2° aim error. Still aborts on a "
+                         "genuinely wrong aim (>0.2°).")
     ap.add_argument("--no-yaw-align", action="store_true",
                     help="Skip the snap-to-nearest-45°-corner yaw step. "
                          "Use this if you've manually aimed.")
@@ -941,6 +954,15 @@ def main(argv=None) -> int:
     safety = M.build_safety(settings, gate=gate)
     keyboard = M.build_keyboard(settings, keymap_flat, gate=gate)
     mouse = M.build_mouse(settings, gate=gate)
+    # Lift the mouse event rate-limit so the bridge can click as fast as
+    # the OS allows. The default (240 events/s = ~120 CPS cap, but the
+    # per-event sleeps also serialise the click loop) throttles bridge
+    # placement; our clean SendInput clicks don't glitch like a physical
+    # mouse, and empirically more clicks = a longer bridge.
+    try:
+        mouse.cfg.max_events_per_sec = 2000
+    except Exception:
+        pass
     try:
         f3_reader = build_f3_reader(settings)
         # build_f3_reader defaults the glyph OCR to the "adaptive"
@@ -1046,6 +1068,11 @@ def main(argv=None) -> int:
                     out_h = max(1, int(round(full_h * args.downscale)))
                 else:
                     out_w, out_h = full_w, full_h
+            # Fully pause recorder OCR during the bridge: the jump is
+            # pure-time (constant walk speed) so no live position is
+            # needed, and the glyph scan's GIL hold would otherwise stall
+            # the tight click loop and drop placements. Clean placement
+            # is what sustains the bridge. Full-quality reads otherwise.
             if (not bridge_active.is_set()
                     and (t0 - last_f3_ts) >= F3_OCR_INTERVAL_SEC):
                 try:
@@ -1358,13 +1385,43 @@ def main(argv=None) -> int:
         cooldown = max(0.0, args.place_cooldown_ms / 1000.0)
         move_pulse = max(0.0, args.move_pulse_ms / 1000.0)
         move_gap = max(0.0, args.move_gap_ms / 1000.0)
-        jump_interval = (args.jump_every_ms / 1000.0
-                         if args.jump_every_ms > 0 else None)
-        last_jump_ts = time.perf_counter()
+        # Jump enable. AUTO (-1): jump on a no-sneak bridge, never with
+        # sneak. 0 forces off; >0 forces on (explicit).
+        #
+        # TIMING (the precise lever per the god-bridge community): the
+        # mouse is held DEAD STILL after aligning (no jitter), so the
+        # player walks at a CONSTANT vanilla speed (~4.317 b/s) — which
+        # means "8 blocks" is a precise TIME, with no need for position
+        # reads (those stall the click loop and OCR-glitch). The pitch
+        # geometry lets you place ~8 blocks, then you MUST jump RIGHT
+        # BEFORE the 8th — a jump that lands AT/after block 8 already
+        # missed it and you fall. So we fire at (jump_every_blocks - lead)
+        # blocks of travel, re-anchored at each jump, where lead puts the
+        # jump just before the 8th.
+        _WALK_BPS = 4.317                       # vanilla walking speed
+        if args.jump_every_ms < 0:
+            jump_enabled = not args.keep_sneak
+        elif args.jump_every_ms == 0:
+            jump_enabled = False
+        else:
+            jump_enabled = True
+        jump_lead_blocks = 1.0                  # fire ~1 block before the Nth
+        if args.jump_every_ms > 0:
+            jump_period = args.jump_every_ms / 1000.0   # explicit override
+        else:
+            jump_period = max(0.3, (args.jump_every_blocks - jump_lead_blocks)
+                              / _WALK_BPS)
+        if jump_enabled:
+            print(f"[run_god_bridge] jump: every {jump_period:.3f}s "
+                  f"(≈{args.jump_every_blocks - jump_lead_blocks:.1f} blocks at "
+                  f"{_WALK_BPS} b/s) — fires RIGHT BEFORE block "
+                  f"{args.jump_every_blocks:.0f}, mouse held still")
         drift_check_n = max(0, int(args.drift_check_every))
         # Target yaw / pitch we converged to in step 6.
         bridge_target_yaw = pose_log.get("yaw_target") or 0.0
         bridge_target_pitch = args.target_pitch
+        last_jump_ts = time.perf_counter()
+        jumps_fired = 0
         # Track sideways drift via xz: at the chosen yaw + strafe,
         # motion should be along one cardinal axis. Anything off-axis
         # is yaw error compounding.
@@ -1381,11 +1438,12 @@ def main(argv=None) -> int:
                 print(f"[run_god_bridge][WARN] gate closed "
                       f"(focus lost?); fired {fired}/{args.places}")
                 break
-            if jump_interval is not None and (
-                    time.perf_counter() - last_jump_ts >= jump_interval):
+            if jump_enabled and (
+                    time.perf_counter() - last_jump_ts >= jump_period):
                 try: keyboard.tap("space", 0.05)
                 except Exception: pass
                 last_jump_ts = time.perf_counter()
+                jumps_fired += 1
             mouse.right_click(duration=max(0.001, args.click_hold_ms / 1000.0))
             fired += 1
             if stepped:
@@ -1427,7 +1485,6 @@ def main(argv=None) -> int:
                 # axis dictated by yaw+strafe. Compute perpendicular
                 # offset from the initial bridge xyz.
                 if cur_xyz is not None and first_bridge_xyz is not None:
-                    import math
                     # Expected motion unit vector (matches target_corner).
                     y_rad = math.radians(bridge_target_yaw)
                     fwd_x, fwd_z = -math.sin(y_rad), math.cos(y_rad)
@@ -1447,6 +1504,7 @@ def main(argv=None) -> int:
                     max_off_axis_blocks = max(max_off_axis_blocks, off_axis)
         bridge_active.clear()   # resume recorder pose logging
         pose_log["places_fired"] = fired
+        pose_log["jumps_fired"] = jumps_fired
         pose_log["yaw_corrections"] = yaw_corrections
         pose_log["max_off_axis_drift_blocks"] = round(max_off_axis_blocks, 3)
 

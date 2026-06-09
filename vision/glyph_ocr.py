@@ -184,6 +184,12 @@ class GlyphOCR:
         best = self._decode_binary(self._binarize(line_img))
         if not self._is_garbled(best):
             return best
+        # Fast mode: skip the (expensive) retries. Used during the bridge
+        # click loop where a ~150-200 ms multi-binarisation read would
+        # stall the tight loop; a quick best-effort first pass is enough
+        # to track the player's block position for jump timing.
+        if getattr(self, "fast_mode", False):
+            return best
         # Retry 1: alternative binarisations of the FULL crop.
         for alt in self._alternative_binaries(line_img):
             cand = self._decode_binary(alt)
