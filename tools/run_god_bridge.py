@@ -72,6 +72,45 @@ _PITCH_CLAMP_MARGIN = 0.5     # within this many deg of -90 counts as
                               # clamped (F3 OCR is rounded to 0.1°).
 
 
+# ── Queue-independent emergency stop ───────────────────────────────────
+# The bridge fires a flood of synthetic right-clicks; on Windows that can
+# saturate the OS input queue and STARVE the event-based hotkey listener
+# (and even alt-tab), which made the fast bridge impossible to abort.
+# GetAsyncKeyState reads the live HARDWARE key state directly, bypassing
+# the queue entirely, so polling it inside the tight click loop gives a
+# panic stop that always works no matter how flooded the queue is.
+try:
+    import ctypes as _ctypes
+    _USER32 = _ctypes.windll.user32
+except Exception:
+    _USER32 = None
+
+# VK codes: Ctrl, Shift, X (the project's emergency combo) + a couple of
+# easy single-key alternatives so there's always a way out.
+_VK_CONTROL, _VK_SHIFT, _VK_X = 0x11, 0x10, 0x58
+_VK_END, _VK_PAUSE = 0x23, 0x13
+
+
+def _panic_key_down() -> bool:
+    """True if the user is holding an abort key — Ctrl+Shift+X (the
+    project emergency combo) OR the single keys End / Pause (easy
+    one-handed bailouts). Queue-independent (GetAsyncKeyState), so it
+    fires even when synthetic-click spam has saturated the input queue."""
+    if _USER32 is None:
+        return False
+    try:
+        g = _USER32.GetAsyncKeyState
+        def down(vk):
+            return (g(vk) & 0x8000) != 0
+        if down(_VK_CONTROL) and down(_VK_SHIFT) and down(_VK_X):
+            return True
+        if down(_VK_END) or down(_VK_PAUSE):
+            return True
+        return False
+    except Exception:
+        return False
+
+
 def _read_pitch(capture, f3) -> Optional[float]:
     if f3 is None:
         return None
@@ -605,6 +644,9 @@ def pillar_up(capture, f3, mouse, keyboard,
     successful = 0
     consecutive_misses = 0
     for i in range(int(count)):
+        if _panic_key_down():
+            print("[pillar_up] PANIC key — stopping pillar.")
+            break
         _, _, xyz_before = _retry_pose(capture, f3)
         y_before = xyz_before[1] if xyz_before is not None else None
         # ALWAYS fire jump + click — F3 unreadable is no reason to skip.
@@ -832,11 +874,12 @@ def main(argv=None) -> int:
                          "do NOT glitch, and empirically faster is strictly "
                          "better for this bot (17 CPS fell at ~2 blocks; ~50 "
                          "CPS sustained ~34). Keep this at/near 0.")
-    ap.add_argument("--click-hold-ms", type=int, default=4,
+    ap.add_argument("--click-hold-ms", type=int, default=7,
                     help="How long each right-click is held during the "
-                         "bridge. Very short (4 ms) + cooldown 0 + the lifted "
-                         "mouse rate-limit → ~100+ CPS, the max placement "
-                         "density (every tick covered many times over).")
+                         "bridge. ~7 ms + cooldown 0 + the 600/s mouse "
+                         "rate-cap → ~70 CPS: fast enough to sustain the "
+                         "bridge, not so fast it floods the input queue and "
+                         "makes the bot unstoppable.")
     ap.add_argument("--move-pulse-ms", type=int, default=0,
                     help="No-sneak bridge ONLY. 0 = hold S+strafe "
                          "continuously (fast, but the player outruns the "
@@ -954,13 +997,16 @@ def main(argv=None) -> int:
     safety = M.build_safety(settings, gate=gate)
     keyboard = M.build_keyboard(settings, keymap_flat, gate=gate)
     mouse = M.build_mouse(settings, gate=gate)
-    # Lift the mouse event rate-limit so the bridge can click as fast as
-    # the OS allows. The default (240 events/s = ~120 CPS cap, but the
-    # per-event sleeps also serialise the click loop) throttles bridge
-    # placement; our clean SendInput clicks don't glitch like a physical
-    # mouse, and empirically more clicks = a longer bridge.
+    # Raise the mouse event rate-limit so the bridge clicks fast enough
+    # to sustain (empirically more clicks = a longer bridge; our clean
+    # SendInput clicks don't 'glitch' like a physical mouse). But NOT
+    # uncapped: ~150 CPS floods the OS input queue so badly the user
+    # can't alt-tab or trigger the panic listener. ~70 CPS sustains the
+    # bridge while leaving the machine responsive, and the
+    # GetAsyncKeyState panic poll (Ctrl+Shift+X / End / Pause) stops it
+    # regardless of queue state.
     try:
-        mouse.cfg.max_events_per_sec = 2000
+        mouse.cfg.max_events_per_sec = 600
     except Exception:
         pass
     try:
@@ -1430,6 +1476,14 @@ def main(argv=None) -> int:
         max_off_axis_blocks = 0.0
         first_bridge_xyz = None
         for click_i in range(int(args.places)):
+            if _panic_key_down():
+                print("[run_god_bridge] PANIC (Ctrl+Shift+X / End / Pause) "
+                      f"— stopping; fired {fired}/{args.places}")
+                try: mouse.right_release()
+                except Exception: pass
+                try: safety._trigger_emergency_stop("panic key poll")
+                except Exception: pass
+                break
             if time.perf_counter() > deadline:
                 print(f"[run_god_bridge][WARN] hit max-seconds; "
                       f"fired {fired}/{args.places}")
