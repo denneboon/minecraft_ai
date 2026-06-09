@@ -1572,6 +1572,15 @@ class WorldPerception:
         # checking the deadline in the CALLER doesn't help because this
         # method builds the whole list eagerly before returning.
         deadline = getattr(self, "_tick_deadline", None)
+        # ── Pass 1: collect candidate patches + their screen positions ──
+        # We gather first, then classify in ONE batch. With the learned
+        # CNN recogniser a single batched forward over the whole grid is
+        # ~10-50 ms, vs hundreds of ms for per-patch calls — which is what
+        # makes whole-vision recognition real-time. (The colour baseline
+        # has no batch path; it's classified per-patch in pass 2.)
+        cand_px: List[int] = []
+        cand_py: List[int] = []
+        cand_patch: List[np.ndarray] = []
         for j in range(n_rows):
             if deadline is not None and time.perf_counter() > deadline:
                 break
@@ -1581,47 +1590,55 @@ class WorldPerception:
                 px = int(x0 + (i + 0.5) * (x1 - x0) / n_cols)
                 py = int(y0 + (j + 0.5) * (y1 - y0) / n_rows)
                 # Skip patches landing inside any excluded rectangle —
-                # hotbar, hand, future inventory overlays. This stops
-                # the classifier from labelling the player's sword
-                # texture as a real-world block.
+                # hotbar, hand, future inventory overlays.
                 if _point_in_any_rect(px, py, excludes):
                     continue
                 patch = self._crop_patch(frame_rgb, px, py,
                                          self.cfg.patch_size_px)
                 if patch is None:
                     continue
-                # Skip obvious sky / void patches without paying for a
-                # full classify call: sky pixels are typically uniform
-                # blue, mean R ≪ mean B.
+                # Skip obvious sky / void patches without paying to classify.
                 if self._looks_like_sky(patch):
                     continue
-                block_id, conf = self.block_classifier.classify(patch)
-                if block_id is None or conf < self.cfg.min_block_confidence:
-                    continue
-                _, direction = sr.unproject(px, py,
-                                            yaw_deg=pose.yaw,
-                                            pitch_deg=pose.pitch,
-                                            eye_xyz=eye)
-                target = self._voxel_at_depth(
-                    eye=eye, direction=direction,
-                    target_depth=depth,
-                    max_distance=self.cfg.max_walk_distance,
-                )
-                if target is None:
-                    continue
-                obs = BlockObservation(
-                    pos = target,
-                    block_id = block_id,
-                    confidence = conf,
-                    source = "vision_patch",
-                    last_seen_tick = self._tick,
-                    dimension = pose.dimension,
-                    meta = {"screen": [int(px), int(py)],
-                            "depth": round(depth, 2)},
-                )
-                prev = best_per_voxel.get(target)
-                if prev is None or conf > prev[0]:
-                    best_per_voxel[target] = (conf, obs)
+                cand_px.append(px)
+                cand_py.append(py)
+                cand_patch.append(patch)
+
+        # ── Classify (batched if the recogniser supports it) ──
+        batch_fn = getattr(self.block_classifier, "classify_batch", None)
+        if callable(batch_fn):
+            results = batch_fn(cand_patch)
+        else:
+            results = [self.block_classifier.classify(p) for p in cand_patch]
+
+        # ── Pass 2: project the confident hits into the world ──
+        for px, py, (block_id, conf) in zip(cand_px, cand_py, results):
+            if block_id is None or conf < self.cfg.min_block_confidence:
+                continue
+            _, direction = sr.unproject(px, py,
+                                        yaw_deg=pose.yaw,
+                                        pitch_deg=pose.pitch,
+                                        eye_xyz=eye)
+            target = self._voxel_at_depth(
+                eye=eye, direction=direction,
+                target_depth=depth,
+                max_distance=self.cfg.max_walk_distance,
+            )
+            if target is None:
+                continue
+            obs = BlockObservation(
+                pos = target,
+                block_id = block_id,
+                confidence = conf,
+                source = "vision_patch",
+                last_seen_tick = self._tick,
+                dimension = pose.dimension,
+                meta = {"screen": [int(px), int(py)],
+                        "depth": round(depth, 2)},
+            )
+            prev = best_per_voxel.get(target)
+            if prev is None or conf > prev[0]:
+                best_per_voxel[target] = (conf, obs)
 
         for _, obs in best_per_voxel.values():
             observations.append(obs)

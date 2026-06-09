@@ -343,6 +343,42 @@ class CNNBlockRecognizer:
             return None, conf
         return best_id, conf
 
+    def classify_batch(self, patches: List[np.ndarray]
+                       ) -> List[Tuple[Optional[str], float]]:
+        """Vectorised classify over many patches — ONE batched forward
+        pass + a single matmul against the prototypes, instead of N
+        separate calls. This is what makes the whole-vision patch sweep
+        (hundreds of patches/frame) real-time on CPU. (Skips the per-patch
+        k-NN agreement vote for speed; uses cosine + margin only.)"""
+        n = len(patches)
+        if not self.available() or n == 0:
+            return [(None, 0.0)] * n
+        embs = self._embed_batch(patches)            # (N, D)
+        if embs is None:
+            return [(None, 0.0)] * n
+        with self._lock:
+            proto = self._proto
+        if len(proto) < 2:
+            return [(None, 0.0)] * n
+        ids = list(proto.keys())
+        P = np.stack([proto[k] for k in ids], axis=0)   # (C, D)
+        sims = embs @ P.T                                # (N, C)
+        out: List[Tuple[Optional[str], float]] = []
+        mc, mm, lo = self.cfg.min_cosine, self.cfg.margin_min, self.cfg.min_confidence
+        for i in range(n):
+            row = sims[i]
+            o = np.argsort(-row)
+            best_sim = float(row[o[0]])
+            second = float(row[o[1]]) if len(o) > 1 else -1.0
+            margin = best_sim - second
+            if best_sim < mc or margin < mm:
+                out.append((None, max(0.0, best_sim)))
+                continue
+            conf = max(0.0, min(1.0, 0.6 * min(1.0, margin / 0.30)
+                                + 0.4 * max(0.0, (best_sim - mc) / (1.0 - mc))))
+            out.append((ids[int(o[0])], conf) if conf >= lo else (None, conf))
+        return out
+
     def status(self) -> str:
         return (f"cnn(trained={self._trained}, training={self._training}, "
                 f"blocks={len(self._proto)}, samples={len(self._samples)}"
@@ -668,6 +704,26 @@ class TieredBlockClassifier:
             if bid is not None and conf >= self.sample.cfg.min_confidence:
                 return bid, conf
         return self.baseline.classify(patch_rgb)
+
+    def classify_batch(self, patches) -> List[Tuple[Optional[str], float]]:
+        """Batched classify for the whole-vision sweep. The CNN handles
+        the whole batch in one pass; patches it abstains on fall back to
+        the sample-NN / colour baseline individually (far fewer, so the
+        per-patch cost is bounded)."""
+        n = len(patches)
+        if n == 0:
+            return []
+        if self.cnn is not None and self.cnn.available():
+            res = self.cnn.classify_batch(patches)
+        else:
+            res = [(None, 0.0)] * n
+        out: List[Tuple[Optional[str], float]] = []
+        for i, (bid, conf) in enumerate(res):
+            if bid is not None and conf >= self.cnn.cfg.min_confidence:
+                out.append((bid, conf))
+            else:
+                out.append(self.classify(patches[i]))   # NN/baseline fallback
+        return out
 
     def template_count(self) -> int:
         n = self.baseline.template_count()
