@@ -29,6 +29,7 @@ ROOT = Path(__file__).resolve().parent.parent
 # first). Keep this list in sync when adding new offline test tools.
 OFFLINE_TESTS = [
     "test_ocr_f3",
+    "test_cnn_recognizer",
     "test_world_perception",
     "test_world_explorer_offline",
     "test_pathfind",

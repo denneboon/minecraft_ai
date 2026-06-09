@@ -42,9 +42,10 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+import cv2
 import numpy as np
 
 from vision.ocr import F3Info
@@ -65,7 +66,6 @@ from vision.world.sample_store import (
 from vision.world.sample_recognizer import (
     HybridBlockClassifier,
     SampleBlockRecognizer,
-    SampleBlockRecognizerConfig,
 )
 from vision.world.inverse_renderer import (
     InverseRenderer, InverseRendererConfig,
@@ -83,10 +83,8 @@ def _point_in_any_rect(px: int, py: int,
                         rects: Tuple[Tuple[int, int, int, int], ...]
                         ) -> bool:
     """True if (px, py) is inside any of ``rects`` (x, y, w, h)."""
-    for (rx, ry, rw, rh) in rects:
-        if rx <= px < rx + rw and ry <= py < ry + rh:
-            return True
-    return False
+    return any(rx <= px < rx + rw and ry <= py < ry + rh
+               for rx, ry, rw, rh in rects)
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +97,12 @@ class WorldPerceptionConfig:
 
     # Horizontal FOV in degrees (must match what MC is rendering).
     h_fov_deg: float = 90.0
+
+    # GUI scale the user is running MC at. Used to size the crosshair
+    # mask (vanilla crosshair is 15 GUI px regardless of resolution).
+    # ``build_world_perception`` forwards this from
+    # ``capture.ui_scale`` so a single setting controls every layer.
+    ui_scale: int = 2
 
     # Patch grid for "look around me" sweeps. (n_cols, n_rows).
     # 24×14 = 336 patches gives roughly one ray per 60×60 pixel block
@@ -161,6 +165,29 @@ class WorldPerceptionConfig:
     # enough to trust.
     commit_only_from_looking_at: bool = True
 
+    # Skip the expensive commit / inverse-render-expansion / patch-sweep
+    # work on ticks where the F3 pose timestamp hasn't changed since the
+    # last processed tick. With threaded OCR the same pose is handed to
+    # ``update`` across several control-loop ticks; re-committing the
+    # same voxel and re-expanding the same neighbours each time is pure
+    # redundant CPU. Projecting a fresh frame against a STALE pose is
+    # also less accurate (pose/frame skew), so skipping is both faster
+    # and safer. Map growth then tracks the OCR cadence (~6-8 Hz) rather
+    # than the control-loop rate. Set False to force per-tick re-work.
+    skip_stale_pose_updates: bool = True
+
+    # Recognise the weather (clear / rain / snow / thunder / unknown)
+    # from the frame and attach it to the WorldFrame, so downstream
+    # recognition can account for rain/snow changing how blocks look.
+    # See ``vision.weather``.
+    detect_weather: bool = True
+    # Weather changes over MINUTES, so checking it every tick is wasted
+    # CPU (and steals GIL time from the far more valuable F3 OCR for
+    # pose / looking-at). We re-check at most this often; between checks
+    # the last verdict is simply held. The detector itself also holds
+    # whenever the sky isn't clearly in view, so a slow cadence is fine.
+    weather_check_interval_sec: float = 5.0
+
     # The legacy gate, kept for back-compat. Active only when
     # ``commit_only_from_looking_at`` is False.
     strict_commit_gate: bool = True
@@ -182,6 +209,18 @@ class WorldPerceptionConfig:
                                              # 2 = ±2 in each axis (≈ 124 voxels)
     expand_max_voxels_per_tick: int = 32    # cap CPU per frame
 
+    # Unified wall-clock budget (ms) for ALL the optional heavy work in
+    # one ``update`` — inverse-render expansion, curiosity cross-
+    # validation, and the patch sweep. Each project+warp+signature
+    # ``score_voxel`` is mid-single-digit ms; stacked across 32 expansion
+    # voxels + 8 cross-validations + a 24-patch sweep they reach ~150 ms
+    # and tank the control-loop rate in block-dense views. Each phase
+    # processes its highest-value candidates first and stops when the
+    # shared deadline passes — so the control loop holds its rate and
+    # the map just grows a little slower in dense scenes. 0 disables the
+    # cap (process everything, old behaviour).
+    perception_time_budget_ms: float = 30.0
+
     # Cross-validate curiosity-queue entries against the inverse
     # renderer. If a vision-patch guessed (block_id, voxel) AND the
     # geometric/texture check scores the SAME (block_id, voxel)
@@ -199,6 +238,15 @@ class WorldPerceptionConfig:
     # large clusters of false-positive cubes around the player.
     # 30 samples ≈ 3-4 distinct block ids; enough variety to discriminate.
     min_samples_for_commit: int = 30
+    # Per-block sample floor. Even if the total store has plenty of
+    # samples, predictions for a SPECIFIC block id are only trusted if
+    # that block has at least this many real labelled patches backing
+    # it. Stops the baseline ColourSignatureClassifier (1157 generic
+    # block templates) from producing false positives like
+    # acacia_leaves / mangrove_leaves / soul_sand when we've only ever
+    # captured grass, vines, stone, etc. Unbacked predictions still go
+    # to the curiosity queue so the agent can confirm them via F3.
+    min_samples_per_block_for_commit: int = 20
     # Cap the curiosity queue so a long session can't grow it
     # unboundedly. Older / lower-confidence entries are evicted first.
     curiosity_queue_max: int = 256
@@ -212,13 +260,23 @@ class WorldPerceptionConfig:
     margin_top_px:    int = 120        # leave room for Always-on F3 lines
     margin_bottom_px: int = 180        # leave room for hotbar + health/hunger
 
+    # Reference resolution for ``margin_*_px`` and ``exclude_rects``.
+    # The user calibrates these at a known window size (typically
+    # 1920x1129 client-area at GUI scale 2); when the actual captured
+    # frame has different dimensions (windowed mode, different
+    # monitor, the player resizing MC), the values are auto-scaled by
+    # the actual-frame / reference-frame ratio. This keeps the UI
+    # exclusion zones lined up with the hotbar / hand / F3 panel
+    # without re-calibrating after every window resize.
+    frame_ref_resolution: Tuple[int, int] = (1920, 1129)
+
     # Excluded-rectangle list. Patches whose centre falls inside ANY
     # of these rectangles are skipped during the sweep AND ignored
     # when capturing samples for the recogniser. The HOTBAR + the
     # player's first-person HAND in the bottom-right corner are the
     # canonical entries. Each rect is (x, y, w, h) in screen pixels
-    # at the captured 1920x1129 resolution; tools/window_inspector.py
-    # helps tune these if the user changes GUI scale or item-in-hand
+    # at ``frame_ref_resolution``; tools/window_inspector.py helps
+    # tune these if the user changes GUI scale or item-in-hand
     # animation.
     exclude_rects: Tuple[Tuple[int, int, int, int], ...] = (
         # Hotbar + health/hunger bars: bottom centre + bottom corners.
@@ -239,6 +297,14 @@ class WorldPerceptionConfig:
     # Run the entity detector every N ticks (1 = every frame).
     entity_detect_every_n_ticks: int = 4
 
+    # Sanity-cap for the targeted-block distance read out of F3 —
+    # used to reject OCR garbage that places a block kilometres
+    # away. MC's F3 raytrace reaches further than its interaction
+    # reach (typically up to ~20 blocks in 1.20+ with a clear line
+    # of sight), so 64 leaves comfortable headroom while still
+    # catching the occasional ``-77, 92, -.U?3`` style misread.
+    f3_target_max_dist_blocks: float = 64.0
+
     # ── Self-improvement: auto-sample blocks the F3 overlay names ──
     # When the F3 "Looking at block" line is visible, the perception
     # layer KNOWS which block the player is crosshaired at. We can
@@ -256,8 +322,37 @@ class WorldPerceptionConfig:
     # Patch size to sample around the crosshair when collecting. Larger
     # than the perception classifier's ``patch_size_px`` gives the
     # sample store a bit more context (it's stored at SAMPLE_SIZE after
-    # downscale either way).
-    sample_capture_px: int = 32
+    # downscale either way). 48 = 24 GUI-px at scale 2 — enough block
+    # surface around the crosshair for inpainting to fill the cross
+    # arms from real texture, not from the cross's own neighbours.
+    sample_capture_px: int = 48
+
+    # ── Debugging ────────────────────────────────────────────────
+    # When True, every ~N ticks the perception layer dumps the latest
+    # F3 raw OCR text plus the parse result. Useful to diagnose
+    # "no blocks are being logged" issues without staring at the live
+    # game — you can see whether OCR is producing the "Targeted Block"
+    # line at all, and if so why parse_looking_at_block isn't matching.
+    debug_f3_dump: bool = False
+    debug_f3_dump_interval_ticks: int = 100   # 5 s at 20 Hz
+
+    # ── Crosshair masking ─────────────────────────────────────────
+    # MC's crosshair sits at the centre of every sample we collect.
+    # It inverts the colour of the pixels underneath it (white on
+    # dark, dark on bright), which contaminates the sample with a
+    # synthetic + shape every future recogniser would learn to match
+    # instead of the underlying block texture. We inpaint the cross
+    # arms out using cv2.INPAINT_TELEA, propagating the surrounding
+    # block texture into the masked region.
+    mask_crosshair_in_samples: bool = True
+    # Crosshair geometry. Vanilla MC's hud/crosshair.png is 15 GUI px
+    # wide × 15 GUI px tall — a 1-px-thick + with arms reaching 7 GUI
+    # px each direction from centre. We add a tiny safety margin so
+    # inpainting catches the full anti-aliased edge.
+    crosshair_arm_half_len_gui: int = 8        # 7 + 1 margin
+    crosshair_arm_half_thick_gui: int = 1      # measured 1 GUI px
+    # Resource packs / overlays sometimes draw a larger crosshair.
+    # If you have one, bump these in settings.yaml.
 
     # Reload the sample recogniser's in-memory tensor every N saves.
     # Cheap (a few MB at typical sizes) and lets the recogniser pick
@@ -291,13 +386,25 @@ class WorldPerception:
                  entity_classifier: Optional[EntityClassifierProtocol] = None,
                  world_map: Optional[WorldMap] = None,
                  sample_store: Optional[WorldSampleStore] = None,
-                 inverse_renderer: Optional[InverseRenderer] = None):
+                 inverse_renderer: Optional[InverseRenderer] = None,
+                 weather_detector: Optional[Any] = None):
         self.cfg = config or WorldPerceptionConfig()
         self.block_classifier  = block_classifier
         self.entity_classifier = entity_classifier or build_entity_classifier()
         self.world_map         = world_map or WorldMap()
         self.sample_store      = sample_store
         self.inverse_renderer  = inverse_renderer
+        # Weather recogniser (optional). Built lazily here when enabled
+        # and not injected, so existing call-sites/tests keep working.
+        self.weather_detector = weather_detector
+        if self.weather_detector is None and self.cfg.detect_weather:
+            try:
+                from vision.weather import WeatherDetector
+                self.weather_detector = WeatherDetector()
+            except Exception as e:
+                print(f"[perception][WARN] weather detector unavailable: {e!r}")
+                self.weather_detector = None
+        self._last_weather = None
         self._tick             = 0
         self._screen_ray:      Optional[ScreenRay] = None
         self._last_frame_shape: Optional[Tuple[int, int]] = None
@@ -307,6 +414,35 @@ class WorldPerception:
         self._samples_saved_since_reload: int = 0
         # Stats useful for the live viewer / diagnostics.
         self._n_corrections: int = 0      # times a sample overrode a stale guess
+        # Count of distinct voxels F3 confirmed for the first time during
+        # this process lifetime — drives the "[perception] LOGGED ..."
+        # heartbeat so the user can see the agent making progress.
+        self._n_new_confirmed_this_run: int = 0
+        # Per-source commit counters. Lets the user see exactly how many
+        # voxels each pipeline stage put into the WorldMap. Crucial when
+        # ``commit_only_from_looking_at`` is False: it's the FIRST place
+        # you look if the map starts filling with garbage.
+        #   ``looking_at`` — F3 ground truth (the conservative baseline).
+        #   ``vision_patch`` — sample-NN matches from the patch sweep.
+        #   ``extrapolation`` — inverse-renderer expansion of F3 seeds.
+        # Each key is a (source, block_id) pair so we can spot a single
+        # block id flooding the map from a misclassification.
+        self._commits_by_source: Dict[Tuple[str, str], int] = {}
+        # Per-(guessed-block, actual-block) curiosity-correction counter.
+        # Incremented when F3 confirms a voxel that the patch sweep had
+        # ALREADY classified (and parked in the curiosity queue) with a
+        # different block id. These never reached the WorldMap — so they
+        # don't fall under ``_corrections_by_source`` — but they're the
+        # purest signal of "how often is the colour-signature baseline
+        # wrong, and what does it confuse for what." Drives dataset
+        # priorities: a heavy ``(acacia_leaves -> oak_leaves)`` entry
+        # means acacia_leaves should be the next block we collect.
+        self._curiosity_corrections: Dict[Tuple[str, str], int] = {}
+        # Per-(source, block) correction counter — incremented whenever
+        # F3 ground truth contradicts a previously-committed guess.
+        # If ``vision_patch`` racks up many corrections for the same id,
+        # that's a clear "tighten the confidence threshold" signal.
+        self._corrections_by_source: Dict[Tuple[str, str], int] = {}
         # Most recent successfully-parsed pose. Other modules (e.g. the
         # main loop's shutdown handler) read this to render a final
         # map snapshot.
@@ -322,6 +458,22 @@ class WorldPerception:
         # curiosity queue, even if a noisy patch sweep classifies them
         # again. Prevents the explorer from re-investigating known blocks.
         self._confirmed: set = set()
+        # Tracks the F3Info.timestamp of the previously processed read
+        # so we can fire the debug dump on EACH fresh OCR cycle instead
+        # of on every tick (most ticks reuse the same cached F3Info
+        # produced by the main loop). Re-using stale F3 would spam
+        # the same dump 7 times per cycle.
+        self._last_f3_dump_ts: Optional[float] = None
+        # Timestamp of the last F3 read we did the FULL commit/expand
+        # work for. Lets ``update`` skip redundant re-work when the same
+        # pose is handed in across several control ticks (threaded OCR).
+        self._last_processed_ts: Optional[float] = None
+        # Per-update wall-clock deadline shared by the heavy phases.
+        # Set at the top of each non-skipped update; None = no budget.
+        self._tick_deadline: Optional[float] = None
+        # Wall-clock of the last weather re-check (throttled — see
+        # ``weather_check_interval_sec``). -inf so the first tick checks.
+        self._last_weather_check: float = float("-inf")
 
     # ── Public API ─────────────────────────────────────────────────
 
@@ -342,10 +494,94 @@ class WorldPerception:
         self._tick += 1
         wf = WorldFrame(tick=self._tick, world_map=self.world_map)
 
+        # Weather recognition — independent of pose (works in a cave →
+        # "unknown", or outdoors with F3 off). THROTTLED: weather changes
+        # over minutes, so we re-check only every
+        # ``weather_check_interval_sec`` and hold the verdict in between.
+        # This keeps the main thread (and the GIL) free for the F3 OCR
+        # worker, which is the high-value perception (pose / looking-at).
+        # Best-effort: a detector failure must never abort perception.
+        # The held result rides on every WorldFrame (incl. the pose-None
+        # / stale-skip early returns below).
+        _now = time.perf_counter()
+        if (self.weather_detector is not None and frame_rgb is not None
+                and (_now - self._last_weather_check)
+                >= self.cfg.weather_check_interval_sec):
+            self._last_weather_check = _now
+            try:
+                # Pass pitch so the detector can skip frames where the
+                # camera is pitched down (top band isn't sky). f3.pitch
+                # is the raw read; None when pose is unavailable.
+                _pitch = getattr(f3, "pitch", None) if f3 is not None else None
+                w = self.weather_detector.detect(frame_rgb, pitch=_pitch)
+                # Log only on a state TRANSITION so a long run doesn't
+                # spam, but the user can see the agent noticing weather.
+                if w is not None and (self._last_weather is None
+                                      or w.state != self._last_weather.state):
+                    prev = self._last_weather.state if self._last_weather else "?"
+                    print(f"[weather] {prev} -> {w.state} "
+                          f"(conf={w.confidence:.2f}, sky={w.sky_visible:.2f}, "
+                          f"src={w.source})")
+                self._last_weather = w
+            except Exception as e:
+                if not getattr(self, "_weather_warn_emitted", False):
+                    self._weather_warn_emitted = True
+                    print(f"[perception][WARN] weather detect failed: {e!r} "
+                          f"(further errors silenced)")
+        wf.weather = self._last_weather
+
+        # F3 diagnostic dump must fire BEFORE the pose-None early-out:
+        # when pose fails to parse (most common during scan / no-target
+        # streaks) the dump is exactly what tells us WHY. Show every
+        # parsed field plus the first ~320 chars of raw text. Throttled
+        # to one print per fresh F3Info.timestamp so we don't repeat
+        # the same dump 7 times across the ticks that reuse the same
+        # cached OCR result between 3 Hz reads.
+        if self.cfg.debug_f3_dump and f3 is not None:
+            ts = getattr(f3, "timestamp", None)
+            if ts is not None and ts != self._last_f3_dump_ts:
+                self._last_f3_dump_ts = ts
+
+                def _fmt(v, fmt: str = ".2f") -> str:
+                    return ("?" if v is None
+                            else format(v, fmt) if isinstance(v, (int, float))
+                            else str(v))
+
+                print(f"[F3] tick={self._tick} backend={f3.backend}  "
+                      f"xyz=({_fmt(f3.x, '.3f')}, {_fmt(f3.y, '.3f')}, "
+                      f"{_fmt(f3.z, '.3f')})  "
+                      f"yaw={_fmt(f3.yaw, '.1f')} pitch={_fmt(f3.pitch, '.1f')}  "
+                      f"facing={_fmt(f3.facing_name, 's')} "
+                      f"dim={_fmt(f3.dimension, 's')}  "
+                      f"block={_fmt(f3.block_x, 'd')},"
+                      f"{_fmt(f3.block_y, 'd')},"
+                      f"{_fmt(f3.block_z, 'd')}")
+                raw = (f3.raw_text or "").replace("\n", " | ")
+                if len(raw) > 1600:
+                    raw = raw[:1597] + "..."
+                print(f"[F3]   raw: {raw!r}")
+
         pose = self._pose_from_f3(f3)
         if pose is None:
             return wf
         wf.pose = pose
+        # Detect dimension change BEFORE updating ``_last_pose``. Voxel
+        # coords are dimension-specific (nether ↔ overworld map to
+        # different scales AND completely separate block states), so
+        # any curiosity entry / confirmed-voxel set carried over from
+        # the prior dimension is stale by definition. Purge them so
+        # the agent doesn't waste cycles aiming at coords that no
+        # longer correspond to anything visible.
+        prev_dim = (self._last_pose.dimension
+                    if self._last_pose is not None else None)
+        if (pose.dimension is not None and prev_dim is not None
+                and pose.dimension != prev_dim):
+            print(f"[perception] DIMENSION CHANGE {prev_dim} -> "
+                  f"{pose.dimension}; purging {len(self._curiosity)} "
+                  f"curiosity entries and {len(self._confirmed)} "
+                  f"confirmed voxels")
+            self._curiosity.clear()
+            self._confirmed.clear()
         self._last_pose = pose
         if pose.dimension:
             self.world_map.set_current_dimension(pose.dimension)
@@ -370,6 +606,27 @@ class WorldPerception:
         if sr is None or frame_rgb is None:
             return wf
 
+        # Stale-pose skip: with threaded OCR the same F3Info (same
+        # timestamp) is handed to ``update`` across several control
+        # ticks. Re-committing the same voxel + re-expanding the same
+        # neighbours every tick is redundant CPU, and projecting a fresh
+        # frame against a stale pose only adds skew. Do the heavy work
+        # once per fresh pose; ``wf.pose`` is already set so the agent
+        # still gets the current pose this tick.
+        f3_ts = getattr(f3, "timestamp", None) if f3 is not None else None
+        if (self.cfg.skip_stale_pose_updates
+                and f3_ts is not None
+                and f3_ts == self._last_processed_ts):
+            return wf
+        self._last_processed_ts = f3_ts
+
+        # Shared wall-clock deadline for all optional heavy phases this
+        # tick (expansion / cross-validation / patch sweep). ``None``
+        # when the budget is disabled. Phases process best-first and
+        # bail once this passes, bounding the worst-case tick.
+        budget_s = max(0.0, float(self.cfg.perception_time_budget_ms) / 1000.0)
+        self._tick_deadline = (time.perf_counter() + budget_s) if budget_s else None
+
         eye = (pose.x, pose.eye_y, pose.z)
         anchor_depth: Optional[float] = None  # filled if we get F3 ground truth
         # When `target_was_rejected` is True we KNOW the player was
@@ -381,19 +638,62 @@ class WorldPerception:
         target_was_rejected = False
 
         # 1. F3 "Looking at block" line — exact, if visible.
+        la = None
+        # Detect whether MC's F3 panel CONTAINS a Targeted-Block-style
+        # line even if we couldn't parse coords from it. Used below to
+        # set ``target_was_rejected`` so the forward-ray air-carving
+        # path knows the player WAS looking at something — just not
+        # parseable — and refuses to mark voxels along that ray as air.
+        # Without this, an OCR cycle that reads the label but garbles
+        # the coords would mistakenly "see free space" through a wall.
+        label_seen_unparsed = False
         if f3 is not None and f3.raw_text:
             la = parse_looking_at_block(f3.raw_text.splitlines())
-            # Reject confidence-0.5 reads where the coord parser
-            # couldn't extract a target position. The block id alone
-            # at position (0,0,0) would pollute the map.
-            if la is not None and la.confidence < 1.0:
+            if la is None:
+                low = f3.raw_text.lower()
+                if "targeted" in low or "looking at" in low:
+                    label_seen_unparsed = True
+
+        # Diagnostic dump on every FRESH F3 read. The main loop hands
+        # the same F3Info to perception across all 20 Hz ticks between
+        # 3 Hz OCR calls, so we key off ``f3.timestamp`` to fire the
+        # dump exactly once per real OCR cycle.
+        #
+        # (The numeric-field dump moved earlier in ``update()`` so it
+        # fires even when pose fails to parse — we still want to see
+        # WHY pose is missing. Here we add the looking_at parse
+        # result onto the most recent dump line; the numeric dump
+        # above will already have run for this same fresh timestamp.)
+        if (self.cfg.debug_f3_dump and f3 is not None
+                and getattr(f3, "timestamp", None) is not None):
+            parse_str = (
+                f"id={la.block_id} pos={la.pos} conf={la.confidence}"
+                if la is not None else "<no match>"
+            )
+            print(f"[F3]   looking_at: {parse_str}")
+
+        if f3 is not None and f3.raw_text:
+            # Label was present but the parser couldn't extract coords.
+            # Treat as a rejection so the air-carving path stays safe.
+            if label_seen_unparsed:
                 wf.diagnostics.setdefault("looking_at_rejects", []).append(
-                    {"reason": "no_coords", "id": la.block_id})
+                    {"reason": "no_coords"})
                 target_was_rejected = True
-                la = None
-            # Reject targets outside MC's block-reach distance from
-            # the eye. F3 never reports unreachable blocks, so any
-            # such reading is OCR garbage (wrong coords).
+            # SANITY-check the targeted-block distance against the eye.
+            # The old check rejected anything beyond
+            # ``crosshair_reach_blocks + 1.5`` (≈ 6.5 blocks) on the
+            # assumption that F3 only reports interaction-range
+            # targets — but in MC 1.20+ F3's raytrace distance is much
+            # larger than the interaction-reach attribute and routinely
+            # reports targets 15-20 blocks away when the crosshair has
+            # a clear line of sight. That made the agent reject valid
+            # F3 reads in jungles and on hilltops.
+            #
+            # Now we ONLY reject obvious OCR garbage: coordinates more
+            # than ``f3_target_max_dist_blocks`` from the eye (default
+            # 64). That covers MC's longest plausible raytrace range
+            # while still catching parse errors that put the target on
+            # the other side of the world.
             if la is not None:
                 tcx = la.pos[0] + 0.5
                 tcy = la.pos[1] + 0.5
@@ -401,7 +701,8 @@ class WorldPerception:
                 d = math.sqrt((tcx - eye[0]) ** 2
                               + (tcy - eye[1]) ** 2
                               + (tcz - eye[2]) ** 2)
-                if d > self.cfg.crosshair_reach_blocks + 1.5:
+                max_dist = self.cfg.f3_target_max_dist_blocks
+                if d > max_dist:
                     wf.diagnostics.setdefault("looking_at_rejects", []).append(
                         {"reason": "out_of_reach", "pos": list(la.pos),
                          "distance": round(d, 2),
@@ -410,6 +711,26 @@ class WorldPerception:
                     la = None
             if la is not None:
                 wf.looking_at = la
+
+                # Curiosity-queue correction signal. The voxel F3 just
+                # confirmed may have been parked in the curiosity queue
+                # under a different block id (the patch sweep guessed
+                # one thing, F3 says another). The entry never reached
+                # the WorldMap — the commit gate caught it — but the
+                # disagreement is still the cleanest "where is the
+                # classifier wrong" signal we have. Tally before
+                # removing the entry from the queue so the entry's
+                # block_id is available.
+                curio_entry = self._curiosity.get(la.pos)
+                if (curio_entry is not None
+                        and curio_entry.get("block_id") is not None
+                        and curio_entry["block_id"] != la.block_id):
+                    ck = (curio_entry["block_id"], la.block_id)
+                    self._curiosity_corrections[ck] = \
+                        self._curiosity_corrections.get(ck, 0) + 1
+                    print(f"[perception] CURIO-CORRECTION at {la.pos}: "
+                          f"guess={curio_entry['block_id']} -> "
+                          f"F3={la.block_id}")
 
                 # Self-improvement signal: the F3 overlay just told us
                 # EXACTLY what block is under the crosshair. If we had
@@ -423,13 +744,26 @@ class WorldPerception:
                         and prev.block_id != la.block_id
                         and prev.source in ("vision_patch", "extrapolation")):
                     self._n_corrections += 1
+                    # Tally the corrected (source, wrong-block) so we
+                    # can spot a single source repeatedly mislabelling
+                    # one block id — e.g. ``("vision_patch", "stone")``
+                    # spiking means we should tighten the NN
+                    # confidence threshold for stone specifically.
+                    ckey = (prev.source, prev.block_id)
+                    self._corrections_by_source[ckey] = \
+                        self._corrections_by_source.get(ckey, 0) + 1
                     wf.diagnostics.setdefault("corrections", []).append({
                         "pos": list(la.pos),
                         "was": prev.block_id,
                         "now": la.block_id,
                     })
+                    # Real-time log so we can SEE the agent
+                    # self-correcting during a run.
+                    print(f"[perception] CORRECTION at {la.pos}: "
+                          f"{prev.source} said {prev.block_id} → F3 says "
+                          f"{la.block_id}")
 
-                self.world_map.update_block(BlockObservation(
+                self._commit(BlockObservation(
                     pos          = la.pos,
                     block_id     = la.block_id,
                     confidence   = la.confidence,
@@ -438,6 +772,17 @@ class WorldPerception:
                     dimension    = pose.dimension,
                     meta         = {"face": la.face} if la.face else {},
                 ))
+                # Visible LOG line the FIRST time each voxel is
+                # confirmed. Repeated confirmations of the same voxel
+                # are silent so a long stare doesn't spam the console.
+                # The world_map is the authoritative store; this is
+                # purely a user-visible heartbeat.
+                if la.pos not in self._confirmed:
+                    self._n_new_confirmed_this_run += 1
+                    short_id = la.block_id.replace("minecraft:", "")
+                    print(f"[perception] LOGGED {short_id} @ "
+                          f"({la.pos[0]}, {la.pos[1]}, {la.pos[2]})  "
+                          f"[#{self._n_new_confirmed_this_run}]")
                 # Once F3 confirms it, the voxel leaves the curiosity
                 # queue and never re-enters it.
                 self._confirmed.add(la.pos)
@@ -523,6 +868,12 @@ class WorldPerception:
                         "target_voxel": list(la.pos),
                         "distance_blocks": distance_blocks,
                         "rejected_guess": last_rejected,
+                        # Weather under which this block sample was
+                        # captured — lets future training condition block
+                        # appearance on rain/snow/clear instead of
+                        # blending wet + dry views of the same block.
+                        "weather": (self._last_weather.state
+                                    if self._last_weather is not None else None),
                         "source": "f3_looking_at",
                     }
                     self._maybe_save_crosshair_sample(
@@ -592,7 +943,7 @@ class WorldPerception:
                     pos        = crosshair_obs.pos,
                     confidence = crosshair_obs.confidence,
                 )
-                self.world_map.update_block(crosshair_obs)
+                self._commit(crosshair_obs)
                 if self.cfg.carve_air_along_sightlines:
                     cleared = self._air_voxels_along(
                         eye=eye, target_voxel=crosshair_obs.pos,
@@ -614,14 +965,19 @@ class WorldPerception:
             n_air_carved = 0
             n_committed  = 0
             n_curious    = 0
+            _deadline = getattr(self, "_tick_deadline", None)
             for obs in self._sweep_patches(frame_rgb, sr, pose, anchor_depth):
+                # Each yielded patch already paid a classify; stop pulling
+                # more once the shared per-update budget is spent.
+                if _deadline is not None and time.perf_counter() > _deadline:
+                    break
                 wf.visible_blocks.append(obs)
                 # Strict commit gate: vision-patch guesses ONLY enter
                 # the WorldMap when both (a) the sample-NN recogniser
                 # gave a confident verdict, and (b) the voxel hasn't
                 # been previously F3-confirmed as a different block.
                 if self._should_commit(obs):
-                    self.world_map.update_block(obs)
+                    self._commit(obs)
                     n_committed += 1
                     if self.cfg.carve_air_along_sightlines:
                         cleared = self._air_voxels_along(
@@ -707,14 +1063,30 @@ class WorldPerception:
     # ── Pose helpers ───────────────────────────────────────────────
 
     def _pose_from_f3(self, f3: Optional[F3Info]) -> Optional[PlayerPose]:
-        if f3 is None or f3.x is None or f3.yaw is None or f3.pitch is None:
+        """
+        Build a :class:`PlayerPose` from the latest F3 parse.
+
+        Position (x/y/z) is REQUIRED — without an eye position we can't
+        evaluate reach distance or project anything to screen space.
+        ``yaw`` and ``pitch``, however, are OPTIONAL: when MC's
+        ``Facing: <card> (yaw / pitch)`` line gets too OCR-garbled to
+        recover the angles (capital ``F`` lost, ``/`` separator eaten),
+        we still want to COMMIT the targeted-block reads we DO have —
+        those come from the ``Targeted Block:`` line + the
+        ``minecraft:<id>`` line, neither of which depends on
+        orientation. Missing yaw/pitch fall back to 0.0 so downstream
+        code that needs an orientation (forward-vector, patch sweep)
+        gets a defined-but-arbitrary value; those code paths are gated
+        off in scan-only mode anyway.
+        """
+        if f3 is None or f3.x is None:
             return None
         return PlayerPose(
             x = float(f3.x),
             y = float(f3.y) if f3.y is not None else 0.0,
             z = float(f3.z) if f3.z is not None else 0.0,
-            yaw = float(f3.yaw),
-            pitch = float(f3.pitch),
+            yaw = float(f3.yaw) if f3.yaw is not None else 0.0,
+            pitch = float(f3.pitch) if f3.pitch is not None else 0.0,
             dimension = f3.dimension or "minecraft:overworld",
             block_x = f3.block_x,
             block_y = f3.block_y,
@@ -868,7 +1240,10 @@ class WorldPerception:
         ordered = sorted(self._curiosity.items(),
                          key=lambda kv: -kv[1]["seen_tick"])
         committed = 0
+        deadline = getattr(self, "_tick_deadline", None)
         for pos, meta in ordered[:cap]:
+            if deadline is not None and time.perf_counter() > deadline:
+                break
             block_id = meta.get("block_id")
             if not block_id:
                 continue
@@ -876,13 +1251,25 @@ class WorldPerception:
             if pos in self._confirmed:
                 self._curiosity.pop(pos, None)
                 continue
-            score = ir.score_voxel(
-                frame_rgb, pos, block_id,
-                sr=sr, eye=eye, yaw=pose.yaw, pitch=pose.pitch,
-            )
+            try:
+                score = ir.score_voxel(
+                    frame_rgb, pos, block_id,
+                    sr=sr, eye=eye, yaw=pose.yaw, pitch=pose.pitch,
+                )
+            except Exception as e:
+                # Inverse renderer can raise on exotic block ids
+                # whose face textures aren't in the asset cache.
+                # Skip silently (single bad id shouldn't kill the
+                # tick); surface first occurrence so we know.
+                if not getattr(self, "_ir_score_warn_emitted", False):
+                    self._ir_score_warn_emitted = True
+                    print(f"[perception][WARN] inverse_renderer.score_voxel "
+                          f"raised {e!r} for {block_id!r} — further "
+                          f"errors silenced")
+                continue
             if score < self.cfg.inverse_validate_score_min:
                 continue
-            self.world_map.update_block(BlockObservation(
+            self._commit(BlockObservation(
                 pos=pos, block_id=block_id,
                 confidence=min(0.95, score + meta["confidence"] * 0.3),
                 source="extrapolation",
@@ -943,14 +1330,30 @@ class WorldPerception:
                     candidates.append((chebyshev, pos))
         candidates.sort(key=lambda kv: kv[0])
 
+        # Closest-first, bounded by both the voxel budget and the shared
+        # per-update wall-clock deadline (see ``perception_time_budget_ms``)
+        # so a block-dense scene can't blow the tick.
+        deadline = getattr(self, "_tick_deadline", None)
         for _dist, pos in candidates[:budget]:
-            score = ir.score_voxel(
-                frame_rgb, pos, seed_block_id,
-                sr=sr, eye=eye, yaw=pose.yaw, pitch=pose.pitch,
-            )
+            if deadline is not None and time.perf_counter() > deadline:
+                break
+            try:
+                score = ir.score_voxel(
+                    frame_rgb, pos, seed_block_id,
+                    sr=sr, eye=eye, yaw=pose.yaw, pitch=pose.pitch,
+                )
+            except Exception as e:
+                # Exotic block id without an asset-cache face texture
+                # — skip without crashing the tick.
+                if not getattr(self, "_ir_expand_warn_emitted", False):
+                    self._ir_expand_warn_emitted = True
+                    print(f"[perception][WARN] inverse_renderer.score_voxel "
+                          f"raised {e!r} during F3-seed expansion for "
+                          f"{seed_block_id!r} — further errors silenced")
+                continue
             if score < cfg.expand_score_min:
                 continue
-            self.world_map.update_block(BlockObservation(
+            self._commit(BlockObservation(
                 pos=pos, block_id=seed_block_id,
                 confidence=score, source="extrapolation",
                 last_seen_tick=self._tick,
@@ -976,11 +1379,12 @@ class WorldPerception:
         raytrace returned no target — every voxel within MC's
         reach along the player's forward ray must be transparent.
         """
-        out: List[Tuple[int, int, int]] = []
-        for travel, vox in self._enumerate_voxels(eye, direction,
-                                                    max_distance):
-            out.append(vox)
-        return out
+        # We only need the voxel positions here; ``_enumerate_voxels``
+        # also yields the cumulative travel distance which other
+        # callers consume — discard it with ``_`` to keep this helper
+        # cheap and obvious about its intent.
+        return [vox for _, vox in self._enumerate_voxels(eye, direction,
+                                                          max_distance)]
 
     # ── Free-space carving ────────────────────────────────────────
 
@@ -1049,6 +1453,18 @@ class WorldPerception:
                                  self.cfg.sample_capture_px)
         if patch is None:
             return
+        # Remove the crosshair before persisting — see the long
+        # rationale on ``mask_crosshair_in_samples`` in the config
+        # dataclass. Failure here MUST NOT abort sample collection,
+        # so we fall back to the raw patch on any inpaint error.
+        if self.cfg.mask_crosshair_in_samples:
+            try:
+                patch = self._mask_crosshair(patch)
+            except Exception as e:
+                if not getattr(self, "_warned_crosshair_mask", False):
+                    print(f"[perception][WARN] crosshair masking failed "
+                          f"({e!r}); saving raw patch")
+                    self._warned_crosshair_mask = True
         path = self.sample_store.save(block_id, patch, metadata=metadata)
         if path is None:
             # Duplicate or cap reached — still update the throttle so we
@@ -1069,7 +1485,15 @@ class WorldPerception:
 
     def _reload_sample_recognizer(self) -> None:
         """If the active classifier is a hybrid wrapping a sample
-        recogniser, refresh its in-memory tensor."""
+        recogniser, refresh its in-memory tensor.
+
+        First-failure log: a silently-failing reload makes the
+        recogniser stale forever. We auto-collect samples every F3
+        confirm and rely on the reload to surface new block ids, so a
+        silent failure here breaks the entire self-improvement loop —
+        the agent thinks it's learning but never recognises the new
+        block. Surface the first occurrence.
+        """
         cls = self.block_classifier
         if cls is None:
             return
@@ -1077,8 +1501,12 @@ class WorldPerception:
         if callable(reload_fn):
             try:
                 reload_fn()
-            except Exception:
-                pass
+            except Exception as e:
+                if not getattr(self, "_reload_warn_emitted", False):
+                    self._reload_warn_emitted = True
+                    print(f"[perception][WARN] sample recogniser reload "
+                          f"failed: {e!r}. The self-improvement loop is "
+                          f"now stale until restart.")
 
     # ── Patch sweep ────────────────────────────────────────────────
 
@@ -1110,10 +1538,19 @@ class WorldPerception:
             return []
 
         H, W = frame_rgb.shape[:2]
-        x0 = self.cfg.margin_left_px
-        x1 = W - self.cfg.margin_right_px
-        y0 = self.cfg.margin_top_px
-        y1 = H - self.cfg.margin_bottom_px
+        # Resolution-aware scaling: the user calibrates margins and
+        # exclude_rects at ``frame_ref_resolution``; if the captured
+        # frame is a different size (windowed MC, different monitor,
+        # the player resizing the window), scale every pixel value
+        # by the actual / reference ratio so the UI exclusion zones
+        # still cover the hotbar / hand / F3 panel correctly.
+        ref_w, ref_h = self.cfg.frame_ref_resolution
+        sx = W / float(ref_w) if ref_w > 0 else 1.0
+        sy = H / float(ref_h) if ref_h > 0 else 1.0
+        x0 = int(round(self.cfg.margin_left_px   * sx))
+        x1 = W - int(round(self.cfg.margin_right_px  * sx))
+        y0 = int(round(self.cfg.margin_top_px    * sy))
+        y1 = H - int(round(self.cfg.margin_bottom_px * sy))
         if x1 - x0 < self.cfg.patch_size_px or y1 - y0 < self.cfg.patch_size_px:
             return []
 
@@ -1123,9 +1560,24 @@ class WorldPerception:
         best_per_voxel: Dict[Tuple[int, int, int],
                               Tuple[float, BlockObservation]] = {}
 
-        excludes = self.cfg.exclude_rects or ()
+        excludes = tuple(
+            (int(round(rx * sx)), int(round(ry * sy)),
+             int(round(rw * sx)), int(round(rh * sy)))
+            for (rx, ry, rw, rh) in (self.cfg.exclude_rects or ())
+        )
+        # Shared per-update wall-clock deadline. The per-patch
+        # ``block_classifier.classify`` (sample-NN) is the single most
+        # expensive perception op and scales with the sample dataset, so
+        # we MUST bound how many patches we classify per tick here —
+        # checking the deadline in the CALLER doesn't help because this
+        # method builds the whole list eagerly before returning.
+        deadline = getattr(self, "_tick_deadline", None)
         for j in range(n_rows):
+            if deadline is not None and time.perf_counter() > deadline:
+                break
             for i in range(n_cols):
+                if deadline is not None and time.perf_counter() > deadline:
+                    break
                 px = int(x0 + (i + 0.5) * (x1 - x0) / n_cols)
                 py = int(y0 + (j + 0.5) * (y1 - y0) / n_rows)
                 # Skip patches landing inside any excluded rectangle —
@@ -1215,7 +1667,60 @@ class WorldPerception:
             return None
         return frame[y0:y1, x0:x1]
 
+    def _mask_crosshair(self, patch_rgb: np.ndarray) -> np.ndarray:
+        """
+        Inpaint the crosshair arms out of a centre-cropped patch.
+
+        MC's crosshair (gui/sprites/hud/crosshair.png, 15×15 GUI px)
+        sits dead-centre on every sample we collect. It inverts the
+        colours of pixels underneath, so neither bright-pixel nor
+        edge-based detection works reliably across light/dark biomes.
+        A fixed geometric mask of the cross arms is robust regardless
+        of background, and ``cv2.INPAINT_TELEA`` propagates the
+        surrounding block texture into the masked region — the saved
+        patch ends up with continuous block pixels in the centre
+        instead of a synthetic + that future recognisers would learn.
+
+        Returns a fresh array; the input is not modified in place.
+        """
+        h, w = patch_rgb.shape[:2]
+        cx, cy = w // 2, h // 2
+        scale = max(1, int(self.cfg.ui_scale))
+        arm_half_len   = self.cfg.crosshair_arm_half_len_gui   * scale
+        arm_half_thick = self.cfg.crosshair_arm_half_thick_gui * scale
+        mask = np.zeros((h, w), dtype=np.uint8)
+        # Horizontal arm.
+        y0 = max(0, cy - arm_half_thick)
+        y1 = min(h, cy + arm_half_thick + 1)
+        x0 = max(0, cx - arm_half_len)
+        x1 = min(w, cx + arm_half_len + 1)
+        mask[y0:y1, x0:x1] = 255
+        # Vertical arm.
+        y0 = max(0, cy - arm_half_len)
+        y1 = min(h, cy + arm_half_len + 1)
+        x0 = max(0, cx - arm_half_thick)
+        x1 = min(w, cx + arm_half_thick + 1)
+        mask[y0:y1, x0:x1] = 255
+        # cv2.inpaint requires a contiguous uint8 BGR/RGB image; if the
+        # caller handed us a non-contiguous slice (view of a larger
+        # frame) we must copy it first.
+        if not patch_rgb.flags["C_CONTIGUOUS"]:
+            patch_rgb = np.ascontiguousarray(patch_rgb)
+        return cv2.inpaint(patch_rgb, mask, 3, cv2.INPAINT_TELEA)
+
     # ── Strict-commit + curiosity queue ────────────────────────────
+
+    def _commit(self, obs: BlockObservation) -> None:
+        """
+        Persist a BlockObservation to the WorldMap AND tally it in the
+        per-source / per-block counter. Every commit path in this module
+        funnels through here so the stats are authoritative — every
+        voxel in the WorldMap maps 1:1 to an increment in
+        ``_commits_by_source`` keyed by ``(source, block_id)``.
+        """
+        self.world_map.update_block(obs)
+        key = (obs.source or "?", obs.block_id or "?")
+        self._commits_by_source[key] = self._commits_by_source.get(key, 0) + 1
 
     def _should_commit(self, obs: BlockObservation) -> bool:
         """
@@ -1247,8 +1752,39 @@ class WorldPerception:
         sample_rec = getattr(cls, "sample", None)
         if sample_rec is None:
             return False
-        n = getattr(sample_rec, "sample_count", lambda: 0)()
-        if n < self.cfg.min_samples_for_commit:
+        # Per-block sample-backing check.
+        #
+        # The previous version checked TOTAL ``sample_count()`` of the
+        # store — but the HybridBlockClassifier falls back to the
+        # colour-signature baseline (1157 block templates from the MC
+        # asset jar) whenever the sample-NN can't confidently name a
+        # patch. The baseline ROUTINELY returns block ids the sample
+        # store has never seen (`acacia_leaves`, `mangrove_leaves`,
+        # `sugar_cane`, etc.). With the old gate those leaked into
+        # the WorldMap because the gate only verified the store had
+        # ≥30 samples in TOTAL — which it does, just not of THIS
+        # block.
+        #
+        # The fix: require the SPECIFIC block id to have at least
+        # ``min_samples_per_block_for_commit`` samples backing it.
+        # Predictions for blocks we've never trained on are rejected
+        # (they go to the curiosity queue and the agent can aim its
+        # crosshair to learn that block via F3).
+        # Total-store floor (defence in depth): even if a single
+        # block has 20 captures, the NN needs at least 2 distinct
+        # classes to discriminate. ``min_samples_for_commit`` keeps
+        # the historic "enough data on disk" gate alongside the
+        # tighter per-block check below. Use public accessors so
+        # a future thread-safe ``reload()`` doesn't expose us to a
+        # half-rebuilt internal list.
+        try:
+            total_samples = sample_rec.sample_count()
+            per_block_count = sample_rec.count_for(obs.block_id)
+        except AttributeError:
+            return False
+        if total_samples < self.cfg.min_samples_for_commit:
+            return False
+        if per_block_count < self.cfg.min_samples_per_block_for_commit:
             return False
         return True
 
@@ -1275,6 +1811,7 @@ class WorldPerception:
                               *,
                               eye: Tuple[float, float, float],
                               prefer: str = "closest",
+                              yaw_deg: Optional[float] = None,
                               ) -> Optional[Tuple[int, int, int]]:
         """
         Pop and return one voxel for the agent to investigate next.
@@ -1283,6 +1820,14 @@ class WorldPerception:
           * ``"closest"`` — nearest voxel to the eye (default).
           * ``"oldest"``  — entry with the smallest ``seen_tick``.
           * ``"lowest_conf"`` — voxel where the classifier was least sure.
+          * ``"in_view"``  — closest voxel AHEAD of the current view
+            direction (requires ``yaw_deg``). Strongly preferred over
+            ``closest`` for the live agent loop: rotating 140° to
+            investigate a voxel behind you wastes 5+ seconds of camera
+            motion and routinely fails to converge before the
+            investigate timeout. A voxel 3 blocks ahead at yaw_err=5°
+            is dramatically faster to confirm than one 1 block behind
+            at yaw_err=170°, even if the geometric distance is similar.
 
         Returns ``None`` if the queue is empty.
         """
@@ -1294,6 +1839,30 @@ class WorldPerception:
         elif prefer == "lowest_conf":
             pos = min(self._curiosity,
                       key=lambda p: self._curiosity[p]["confidence"])
+        elif prefer == "in_view" and yaw_deg is not None:
+            # Score = distance + heavy yaw-error penalty. Voxels behind
+            # the player score worst even at close range; voxels
+            # straight ahead at moderate range score best.
+            import math as _math
+            yaw_rad = _math.radians(yaw_deg)
+            forward_x = -_math.sin(yaw_rad)
+            forward_z =  _math.cos(yaw_rad)
+            def _s(p):
+                dx = p[0] + 0.5 - eye[0]
+                dz = p[2] + 0.5 - eye[2]
+                horiz = _math.hypot(dx, dz)
+                # Cosine of angle between forward and direction-to-voxel.
+                # 1.0 = straight ahead, -1.0 = directly behind.
+                if horiz < 0.01:
+                    cos_ang = 1.0
+                else:
+                    cos_ang = (forward_x * dx + forward_z * dz) / horiz
+                # 0 when straight ahead, 4 when directly behind.
+                ahead_penalty = 2.0 * (1.0 - cos_ang)
+                dy = p[1] + 0.5 - eye[1]
+                dist_sq = dx * dx + dy * dy + dz * dz
+                return dist_sq + ahead_penalty * ahead_penalty * 6.0
+            pos = min(self._curiosity, key=_s)
         else:  # closest
             def _d(p):
                 return ((p[0] + 0.5 - eye[0]) ** 2
@@ -1332,6 +1901,15 @@ class WorldPerception:
         return self._tick
 
     def stats(self) -> Dict[str, Any]:
+        # Sort per-source commits + corrections so the shutdown dump
+        # reads top-down by volume — easier to spot the troublemakers.
+        commits_sorted = sorted(self._commits_by_source.items(),
+                                  key=lambda kv: -kv[1])
+        corrections_sorted = sorted(self._corrections_by_source.items(),
+                                      key=lambda kv: -kv[1])
+        curio_corrections_sorted = sorted(
+            self._curiosity_corrections.items(), key=lambda kv: -kv[1]
+        )
         out: Dict[str, Any] = {
             "tick": self._tick,
             "templates_loaded": (self.block_classifier.template_count()
@@ -1341,6 +1919,25 @@ class WorldPerception:
             "corrections_seen": self._n_corrections,
             "curiosity_size":  len(self._curiosity),
             "confirmed_count": len(self._confirmed),
+            # Per-source / per-block breakdown for the FN/FP audit. A
+            # healthy run has many ``looking_at`` commits, a smaller
+            # number of ``vision_patch`` commits, and a SMALL count
+            # of corrections relative to vision_patch — say <10%.
+            "commits_by_source": {
+                f"{src}:{bid}": n for (src, bid), n in commits_sorted
+            },
+            "corrections_by_source": {
+                f"{src}:{bid}": n for (src, bid), n in corrections_sorted
+            },
+            # Curiosity-queue corrections: (guessed_block) -> (actual_block)
+            # counts. Diagnostic-only; never committed anywhere. Heavy
+            # entries point at which block id the classifier hallucinates
+            # most, and which real block it actually was — both useful
+            # for dataset prioritisation.
+            "curiosity_corrections": {
+                f"{guess}->{actual}": n
+                for (guess, actual), n in curio_corrections_sorted
+            },
         }
         if self.sample_store is not None:
             out["sample_store"] = {
@@ -1396,19 +1993,34 @@ def build_world_perception(settings: Optional[Dict[str, Any]] = None,
                 "sample_reload_every_n_saves",
                 "curiosity_queue_max",
                 "min_samples_for_commit",
+                "min_samples_per_block_for_commit",
                 "expand_neighbour_radius",
                 "expand_max_voxels_per_tick",
-                "inverse_validate_max_per_tick"):
+                "inverse_validate_max_per_tick",
+                "crosshair_arm_half_len_gui",
+                "crosshair_arm_half_thick_gui"):
         if key in world_cfg:
             setattr(cfg, key, int(world_cfg[key]))
+    # ui_scale lives at top-level capture.* in settings.yaml — pull
+    # it from there if the user hasn't specified an override on
+    # vision.world directly.
+    capture_ui_scale = (settings or {}).get("capture", {}).get("ui_scale")
+    if "ui_scale" in world_cfg:
+        cfg.ui_scale = int(world_cfg["ui_scale"])
+    elif capture_ui_scale is not None:
+        cfg.ui_scale = int(capture_ui_scale)
     for key in ("max_walk_distance", "crosshair_reach_blocks",
                 "min_block_confidence",
                 "default_anchor_depth", "depth_search_radius",
                 "sample_commit_confidence",
                 "expand_score_min",
+                "perception_time_budget_ms",
+                "weather_check_interval_sec",
                 "inverse_validate_score_min"):
         if key in world_cfg:
             setattr(cfg, key, float(world_cfg[key]))
+    if "skip_stale_pose_updates" in world_cfg:
+        cfg.skip_stale_pose_updates = bool(world_cfg["skip_stale_pose_updates"])
     if "auto_sample_from_looking_at" in world_cfg:
         cfg.auto_sample_from_looking_at = bool(
             world_cfg["auto_sample_from_looking_at"])
@@ -1416,7 +2028,10 @@ def build_world_perception(settings: Optional[Dict[str, Any]] = None,
                  "use_f3_depth_anchor",
                  "use_inverse_renderer",
                  "inverse_validate_curiosity",
-                 "commit_only_from_looking_at"):
+                 "commit_only_from_looking_at",
+                 "mask_crosshair_in_samples",
+                 "detect_weather",
+                 "debug_f3_dump"):
         if bkey in world_cfg:
             setattr(cfg, bkey, bool(world_cfg[bkey]))
     # ``exclude_rects`` from YAML: list of [x, y, w, h].
@@ -1430,6 +2045,13 @@ def build_world_perception(settings: Optional[Dict[str, Any]] = None,
         if parsed:
             cfg.exclude_rects = tuple(parsed)
 
+    # ``frame_ref_resolution`` from YAML: [W, H] pair the rects /
+    # margins are calibrated against. Lets the user re-tune at one
+    # resolution and trust auto-scaling at the actual capture size.
+    raw_ref = world_cfg.get("frame_ref_resolution")
+    if isinstance(raw_ref, (list, tuple)) and len(raw_ref) == 2:
+        cfg.frame_ref_resolution = (int(raw_ref[0]), int(raw_ref[1]))
+
     if assets is None:
         from vision.mc_assets import MCAssets
         assets = MCAssets.load()
@@ -1439,12 +2061,34 @@ def build_world_perception(settings: Optional[Dict[str, Any]] = None,
     # disabled. The hybrid is harmless when the sample store is empty
     # (it just falls through to the baseline every call).
     use_samples = bool(world_cfg.get("use_sample_recognizer", True))
+    use_cnn = bool(world_cfg.get("use_cnn_recognizer", True))
     sample_store: Optional[WorldSampleStore] = None
     block_cls: BlockClassifierProtocol = baseline_cls
     if use_samples:
         sample_store = build_world_sample_store()
         sample_recognizer = SampleBlockRecognizer(sample_store)
-        block_cls = HybridBlockClassifier(sample_recognizer, baseline_cls)
+        # Prefer the learned CNN (robust to lighting/biome/angle) when
+        # torch is present; it self-trains in the background from the same
+        # F3-labelled store and falls back to the sample-NN / colour
+        # baseline until it has learned enough. Tiered: CNN -> NN -> base.
+        cnn_recognizer = None
+        if use_cnn:
+            try:
+                from vision.world.cnn_recognizer import (
+                    CNNBlockRecognizer, _TORCH_OK,
+                )
+                if _TORCH_OK:
+                    cnn_recognizer = CNNBlockRecognizer(
+                        sample_store, auto_train=True)
+            except Exception as e:
+                print(f"[world] CNN recogniser disabled: {e}")
+                cnn_recognizer = None
+        if cnn_recognizer is not None:
+            from vision.world.cnn_recognizer import TieredBlockClassifier
+            block_cls = TieredBlockClassifier(
+                cnn_recognizer, sample_recognizer, baseline_cls)
+        else:
+            block_cls = HybridBlockClassifier(sample_recognizer, baseline_cls)
 
     entity_cls = build_entity_classifier(settings)
 
@@ -1457,6 +2101,17 @@ def build_world_perception(settings: Optional[Dict[str, Any]] = None,
             print(f"[world] inverse renderer disabled: {e}")
             inv_ren = None
 
+    # Weather detector honouring vision.weather.* settings (thresholds,
+    # smoothing, trained-sample floor). Disabled cleanly if construction
+    # fails so perception still runs.
+    weather_det = None
+    if cfg.detect_weather:
+        try:
+            from vision.weather import build_weather_detector
+            weather_det = build_weather_detector(settings)
+        except Exception as e:
+            print(f"[world] weather detector disabled: {e}")
+
     return WorldPerception(
         config=cfg,
         block_classifier=block_cls,
@@ -1464,6 +2119,7 @@ def build_world_perception(settings: Optional[Dict[str, Any]] = None,
         world_map=WorldMap(),
         sample_store=sample_store,
         inverse_renderer=inv_ren,
+        weather_detector=weather_det,
     )
 
 
