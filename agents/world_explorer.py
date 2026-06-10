@@ -891,6 +891,16 @@ class WorldExplorerAgent(BaseAgent):
                        if self._tick - t > ttl]
             for k in expired:
                 self._failed_targets.pop(k, None)
+            # Hard backstop: the TTL bounds this table in normal use, but a
+            # curiosity queue flooded with distinct hallucinated voxels could
+            # still balloon it within one TTL window over a multi-hour run.
+            # Cap it by dropping the oldest entries so memory stays bounded
+            # no matter what the perception layer feeds us.
+            cap = 5000
+            if len(self._failed_targets) > cap:
+                for k in sorted(self._failed_targets,
+                                key=self._failed_targets.get)[:-cap]:
+                    self._failed_targets.pop(k, None)
 
         # Pop up to N candidates, skipping any that lie beyond MC's
         # block-reach distance from the current eye (those would
