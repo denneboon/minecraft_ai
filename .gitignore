@@ -109,6 +109,13 @@ data/calibration/*
 data/samples/*
 !data/samples/.gitkeep
 
+# Self-teaching metrics (per-session history JSONL/CSV + generated PNG
+# charts) and debug screenshots — local runtime artefacts.
+data/metrics/*
+!data/metrics/.gitkeep
+data/debug/*
+!data/debug/.gitkeep
+
 # ---------------------------------------------------------------------------
 # Model weights / large binaries — Git LFS or out-of-tree only
 # ---------------------------------------------------------------------------
