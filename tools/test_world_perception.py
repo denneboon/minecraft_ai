@@ -650,6 +650,52 @@ def test_sprite_sample_skip() -> bool:
     return True
 
 
+def test_temporal_voter() -> bool:
+    """Per-voxel temporal vote smoothing: first sight passes through
+    unchanged (single-frame safe), repeated agreement boosts confidence,
+    and a transient flip is overruled by the window majority."""
+    print("\n[19] Temporal vote smoothing of vision-patch guesses")
+    from vision.world.temporal_vote import TemporalVoter, TemporalVoteConfig
+    V = (5, 64, 7)
+
+    # First sighting: unchanged, not yet stable.
+    tv = TemporalVoter(TemporalVoteConfig(window_ticks=50))
+    bid, conf, stable = tv.vote(V, "minecraft:stone", 0.40, tick=1)
+    if bid != "minecraft:stone" or abs(conf - 0.40) > 1e-9 or stable:
+        _fail(f"first sight must pass through unchanged (got {bid},{conf},{stable})")
+        return False
+    _ok("first sighting passes through unchanged (single-frame safe)")
+
+    # Repeated agreement -> stable, confidence scaled UP toward the best
+    # observed (never above it).
+    tv.vote(V, "minecraft:stone", 0.55, tick=2)
+    bid, conf, stable = tv.vote(V, "minecraft:stone", 0.50, tick=3)
+    if bid != "minecraft:stone" or not stable:
+        _fail(f"agreement should be stable stone (got {bid}, stable={stable})")
+        return False
+    if conf > 0.55 + 1e-9 or conf < 0.50:
+        _fail(f"agreement confidence out of range: {conf}")
+        return False
+    _ok(f"3x agreement -> stable, conf={conf:.2f} (<= best 0.55)")
+
+    # A single transient flip is overruled by the stone majority.
+    bid, conf, stable = tv.vote(V, "minecraft:deepslate", 0.52, tick=4)
+    if bid != "minecraft:stone":
+        _fail(f"transient flip should be overruled by majority (got {bid})")
+        return False
+    _ok("transient flip (deepslate) overruled by stone majority")
+
+    # Out-of-window guesses drop: after the window passes, old votes expire.
+    tv2 = TemporalVoter(TemporalVoteConfig(window_ticks=10))
+    tv2.vote(V, "minecraft:stone", 0.6, tick=1)
+    bid, conf, stable = tv2.vote(V, "minecraft:sand", 0.6, tick=100)
+    if bid != "minecraft:sand" or stable:
+        _fail(f"stale vote should have expired (got {bid}, stable={stable})")
+        return False
+    _ok("votes outside the tick window expire correctly")
+    return True
+
+
 def test_sweep_delta_cap() -> bool:
     print("\n[14] Sweep-progress cap against absurd yaw jumps")
     from agents.world_explorer import (
@@ -1221,6 +1267,7 @@ def main() -> int:
         ("air_guard",       test_air_carving_guards()),
         ("blockid_gate",    test_block_id_validator_gate()),
         ("sprite_skip",     test_sprite_sample_skip()),
+        ("temporal_vote",   test_temporal_voter()),
         ("sweep_cap",       test_sweep_delta_cap()),
         ("strict_xhair",    test_strict_gate_crosshair_bypass()),
         ("public_api",      test_perception_public_api()),

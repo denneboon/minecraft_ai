@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import cv2
@@ -58,6 +58,7 @@ from vision.world.entity_classifier import (
     build_entity_classifier,
 )
 from vision.world.f3_target import parse_looking_at_block
+from vision.world.temporal_vote import TemporalVoter, TemporalVoteConfig
 from vision.world.map import WorldMap
 from vision.world.sample_store import (
     WorldSampleStore,
@@ -311,6 +312,11 @@ class WorldPerceptionConfig:
     # dropped instead of being written to the WorldMap.
     min_block_confidence: float = 0.25
 
+    # Smooth per-voxel vision-patch guesses over a recent-frame window
+    # (majority vote + agreement-scaled confidence). Stabilises commits
+    # when the agent dwells on a voxel; a no-op for one-off sightings.
+    temporal_voting: bool = True
+
     # Run the entity detector every N ticks (1 = every frame).
     entity_detect_every_n_ticks: int = 4
 
@@ -436,6 +442,13 @@ class WorldPerception:
         # capture is suppressed). ``None`` disables the skip (back-compat).
         self._sprite_block_predicate = sprite_block_predicate
         self._sprite_skips = 0
+        # Per-voxel temporal vote smoother for vision-patch guesses. When
+        # the agent looks at the same voxel across frames, voting over the
+        # independent guesses is a free ensemble — far more stable than any
+        # single noisy frame. Never suppresses a first sighting, so
+        # single-frame behaviour (and every offline test) is unchanged.
+        self._temporal_voter = TemporalVoter(
+            TemporalVoteConfig()) if self.cfg.temporal_voting else None
         # Weather recogniser (optional). Built lazily here when enabled
         # and not injected, so existing call-sites/tests keep working.
         self.weather_detector = weather_detector
@@ -629,6 +642,8 @@ class WorldPerception:
                   f"confirmed voxels")
             self._curiosity.clear()
             self._confirmed.clear()
+            if self._temporal_voter is not None:
+                self._temporal_voter.purge()   # voxels differ across dims
         self._last_pose = pose
         if pose.dimension:
             self.world_map.set_current_dimension(pose.dimension)
@@ -1732,6 +1747,15 @@ class WorldPerception:
                 best_per_voxel[target] = (conf, obs)
 
         for _, obs in best_per_voxel.values():
+            # Temporal smoothing: fold this voxel's guess into its recent
+            # vote history. First sight passes through unchanged; repeated
+            # views correct transient flips and scale confidence by
+            # agreement. (Map commit still applies its own gates after.)
+            if self._temporal_voter is not None:
+                vid, vconf, _stable = self._temporal_voter.vote(
+                    obs.pos, obs.block_id, obs.confidence, self._tick)
+                if vid != obs.block_id or vconf != obs.confidence:
+                    obs = replace(obs, block_id=vid, confidence=vconf)
             observations.append(obs)
         return observations
 
@@ -2202,7 +2226,23 @@ def build_world_perception(settings: Optional[Dict[str, Any]] = None,
     sprite_block_predicate: Optional[Callable[[str], bool]] = None
     if bool(world_cfg.get("skip_sprite_samples", True)):
         _sprite_cache: Dict[str, bool] = {}
-        _SPRITE_PARENTS = ("cross", "tinted_cross", "crop")
+        # A block has an UNRELIABLE crosshair crop (dominated by the
+        # block behind it, so it mislabels training data) when its model
+        # is a thin sprite or a thin/flat attachment rather than a solid
+        # cube. Matched by substring on the model parent so new blocks
+        # that reuse these vanilla templates are caught automatically:
+        #   cross/tinted_cross/crop  - grass, ferns, flowers, saplings, wheat…
+        #   carpet                   - all carpets / moss carpet
+        #   pressure_plate / button  - thin floor/wall plates
+        #   rail                     - all rail variants (flat on the floor)
+        #   torch / lantern          - thin emissive attachments
+        # Substantial PARTIAL cubes (slab, stairs, fence, wall) are NOT
+        # skipped — their crop still contains a large representative chunk
+        # of the block, so they remain learnable.
+        _UNRELIABLE_CROP_HINTS = (
+            "cross", "crop", "carpet", "pressure_plate",
+            "button", "rail", "torch", "lantern",
+        )
 
         def _is_sprite_block(bid: str) -> bool:
             hit = _sprite_cache.get(bid)
@@ -2212,8 +2252,8 @@ def build_world_perception(settings: Optional[Dict[str, Any]] = None,
             try:
                 model = assets.block_model(bid.split(":", 1)[-1])
                 parent = (model or {}).get("parent") or ""
-                short = parent.split("/")[-1] if parent else ""
-                res = short in _SPRITE_PARENTS
+                short = (parent.split("/")[-1] if parent else "").lower()
+                res = any(h in short for h in _UNRELIABLE_CROP_HINTS)
             except Exception:
                 res = False
             _sprite_cache[bid] = res

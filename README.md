@@ -106,6 +106,7 @@ run anywhere. All paths are from the repo root.
 | `python tools/test_weather.py` | `vision.weather`. |
 | `python tools/test_script_runner.py` | `control.script_runner`. |
 | `python tools/test_inventory_synthetic.py` | Inventory pipeline on synthetic frames. |
+| `python tools/eval_recognizer.py --augment` | Deterministic recogniser **benchmark**: per-block accuracy + confusion matrix (CNN vs raw-NN, clean + augmented) over the local sample store. Reproducible for a fixed store — A/B a change per-block. |
 
 ### Training & data collection
 
