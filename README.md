@@ -77,6 +77,7 @@ run anywhere. All paths are from the repo root.
 | `python tools/run_god_bridge.py` | Adaptive god-bridge runner (pillar-up, auto-align yaw/pitch, diagonal back-strafe). Many flags — `--places`, `--strafe {left,right}`, `--target-pitch`, `--max-seconds`, `--keep-sneak`, `--countdown`. |
 | `python tools/run_script.py <file>` | Run (or `--inspect`) a single macro/script file. |
 | `python tools/learn_world_live.py` | Autonomous self-teaching live test for the world block recogniser. Records graph-ready metrics to `data/metrics/` each run (`--save-patches` for screenshots, `--no-metrics` to disable). |
+| `python tools/train_overnight.py --minutes 480` | Long unattended self-teaching trainer (camera-only). Sweeps the view for hours collecting blocks under changing day/weather, retrains the CNN continuously, checkpoints metrics + a heartbeat (`data/metrics/overnight_status.json`) every 15 min. Pauses on focus loss, resumes automatically; panic-stop Ctrl+Shift+X/End/Pause. |
 | `python tools/plot_metrics.py` | Plot the recogniser's self-teaching progress (accuracy/coverage per session, sample growth, per-block accuracy, within-session learning curve) → PNGs in `data/metrics/`. `--show` to open them. |
 
 ### Live diagnostics & calibration (live MC)
