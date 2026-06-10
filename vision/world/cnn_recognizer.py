@@ -711,10 +711,26 @@ class TieredBlockClassifier:
     answer so perception's curiosity queue always has something to chew
     on. All three improve as the F3-labelled sample store grows."""
 
+    # Baseline (colour-signature) confidence lives on a DIFFERENT scale
+    # than the learned tiers' and is far less reliable — it happily reports
+    # 1.0 for a wrong-but-similar block (e.g. short_grass → acacia_leaves)
+    # whenever the green histograms line up. Capping it here means a
+    # baseline fallback can never (a) masquerade as a high-confidence
+    # learned prediction in logs/metrics, nor (b) clear the commit gate
+    # (``sample_commit_confidence`` ≈ 0.85) and write a guess into the
+    # WorldMap. It's still returned as a weak hint for the curiosity queue.
+    _BASELINE_CONF_CAP = 0.50
+
     def __init__(self, cnn, sample_recognizer, baseline_classifier):
         self.cnn = cnn
         self.sample = sample_recognizer
         self.baseline = baseline_classifier
+
+    def _baseline(self, patch_rgb) -> Tuple[Optional[str], float]:
+        bid, conf = self.baseline.classify(patch_rgb)
+        if bid is not None:
+            conf = min(float(conf), self._BASELINE_CONF_CAP)
+        return bid, conf
 
     def classify(self, patch_rgb) -> Tuple[Optional[str], float]:
         if self.cnn is not None and self.cnn.available():
@@ -725,7 +741,7 @@ class TieredBlockClassifier:
             bid, conf = self.sample.classify(patch_rgb)
             if bid is not None and conf >= self.sample.cfg.min_confidence:
                 return bid, conf
-        return self.baseline.classify(patch_rgb)
+        return self._baseline(patch_rgb)
 
     def classify_batch(self, patches) -> List[Tuple[Optional[str], float]]:
         """Batched classify for the whole-vision sweep. The CNN handles

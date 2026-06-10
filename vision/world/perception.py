@@ -405,7 +405,8 @@ class WorldPerception:
                  sample_store: Optional[WorldSampleStore] = None,
                  inverse_renderer: Optional[InverseRenderer] = None,
                  weather_detector: Optional[Any] = None,
-                 block_id_validator: Optional[Callable[[str], bool]] = None):
+                 block_id_validator: Optional[Callable[[str], bool]] = None,
+                 sprite_block_predicate: Optional[Callable[[str], bool]] = None):
         self.cfg = config or WorldPerceptionConfig()
         self.block_classifier  = block_classifier
         self.entity_classifier = entity_classifier or build_entity_classifier()
@@ -423,6 +424,18 @@ class WorldPerception:
         # (back-compat for the offline tests, which build perception by
         # hand without a catalog).
         self._block_id_validator = block_id_validator
+        # Predicate: "is this block a thin sprite (cross/tinted_cross model
+        # — short_grass, fern, flowers, saplings, crops, …)?". A crosshair
+        # patch of such a block is dominated by whatever is BEHIND the
+        # blade (the backing block / a tree trunk), so saving it as a
+        # training sample for the sprite MISLABELS it — and that noise
+        # measurably drags down the cube classes too (verified: adding
+        # foliage samples regressed held-out accuracy). When set, the
+        # auto-sampler SKIPS these blocks (they still commit to the
+        # WorldMap from F3 ground truth — only the unreliable TRAINING
+        # capture is suppressed). ``None`` disables the skip (back-compat).
+        self._sprite_block_predicate = sprite_block_predicate
+        self._sprite_skips = 0
         # Weather recogniser (optional). Built lazily here when enabled
         # and not injected, so existing call-sites/tests keep working.
         self.weather_detector = weather_detector
@@ -1495,6 +1508,21 @@ class WorldPerception:
         """
         if self.sample_store is None:
             return
+        # Sprite/cross blocks: the crosshair crop is dominated by the
+        # backing block, not the sprite — an unreliable label. Skip the
+        # training capture (the map commit already happened from F3).
+        if self._sprite_block_predicate is not None:
+            try:
+                is_sprite = self._sprite_block_predicate(block_id)
+            except Exception:
+                is_sprite = False
+            if is_sprite:
+                self._sprite_skips += 1
+                if self._sprite_skips <= 3:
+                    print(f"[perception] skip sprite sample {block_id} "
+                          f"(cross-model; crosshair crop is background-"
+                          f"dominated, would mislabel training data)")
+                return
         key = (block_id, voxel)
         last = self._last_sample_at.get(key, -10_000)
         if self._tick - last < self.cfg.sample_cooldown_ticks:
@@ -2165,6 +2193,34 @@ def build_world_perception(settings: Optional[Dict[str, Any]] = None,
     except Exception as e:
         print(f"[world] block-id catalog gate disabled: {e}")
 
+    # Sprite-block predicate: a block whose model is a thin billboard
+    # (cross / tinted_cross / crop) rather than a full cube. The crosshair
+    # crop of such a block is dominated by the backing block, so it's an
+    # unreliable training label — the auto-sampler skips it. Detected from
+    # the asset model parent; results cached (block_model parse isn't free).
+    # Honour vision.world.skip_sprite_samples (default on).
+    sprite_block_predicate: Optional[Callable[[str], bool]] = None
+    if bool(world_cfg.get("skip_sprite_samples", True)):
+        _sprite_cache: Dict[str, bool] = {}
+        _SPRITE_PARENTS = ("cross", "tinted_cross", "crop")
+
+        def _is_sprite_block(bid: str) -> bool:
+            hit = _sprite_cache.get(bid)
+            if hit is not None:
+                return hit
+            res = False
+            try:
+                model = assets.block_model(bid.split(":", 1)[-1])
+                parent = (model or {}).get("parent") or ""
+                short = parent.split("/")[-1] if parent else ""
+                res = short in _SPRITE_PARENTS
+            except Exception:
+                res = False
+            _sprite_cache[bid] = res
+            return res
+
+        sprite_block_predicate = _is_sprite_block
+
     # Wrap the baseline with a sample-NN recogniser unless explicitly
     # disabled. The hybrid is harmless when the sample store is empty
     # (it just falls through to the baseline every call).
@@ -2229,6 +2285,7 @@ def build_world_perception(settings: Optional[Dict[str, Any]] = None,
         inverse_renderer=inv_ren,
         weather_detector=weather_det,
         block_id_validator=block_id_validator,
+        sprite_block_predicate=sprite_block_predicate,
     )
 
 

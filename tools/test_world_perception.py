@@ -596,6 +596,60 @@ def test_block_id_validator_gate() -> bool:
     return True
 
 
+def test_sprite_sample_skip() -> bool:
+    """The auto-sampler must SKIP training-sample capture for sprite/cross
+    blocks (short_grass, fern, …) whose crosshair crop is dominated by the
+    backing block — those mislabel the dataset — while still capturing
+    full-cube blocks. The map commit is unaffected (it happens from F3)."""
+    print("\n[18] Sprite/cross blocks are skipped by the auto-sampler")
+    import tempfile, numpy as _np
+    from pathlib import Path as _Path
+    from vision.world.perception import WorldPerception, WorldPerceptionConfig
+    from vision.world.map import WorldMap
+    from vision.world.sample_store import WorldSampleStore
+    from vision.world.screen_ray import ScreenRay, CameraIntrinsics
+
+    sprite = {"minecraft:short_grass", "minecraft:fern"}
+    wp = WorldPerception(
+        config=WorldPerceptionConfig(), world_map=WorldMap(),
+        sample_store=WorldSampleStore(_Path(tempfile.mkdtemp())),
+        sprite_block_predicate=lambda bid: bid in sprite)
+    wp._screen_ray = ScreenRay(CameraIntrinsics(960, 540, 90.0))
+    frame = _np.random.default_rng(0).integers(40, 200, (540, 960, 3), dtype=_np.uint8)
+
+    for bid, vox in (("minecraft:short_grass", (1, 2, 3)),
+                     ("minecraft:fern", (1, 2, 4)),
+                     ("minecraft:grass_block", (4, 5, 6)),
+                     ("minecraft:stone", (7, 8, 9))):
+        wp._tick += 100   # clear the per-(block,voxel) cooldown
+        wp._maybe_save_crosshair_sample(
+            frame_rgb=frame, sr=wp._screen_ray, block_id=bid, voxel=vox,
+            metadata={"distance_blocks": 3.0})
+    m = wp.sample_store.manifest()
+    if "minecraft:short_grass" in m or "minecraft:fern" in m:
+        _fail(f"sprite block was sampled (should be skipped): {m}")
+        return False
+    _ok("sprite blocks (short_grass, fern) skipped")
+    if "minecraft:grass_block" not in m or "minecraft:stone" not in m:
+        _fail(f"full-cube block was NOT sampled (should be kept): {m}")
+        return False
+    _ok("full-cube blocks (grass_block, stone) still captured")
+    # No predicate => nothing skipped (back-compat).
+    wp2 = WorldPerception(
+        config=WorldPerceptionConfig(), world_map=WorldMap(),
+        sample_store=WorldSampleStore(_Path(tempfile.mkdtemp())))
+    wp2._screen_ray = ScreenRay(CameraIntrinsics(960, 540, 90.0))
+    wp2._tick = 9999
+    wp2._maybe_save_crosshair_sample(
+        frame_rgb=frame, sr=wp2._screen_ray, block_id="minecraft:short_grass",
+        voxel=(1, 2, 3), metadata={"distance_blocks": 3.0})
+    if "minecraft:short_grass" not in wp2.sample_store.manifest():
+        _fail("absent predicate should NOT skip anything (back-compat)")
+        return False
+    _ok("absent predicate leaves sampling untouched (back-compat)")
+    return True
+
+
 def test_sweep_delta_cap() -> bool:
     print("\n[14] Sweep-progress cap against absurd yaw jumps")
     from agents.world_explorer import (
@@ -1166,6 +1220,7 @@ def main() -> int:
         ("exporters",       test_exporters()),
         ("air_guard",       test_air_carving_guards()),
         ("blockid_gate",    test_block_id_validator_gate()),
+        ("sprite_skip",     test_sprite_sample_skip()),
         ("sweep_cap",       test_sweep_delta_cap()),
         ("strict_xhair",    test_strict_gate_crosshair_bypass()),
         ("public_api",      test_perception_public_api()),

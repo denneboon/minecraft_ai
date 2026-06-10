@@ -52,6 +52,54 @@ except Exception:
 _VK_CONTROL, _VK_SHIFT, _VK_X, _VK_END, _VK_PAUSE = 0x11, 0x10, 0x58, 0x23, 0x13
 
 
+def _save_annotated(patch_dir, step, frame_rgb, patch_rgb, cap_px,
+                    truth, guess, conf, mark):
+    """Write two artefacts for one classification so a human can verify it:
+
+      * ``stepNNN_<mark>_<truth>.png`` — the EXACT crop the recogniser
+        classified, upscaled, with a guess-vs-truth banner and a border
+        colour-coded HIT(green)/miss(red)/abstain(yellow).
+      * ``stepNNN_ctx.png`` — the full frame (downscaled) with the crop
+        box drawn at the crosshair, so you can confirm the crop is
+        centred on the right block and sized to ~one block face.
+    """
+    import cv2
+    GREEN, RED, YELLOW = (0, 200, 0), (0, 0, 220), (0, 200, 220)
+    col = GREEN if mark == "HIT" else (YELLOW if mark == "abstain" else RED)
+    short_t = truth.split(":")[-1]
+    short_g = str(guess).split(":")[-1]
+    # Filename-safe tag (mark may be "miss→oak_leaves" with non-ASCII).
+    tag = "HIT" if mark == "HIT" else ("abstain" if mark == "abstain" else "miss")
+
+    # --- annotated crop ---
+    if patch_rgb is not None and patch_rgb.size:
+        bgr = cv2.cvtColor(patch_rgb, cv2.COLOR_RGB2BGR)
+        big = cv2.resize(bgr, (256, 256), interpolation=cv2.INTER_NEAREST)
+        canvas = cv2.copyMakeBorder(big, 4, 78, 4, 4,
+                                    cv2.BORDER_CONSTANT, value=col)
+        y0 = 256 + 4
+        cv2.putText(canvas, f"#{step} {mark}", (8, y0 + 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(canvas, f"F3 : {short_t}", (8, y0 + 42),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 255, 180), 1, cv2.LINE_AA)
+        cv2.putText(canvas, f"AI : {short_g} {conf:.2f}", (8, y0 + 62),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 220, 255), 1, cv2.LINE_AA)
+        fn = f"step{step:03d}_{tag}_{short_t}.png"
+        cv2.imwrite(os.path.join(patch_dir, fn), canvas)
+
+    # --- boxed context frame ---
+    if frame_rgb is not None and frame_rgb.size:
+        h, w = frame_rgb.shape[:2]
+        scale = 480.0 / w
+        ctx = cv2.resize(cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR),
+                         (480, int(h * scale)), interpolation=cv2.INTER_AREA)
+        cx, cy = 240, int(h * scale / 2)
+        half = max(2, int(cap_px * scale / 2))
+        cv2.rectangle(ctx, (cx - half, cy - half), (cx + half, cy + half), col, 2)
+        cv2.drawMarker(ctx, (cx, cy), (255, 255, 255), cv2.MARKER_CROSS, 12, 1)
+        cv2.imwrite(os.path.join(patch_dir, f"step{step:03d}_ctx.png"), ctx)
+
+
 def _panic() -> bool:
     if _USER32 is None:
         return False
@@ -73,7 +121,20 @@ def main() -> int:
                          "rotates a full circle and oscillates pitch")
     ap.add_argument("--settle", type=float, default=0.28,
                     help="seconds to let the view settle after each pan")
+    ap.add_argument("--save-patches", action="store_true",
+                    help="save an annotated screenshot of every classified "
+                         "patch (the crop the recogniser saw + its guess vs "
+                         "the F3 truth + a boxed full-frame context) under "
+                         "data/debug/self_teach_<ts>/ so guesses can be "
+                         "visually double-checked.")
     args = ap.parse_args()
+
+    patch_dir = None
+    if args.save_patches:
+        ts = time.strftime("%Y-%m-%d_%H-%M-%S")
+        patch_dir = os.path.join(ROOT, "data", "debug", f"self_teach_{ts}")
+        os.makedirs(patch_dir, exist_ok=True)
+        print(f"[learn] saving annotated patches -> {patch_dir}")
 
     wins = _find_minecraft_hwnd()
     if not wins:
@@ -184,6 +245,12 @@ def main() -> int:
             tr = " train" if (cnn is not None and cnn._training) else ""
             print(f"[{step:3d}] {truth:24s} guess={str(guess):24s} "
                   f"{conf:.2f} {mark:14s} | acc={acc:.0%} samples={ns}{tr}")
+            if patch_dir is not None:
+                try:
+                    _save_annotated(patch_dir, step, frame, patch, cap_px,
+                                    truth, guess, conf, mark)
+                except Exception as e:
+                    print(f"[learn] patch-save failed at step {step}: {e!r}")
     finally:
         try:
             mouse.release_all() if hasattr(mouse, "release_all") else None
