@@ -108,6 +108,7 @@ run anywhere. All paths are from the repo root.
 | `python tools/test_script_runner.py` | `control.script_runner`. |
 | `python tools/test_inventory_synthetic.py` | Inventory pipeline on synthetic frames. |
 | `python tools/eval_recognizer.py --augment` | Deterministic recogniser **benchmark**: per-block accuracy + confusion matrix (CNN vs raw-NN, clean + augmented) over the local sample store. Reproducible for a fixed store — A/B a change per-block. |
+| `python tools/sample_coverage.py --plot` | Dataset **health**: per-block sample counts, READY/LEARNING/STARVED tiers, and which blocks to collect next. (Architecture: `docs/world_recognizer.md`.) |
 
 ### Training & data collection
 
