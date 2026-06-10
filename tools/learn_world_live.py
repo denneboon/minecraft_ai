@@ -42,6 +42,7 @@ from control.input_gate import InputGate
 from vision.capture import Capture, CaptureConfig
 from vision.ocr import build_f3_reader
 from vision.world import build_world_perception
+from vision.world.metrics import SessionMetrics, default_metrics_root
 
 # ── Queue-independent panic poll (Ctrl+Shift+X / End / Pause) ──────────
 try:
@@ -127,12 +128,19 @@ def main() -> int:
                          "the F3 truth + a boxed full-frame context) under "
                          "data/debug/self_teach_<ts>/ so guesses can be "
                          "visually double-checked.")
+    ap.add_argument("--no-metrics", action="store_true",
+                    help="don't record session metrics (default: records "
+                         "graph-ready accuracy/coverage/per-block history to "
+                         "data/metrics/).")
     args = ap.parse_args()
+
+    session_ts = time.strftime("%Y-%m-%d_%H-%M-%S")
+    session_id = f"self_teach_{session_ts}"
+    start_ts_unix = time.time()
 
     patch_dir = None
     if args.save_patches:
-        ts = time.strftime("%Y-%m-%d_%H-%M-%S")
-        patch_dir = os.path.join(ROOT, "data", "debug", f"self_teach_{ts}")
+        patch_dir = os.path.join(ROOT, "data", "debug", session_id)
         os.makedirs(patch_dir, exist_ok=True)
         print(f"[learn] saving annotated patches -> {patch_dir}")
 
@@ -175,6 +183,8 @@ def main() -> int:
     per_hit: Counter = Counter()
     discovered = set()
     aborted = False
+    metrics = (None if args.no_metrics
+               else SessionMetrics("learn_world_live", session_id, start_ts_unix))
 
     try:
         for step in range(1, args.steps + 1):
@@ -243,6 +253,9 @@ def main() -> int:
             acc = hits / seen if seen else 0.0
             ns = cnn.sample_count() if cnn is not None else 0
             tr = " train" if (cnn is not None and cnn._training) else ""
+            if metrics is not None:
+                metrics.record(step=step, truth=truth, guess=guess,
+                               conf=conf, samples=ns)
             print(f"[{step:3d}] {truth:24s} guess={str(guess):24s} "
                   f"{conf:.2f} {mark:14s} | acc={acc:.0%} samples={ns}{tr}")
             if patch_dir is not None:
@@ -277,6 +290,16 @@ def main() -> int:
         print("[learn] per-block (correct/seen):")
         for b in sorted(per_total):
             print(f"    {b:26s} {per_hit[b]}/{per_total[b]}")
+    if metrics is not None:
+        summ = metrics.finalize(
+            no_target=no_target,
+            samples_before=start_samples, samples_after=end_samples,
+            recognizer_status=(cnn.status() if cnn is not None else ""),
+            end_ts_unix=time.time(), aborted=aborted)
+        print(f"[learn] metrics -> {default_metrics_root() / 'sessions.jsonl'} "
+              f"(session {session_id}); decided-acc={summ['accuracy']:.0%} "
+              f"coverage={summ['coverage']:.0%}")
+        print(f"[learn] graph it: python tools/plot_metrics.py")
     print("=" * 60)
     return 0
 

@@ -76,7 +76,8 @@ run anywhere. All paths are from the repo root.
 | `python main.py --script scripts/macros/bridge.ahk --duration 60` | Play a recorded macro (`.ahk` / `.txt` / `.json` / `.mcs`) instead of an agent. |
 | `python tools/run_god_bridge.py` | Adaptive god-bridge runner (pillar-up, auto-align yaw/pitch, diagonal back-strafe). Many flags — `--places`, `--strafe {left,right}`, `--target-pitch`, `--max-seconds`, `--keep-sneak`, `--countdown`. |
 | `python tools/run_script.py <file>` | Run (or `--inspect`) a single macro/script file. |
-| `python tools/learn_world_live.py` | Autonomous self-teaching live test for the world block recogniser. |
+| `python tools/learn_world_live.py` | Autonomous self-teaching live test for the world block recogniser. Records graph-ready metrics to `data/metrics/` each run (`--save-patches` for screenshots, `--no-metrics` to disable). |
+| `python tools/plot_metrics.py` | Plot the recogniser's self-teaching progress (accuracy/coverage per session, sample growth, per-block accuracy, within-session learning curve) → PNGs in `data/metrics/`. `--show` to open them. |
 
 ### Live diagnostics & calibration (live MC)
 
