@@ -153,6 +153,7 @@ def main(argv=None) -> int:
         f"gate={'open' if safety.allow_input() else 'CLOSED (focus MC)'}")
 
     ckpt_idx = 0
+    last_reactivate = 0.0
     chunk = SessionMetrics("train_overnight",
                            f"overnight_{time.strftime('%Y-%m-%d_%H-%M-%S')}_c{ckpt_idx}",
                            start, root=metrics_root)
@@ -192,6 +193,15 @@ def main(argv=None) -> int:
                     log("input gate CLOSED (MC not focused) — pausing; will "
                         "resume when MC is foreground.")
                     focus_paused = True
+                # Unattended runs: gently try to bring MC back to the
+                # foreground every ~20s so a transient focus loss (a popup,
+                # an alt-tab) doesn't stall training for the whole night.
+                if _now() - last_reactivate > 20.0:
+                    last_reactivate = _now()
+                    try:
+                        activate_minecraft()
+                    except Exception:
+                        pass
                 write_status({"paused": True})
                 time.sleep(3.0)
                 continue
