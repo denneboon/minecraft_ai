@@ -84,6 +84,10 @@ class TemporalVoter:
             votes[bid] += 1
             if c > best_conf.get(bid, -1.0):
                 best_conf[bid] = c
+        if not votes:
+            # Only reachable with a non-positive window (everything,
+            # including the just-appended guess, fell out). Pass through.
+            return block_id, conf, False
         win_id, win_n = votes.most_common(1)[0]
         total = sum(votes.values())
 

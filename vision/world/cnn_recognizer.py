@@ -247,6 +247,11 @@ class CNNBlockRecognizer:
         self._trained = False
         self._training = False
         self._saves_since_retrain = 0
+        # Resync _samples with disk truth every N incremental reloads so
+        # evicted samples don't accumulate in memory forever (the store
+        # is a bounded sliding window; an incremental reload only adds).
+        self._incrementals_since_full = 0
+        self._full_resync_every = 60
         self._auto_train = auto_train
         self._train_thread: Optional[threading.Thread] = None
         self._epoch_note = ""
@@ -272,6 +277,18 @@ class CNNBlockRecognizer:
         self._maybe_kickoff_training(reason="reload")
 
     def reload_incremental(self) -> None:
+        # The store is a SLIDING WINDOW (it evicts oldest samples past the
+        # per-block cap). An incremental reload only ADDS new files, so
+        # over a long run ``_samples``/``_emb`` would accumulate evicted
+        # samples forever — unbounded memory, and training on data the
+        # store deliberately dropped. Periodically resync from disk truth
+        # (cheap: the store is bounded by its per-block cap) so both stay
+        # bounded and reflect the live store.
+        self._incrementals_since_full += 1
+        if self._incrementals_since_full >= self._full_resync_every:
+            self._incrementals_since_full = 0
+            self.reload()                      # full rebuild from disk
+            return
         with self._lock:
             known = {s.path for s in self._samples}
         new = self._store.load_all(skip_paths=known)
@@ -313,7 +330,11 @@ class CNNBlockRecognizer:
         with self._lock:
             proto = self._proto
             emb_mat = self._emb
-            emb_ids = self._emb_ids
+            # Copy the id list under the lock: the background trainer
+            # appends to / replaces _emb_ids, and the k-NN block below
+            # indexes into it AFTER the lock is released. A snapshot copy
+            # keeps emb_mat and emb_ids perfectly consistent.
+            emb_ids = list(self._emb_ids)
         if len(proto) < 2:
             return None, 0.0
 
@@ -440,7 +461,12 @@ class CNNBlockRecognizer:
             mask = np.array([i == bid for i in ids])
             m = emb[mask].mean(axis=0)
             n = np.linalg.norm(m)
-            real[bid] = (m / n).astype(np.float32) if n > 1e-6 else m.astype(np.float32)
+            # Skip a degenerate/NaN prototype rather than store it — a
+            # non-finite prototype would poison every future cosine match
+            # against that block id (NaN sims, undefined argsort).
+            if not np.isfinite(n) or n <= 1e-6:
+                continue
+            real[bid] = (m / n).astype(np.float32)
         with self._lock:
             self._emb = emb
             self._emb_ids = ids
@@ -464,7 +490,8 @@ class CNNBlockRecognizer:
                 mask = np.array([i == bid for i in all_ids])
                 m = all_emb[mask].mean(axis=0)
                 n = np.linalg.norm(m)
-                self._proto[bid] = (m / n).astype(np.float32) if n > 1e-6 else m.astype(np.float32)
+                if np.isfinite(n) and n > 1e-6:   # skip degenerate/NaN protos
+                    self._proto[bid] = (m / n).astype(np.float32)
 
     # ── Training ───────────────────────────────────────────────────
 

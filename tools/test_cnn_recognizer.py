@@ -109,11 +109,42 @@ def _test_baseline_conf_cap():
        f"(was 1.0, now {conf:.2f}); can't fake a learned commit")
 
 
+def _test_memory_resync():
+    """reload_incremental must periodically resync from disk so the
+    in-memory sample set (and its embedding matrix) stays BOUNDED — the
+    store is a sliding window that evicts, but an incremental reload only
+    adds, so without a resync _samples would grow unbounded over a long
+    run and the recogniser would train on evicted data."""
+    from vision.world.cnn_recognizer import (
+        CNNBlockRecognizer, CNNBlockRecognizerConfig)
+    from vision.world.sample_store import build_world_sample_store
+    r = CNNBlockRecognizer(build_world_sample_store(),
+                           config=CNNBlockRecognizerConfig(), auto_train=False)
+    fired = {"n": 0}
+    orig = r.reload
+    def _counting():
+        fired["n"] += 1
+        orig()
+    r.reload = _counting
+    base = r.sample_count()
+    for _ in range(r._full_resync_every + 1):
+        r.reload_incremental()
+    if fired["n"] < 1:
+        bad("reload_incremental never resynced — memory would grow unbounded")
+        return
+    if r.sample_count() != base:
+        bad(f"sample count drifted after resync: {base} -> {r.sample_count()}")
+        return
+    ok(f"reload_incremental resyncs every {r._full_resync_every} "
+       f"(memory bounded to disk truth, no evicted-sample buildup)")
+
+
 def main():
     print("=" * 64)
     print(" CNN block recogniser — offline accuracy vs raw-pixel NN")
     print("=" * 64)
     _test_baseline_conf_cap()
+    _test_memory_resync()
     if not _TORCH_OK:
         print("  [skip] PyTorch not available — CNN recogniser inactive")
         return 0
