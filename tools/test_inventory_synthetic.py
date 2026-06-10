@@ -116,13 +116,21 @@ def main() -> int:
     renderer = BlockIconRenderer(assets)
 
     placed = []
+    # Slots where ``resolve_template`` couldn't produce an icon —
+    # almost always because the item is rendered as 2D sprite-only
+    # (shield) or non-cube geometry (torch, ladder, vines etc.). The
+    # test never paints anything into these slots, so scoring them
+    # against the expected item is unfair. Track + exclude.
+    untestable_slots: list[tuple[str, str]] = []
     for slot_name, item in TESTS:
         rect = rects.get(slot_name)
         if rect is None:
             continue
         rgba = resolve_template(assets, renderer, item)
         if rgba is None:
-            print(f"  SKIP {slot_name}={item}: no template")
+            print(f"  SKIP {slot_name}={item}: no template (sprite-only "
+                  f"or non-cube — outside synth-icon scope)")
+            untestable_slots.append((slot_name, item))
             continue
         paint_slot(frame, rect, rgba)
         placed.append((slot_name, item))
@@ -144,8 +152,18 @@ def main() -> int:
     print()
     print(f"{'SLOT':<14} {'EXPECTED':<24} {'GOT':<24} {'CONF':>5} OK")
     print("-" * 80)
+    untestable_names = {n for (n, _) in untestable_slots}
     correct = total = 0
+    skipped = 0
     for slot_name, expected in TESTS:
+        # Slots we couldn't even paint an icon into don't get scored —
+        # they're outside the synth pipeline's scope and would always
+        # appear empty regardless of recogniser quality.
+        if slot_name in untestable_names:
+            print(f"{slot_name:<14} {expected:<24} "
+                  f"{'(untestable — no template)':<24} {'-':>5} SKIP")
+            skipped += 1
+            continue
         content = snap.slots.get(slot_name)
         if content is None:
             got, conf, ok = "MISSING", 0.0, False
@@ -169,7 +187,8 @@ def main() -> int:
 
     print()
     print(f"[synth] Accuracy: {correct}/{total} "
-          f"= {100.0 * correct / max(1, total):.1f}%")
+          f"= {100.0 * correct / max(1, total):.1f}% "
+          f"({skipped} slot(s) skipped as untestable)")
     return 0 if correct == total else 1
 
 

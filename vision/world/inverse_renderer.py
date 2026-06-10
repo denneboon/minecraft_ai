@@ -55,14 +55,13 @@ Future-proofing
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import cv2
 import numpy as np
 
-from vision.world.screen_ray import CameraIntrinsics, ScreenRay
+from vision.world.screen_ray import ScreenRay
 
 
 # ---------------------------------------------------------------------------
@@ -429,7 +428,17 @@ class InverseRenderer:
             warped = cv2.warpPerspective(frame_rgb, M, (s, s),
                                           flags=cv2.INTER_AREA,
                                           borderMode=cv2.BORDER_REPLICATE)
-        except cv2.error:
+        except cv2.error as e:
+            # Degenerate quad: three or four corners collinear, or
+            # the projection collapsed the face to a single point
+            # (e.g. voxel exactly behind the camera or edge-on).
+            # First occurrence surfaces in case the user is hitting
+            # it systematically; subsequent ones stay silent.
+            if not getattr(self, "_degenerate_warn_emitted", False):
+                self._degenerate_warn_emitted = True
+                print(f"[inverse_renderer][WARN] degenerate quad in "
+                      f"_unwarp_quad_to_square (corners={corners}): "
+                      f"{e!r}. Further occurrences silenced.")
             return None
         if warped.ndim == 3 and warped.shape[2] == 4:
             warped = warped[..., :3]
@@ -445,7 +454,16 @@ class InverseRenderer:
         so we normalise both by their mean before comparing — this
         eats global brightness offsets without losing texture
         structure.
+
+        Both inputs are normalised to 3-channel RGB up front:
+        grayscale or RGBA can sneak in via unusual asset files or
+        future capture pipeline tweaks, and the per-channel mean
+        reshape ``(-1, 3)`` would raise on those.
         """
+        actual_rgb   = _to_rgb_3c(actual_rgb)
+        expected_rgb = _to_rgb_3c(expected_rgb)
+        if actual_rgb is None or expected_rgb is None:
+            return 0.0
         if actual_rgb.shape != expected_rgb.shape:
             s = self.cfg.compare_size
             expected_rgb = cv2.resize(expected_rgb, (s, s),
@@ -478,6 +496,28 @@ def _polygon_area(points: List[Tuple[float, float]]) -> float:
         x2, y2 = points[(i + 1) % n]
         s += x1 * y2 - x2 * y1
     return abs(s) * 0.5
+
+
+def _to_rgb_3c(img: np.ndarray) -> Optional[np.ndarray]:
+    """Normalise to a 3-channel RGB array. Accepts:
+      * (H, W) grayscale → broadcast to 3 channels.
+      * (H, W, 1) → broadcast to 3 channels.
+      * (H, W, 3) → returned unchanged.
+      * (H, W, 4) RGBA → alpha dropped.
+    Anything else returns None.
+    """
+    if img is None or img.size == 0:
+        return None
+    if img.ndim == 2:
+        return cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+    if img.ndim == 3:
+        if img.shape[2] == 1:
+            return cv2.cvtColor(img.squeeze(-1), cv2.COLOR_GRAY2RGB)
+        if img.shape[2] == 3:
+            return img
+        if img.shape[2] == 4:
+            return img[..., :3]
+    return None
 
 
 __all__ = ["InverseRenderer", "InverseRendererConfig"]

@@ -32,6 +32,7 @@ sees a plausible pose or nothing — never a wild outlier.
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -115,6 +116,19 @@ class PoseFilter:
             # Nothing parsed — just let it through. The agent
             # already handles "no pose" gracefully.
             return info
+
+        # NaN / Inf guard. A malformed OCR can occasionally return
+        # ``float('nan')`` or ``float('inf')`` for a numeric field
+        # (e.g. when the glyph for a digit is mis-decoded as a
+        # punctuation that parses to inf in some locales). Pythonic
+        # comparisons with NaN always return False, so the existing
+        # ``y_min <= y <= y_max`` check would let NaN through and
+        # the perception eye would teleport to NaN-land. Detect
+        # explicitly + reject.
+        for fld in ("x", "y", "z", "yaw", "pitch"):
+            v = getattr(info, fld, None)
+            if v is not None and not math.isfinite(v):
+                return self._reject(info, f"non-finite {fld}={v!r}")
 
         now = now if now is not None else time.perf_counter()
 

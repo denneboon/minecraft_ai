@@ -43,7 +43,7 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -404,13 +404,25 @@ class WorldPerception:
                  world_map: Optional[WorldMap] = None,
                  sample_store: Optional[WorldSampleStore] = None,
                  inverse_renderer: Optional[InverseRenderer] = None,
-                 weather_detector: Optional[Any] = None):
+                 weather_detector: Optional[Any] = None,
+                 block_id_validator: Optional[Callable[[str], bool]] = None):
         self.cfg = config or WorldPerceptionConfig()
         self.block_classifier  = block_classifier
         self.entity_classifier = entity_classifier or build_entity_classifier()
         self.world_map         = world_map or WorldMap()
         self.sample_store      = sample_store
         self.inverse_renderer  = inverse_renderer
+        # Optional gate that answers "is this string a real block id?".
+        # When supplied (built from the asset catalog), an F3 ``looking_at``
+        # read whose id is NOT a known block is rejected before it can
+        # commit to the WorldMap OR be saved as a training sample. This
+        # is the guard that stops OCR garbage — a tag whose leading ``#``
+        # got eaten (``goats_spawnable_on``), a truncation (``short`` from
+        # ``short_grass``), or a mangled stem (``azalea_grc``) — from
+        # poisoning the self-teaching dataset. ``None`` disables the check
+        # (back-compat for the offline tests, which build perception by
+        # hand without a catalog).
+        self._block_id_validator = block_id_validator
         # Weather recogniser (optional). Built lazily here when enabled
         # and not injected, so existing call-sites/tests keep working.
         self.weather_detector = weather_detector
@@ -728,6 +740,24 @@ class WorldPerception:
                     wf.diagnostics.setdefault("looking_at_rejects", []).append(
                         {"reason": "out_of_reach", "pos": list(la.pos),
                          "distance": round(d, 2),
+                         "id": la.block_id})
+                    target_was_rejected = True
+                    la = None
+            # Catalog plausibility gate. The F3 parser is structural — it
+            # can't tell a real block id from a tag whose ``#`` was eaten
+            # by OCR, a truncated stem, or a glyph-mangled name. Cross-check
+            # the id against the known-block catalog so garbage never reaches
+            # the WorldMap or the sample store (both live under the
+            # ``if la is not None`` block below). Unknown ids are dropped
+            # like an out-of-reach read.
+            if la is not None and self._block_id_validator is not None:
+                try:
+                    is_known = self._block_id_validator(la.block_id)
+                except Exception:
+                    is_known = True   # never let a validator bug drop real reads
+                if not is_known:
+                    wf.diagnostics.setdefault("looking_at_rejects", []).append(
+                        {"reason": "unknown_block_id", "pos": list(la.pos),
                          "id": la.block_id})
                     target_was_rejected = True
                     la = None
@@ -2123,6 +2153,18 @@ def build_world_perception(settings: Optional[Dict[str, Any]] = None,
         assets = MCAssets.load()
     baseline_cls = build_block_classifier(settings, assets=assets)
 
+    # Known-block gate for F3 reads. Built from the same asset jar the
+    # classifier uses, so it's authoritative for this MC version. Wrapped
+    # defensively: if the catalog can't load, perception still runs (the
+    # validator is simply absent and no plausibility check is applied).
+    block_id_validator: Optional[Callable[[str], bool]] = None
+    try:
+        from knowledge.catalog import Catalog
+        _catalog = Catalog.load(assets)
+        block_id_validator = lambda bid: _catalog.block(bid) is not None
+    except Exception as e:
+        print(f"[world] block-id catalog gate disabled: {e}")
+
     # Wrap the baseline with a sample-NN recogniser unless explicitly
     # disabled. The hybrid is harmless when the sample store is empty
     # (it just falls through to the baseline every call).
@@ -2186,6 +2228,7 @@ def build_world_perception(settings: Optional[Dict[str, Any]] = None,
         sample_store=sample_store,
         inverse_renderer=inv_ren,
         weather_detector=weather_det,
+        block_id_validator=block_id_validator,
     )
 
 

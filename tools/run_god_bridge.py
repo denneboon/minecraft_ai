@@ -614,6 +614,21 @@ def _retry_pitch(capture, f3, attempts: int = 18,
     return _read_pose(capture, f3)[1]
 
 
+def _retry_xyz(capture, f3, attempts: int = 25, delay: float = 0.05):
+    """Retry until POSITION (xyz) reads, ignoring yaw/pitch. Used for the
+    position-lock start anchor: at the pillar-top-over-void view the
+    Facing line (yaw/pitch) reads but the XYZ line is faint and can take
+    several frames, so requiring the full (yaw,pitch,xyz) triple would
+    spuriously fail. The player is stationary here, so a longer retry is
+    free."""
+    for _ in range(attempts):
+        _, _, xyz = _read_pose(capture, f3)
+        if xyz is not None:
+            return xyz
+        time.sleep(delay)
+    return _read_pose(capture, f3)[2]
+
+
 def pillar_up(capture, f3, mouse, keyboard,
               count: int = 1,
               *,
@@ -919,6 +934,24 @@ def main(argv=None) -> int:
                          "tick-rate placement cap: the jump arc lifts the "
                          "player off the leading edge for a beat so the "
                          "block under the next step places in time.")
+    ap.add_argument("--bridge-speed-bps", type=float, default=4.27,
+                    help="JUMP-INCLUSIVE effective bridge speed (blocks/sec) "
+                         "used to time the jump (period = jump-every-blocks / "
+                         "this). NOT the steady 4.317 walk speed: each jump's "
+                         "airborne phase slows the average, so ~4.27 keeps the "
+                         "jump phase-locked to block 8. If the bridge still "
+                         "drifts and falls after N cycles, dial this: LOWER it "
+                         "if it falls 'behind' (jumping too early), RAISE it "
+                         "if it falls 'ahead' (jumping too late).")
+    ap.add_argument("--jump-first-extra-ms", type=int, default=160,
+                    help="Extra time added to ONLY the first jump cycle to "
+                         "compensate for MC's movement acceleration ramp: "
+                         "the player starts the bridge from a dead stop and "
+                         "takes several ticks to reach 4.317 b/s, covering "
+                         "~0.6-0.7 blocks less in the first cycle. Without "
+                         "this the first jump fires effectively early (~blk "
+                         "7) and the bridge falls at the start before the "
+                         "rhythm locks in. ~160 ms ≈ the ramp deficit.")
     ap.add_argument("--jump-every-blocks", type=float, default=8.0,
                     help="AUTO jump cadence in blocks (converted to a time "
                          "interval via vanilla walk speed ≈4.3 b/s). ~8 is "
@@ -1438,6 +1471,11 @@ def main(argv=None) -> int:
         # Stepped mode pulses the keys each cycle, so don't latch them on
         # here. Continuous mode holds S+strafe for the whole loop.
         stepped = (args.move_pulse_ms > 0) and not args.keep_sneak
+        # Read the STATIONARY start position now (before moving) as the
+        # fixed anchor for position-locked jump timing. Position-only
+        # retry (the XYZ line can be faint at altitude even when Facing
+        # reads); player is still here (post-settle) so we can retry hard.
+        bridge_start_pos = _retry_xyz(capture, f3_reader)
         if not stepped:
             keyboard.press_together(back_key, strafe_key)
         bridge_active.set()   # free the click loop from recorder-OCR GIL stalls
@@ -1450,31 +1488,59 @@ def main(argv=None) -> int:
         # Jump enable. AUTO (-1): jump on a no-sneak bridge, never with
         # sneak. 0 forces off; >0 forces on (explicit).
         #
-        # TIMING (the precise lever per the god-bridge community): the
-        # mouse is held DEAD STILL after aligning (no jitter), so the
-        # player walks at a CONSTANT vanilla speed (~4.317 b/s) — which
-        # means "8 blocks" is a precise TIME, with no need for position
-        # reads (those stall the click loop and OCR-glitch). The pitch
-        # geometry lets you place ~8 blocks, then you MUST jump RIGHT
-        # BEFORE the 8th — a jump that lands AT/after block 8 already
-        # missed it and you fall. So we fire at (jump_every_blocks - lead)
-        # blocks of travel, re-anchored at each jump, where lead puts the
-        # jump just before the 8th.
-        _WALK_BPS = 4.317                       # vanilla walking speed
+        # JUMP TIMING — POSITION-LOCKED (drift-free).
+        #
+        # The pitch geometry lets you place ~8 blocks, then you MUST jump
+        # right before the Nth or the crosshair runs off the placeable
+        # face and you fall. A pure fixed delay can't hold this: the true
+        # 8-block time is ~1.853 s (4.317 b/s = 0.21585 b/tick), but tick
+        # quantization (jump lands on tick 37 vs 38) and each jump's
+        # airborne perturbation make the placement phase CREEP every
+        # cycle, so it drifts and falls after ~a dozen cycles regardless
+        # of how exactly the delay is tuned (confirmed empirically).
+        #
+        # Instead we re-sync to the player's ACTUAL position: jump when
+        # the along-axis distance from the fixed bridge-start anchor
+        # reaches n × jump_every_blocks. We PREDICT the jump time from the
+        # nominal speed and CONFIRM it with ONE fast position read ~0.2 s
+        # before each jump (≈ block N-1) — that read also auto-cancels the
+        # start-from-rest acceleration ramp and any speed variance. A
+        # single ≤1-tick read stall there is covered by the imminent jump.
+        # Because the anchor is FIXED (bridge start), phase error can't
+        # accumulate across cycles.
+        _NOMINAL_BPS = max(1.0, float(args.bridge_speed_bps))
         if args.jump_every_ms < 0:
             jump_enabled = not args.keep_sneak
         elif args.jump_every_ms == 0:
             jump_enabled = False
         else:
             jump_enabled = True
-        if args.jump_every_ms > 0:
-            jump_period = args.jump_every_ms / 1000.0   # explicit override
+        jump_blk = float(args.jump_every_blocks)
+        # Bridge motion unit vector (world frame) — distance is measured
+        # by projecting (pos - start) onto it.
+        _yr = math.radians(pose_log.get("yaw_target") or 0.0)
+        _fwx, _fwz = -math.sin(_yr), math.cos(_yr)
+        _lfx, _lfz = math.cos(_yr), math.sin(_yr)
+        if args.strafe == "left":
+            _mvx, _mvz = -_fwx + _lfx, -_fwz + _lfz
         else:
-            jump_period = max(0.3, args.jump_every_blocks / _WALK_BPS)
+            _mvx, _mvz = -_fwx - _lfx, -_fwz - _lfz
+        _mvmag = math.hypot(_mvx, _mvz) or 1.0
+        _mvx /= _mvmag; _mvz /= _mvmag
+        bridge_t0 = time.perf_counter()
+        next_target_dist = jump_blk                 # 8, 16, 24, ...
+        predicted_jump_t = bridge_t0 + next_target_dist / _NOMINAL_BPS
+        confirm_done = False
+        lock_ok = (bridge_start_pos is not None) and jump_enabled
         if jump_enabled:
-            print(f"[run_god_bridge] jump: every {jump_period:.3f}s "
-                  f"(= {args.jump_every_blocks:.0f} blocks at {_WALK_BPS} b/s), "
-                  f"mouse held still")
+            print(f"[run_god_bridge] jump: POSITION-LOCKED every "
+                  f"{jump_blk:.0f} blocks (re-synced to actual position each "
+                  f"cycle; nominal {jump_blk / _NOMINAL_BPS:.3f}s); "
+                  f"lock={'on' if lock_ok else 'off (no start pos → time-only)'}")
+        try:
+            f3_reader._glyph_ocr.fast_mode = True   # cheap reads in the loop
+        except Exception:
+            pass
         drift_check_n = max(0, int(args.drift_check_every))
         # Target yaw / pitch we converged to in step 6.
         bridge_target_yaw = pose_log.get("yaw_target") or 0.0
@@ -1505,12 +1571,29 @@ def main(argv=None) -> int:
                 print(f"[run_god_bridge][WARN] gate closed "
                       f"(focus lost?); fired {fired}/{args.places}")
                 break
-            if jump_enabled and (
-                    time.perf_counter() - last_jump_ts >= jump_period):
-                try: keyboard.tap("space", 0.05)
-                except Exception: pass
-                last_jump_ts = time.perf_counter()
-                jumps_fired += 1
+            if jump_enabled:
+                now = time.perf_counter()
+                # CONFIRM read ~0.2 s before the predicted jump: re-sync
+                # the jump time to the player's actual distance (kills
+                # accel-ramp + phase drift). One fast read; the jump
+                # covers its brief stall.
+                if (lock_ok and not confirm_done
+                        and now >= predicted_jump_t - 0.20):
+                    _, _, _cp = _read_pose(capture, f3_reader)
+                    if _cp is not None:
+                        dist = ((_cp[0] - bridge_start_pos[0]) * _mvx
+                                + (_cp[2] - bridge_start_pos[2]) * _mvz)
+                        remaining = next_target_dist - dist
+                        predicted_jump_t = now + max(0.0, remaining) / _NOMINAL_BPS
+                    confirm_done = True
+                if now >= predicted_jump_t:
+                    try: keyboard.tap("space", 0.05)
+                    except Exception: pass
+                    last_jump_ts = now
+                    jumps_fired += 1
+                    next_target_dist += jump_blk
+                    predicted_jump_t = now + jump_blk / _NOMINAL_BPS
+                    confirm_done = False
             mouse.right_click(duration=max(0.001, args.click_hold_ms / 1000.0))
             fired += 1
             if stepped:

@@ -1,36 +1,56 @@
 # agents/world_explorer.py
 """
-World-exploration agent — looks around, identifies uncertain blocks,
-and aims its crosshair at each one to confirm via F3 ground truth.
+World-exploration agent — pans the camera through a fixed set of
+360° sweeps at varied pitches and lets the perception layer log every
+block that F3's "Looking at block" overlay confirms under the crosshair.
 
-Why this exists
----------------
-``vision.world.WorldPerception`` builds a 3-D voxel map from pixels,
-but two facts limit how much it can do passively:
+Current behaviour (scan-only mode, default)
+-------------------------------------------
+The agent runs a fixed plan forever:
 
-* It only commits blocks to the WorldMap when it's *certain* (F3
-  ground truth or very strong sample-NN agreement).
-* Vision-patch guesses that *don't* clear the certainty bar are put
-  into the perception layer's *curiosity queue* — voxels whose
-  identity the AI suspects but hasn't verified.
+  1. ORIENT          — yaw=0, pitch=0    (run once at start)
+  2. SWEEP_LEVEL     — full 360° at pitch=0
+  3. SWEEP_DOWN      — full 360° at pitch=+45°
+  4. SWEEP_FLOOR     — full 360° at pitch=+80°
+  5. SWEEP_UP        — full 360° at pitch=-45°
+  6. SWEEP_CEIL      — full 360° at pitch=-80°
+  7. → back to phase 2 (level), loop indefinitely.
 
-This agent closes the loop. It alternates between two behaviours:
+While the camera moves, ``vision.world.WorldPerception`` watches the F3
+overlay every ~3 Hz. Whenever F3 reports a "Looking at block:
+minecraft:X" line, perception commits a single observation to the
+WorldMap with the block's exact coordinates (the integers F3 also
+prints on the same line). NOTHING else commits — vision-patch
+guesses, sample-NN matches, and inverse-renderer extrapolation are
+all gated off via ``commit_only_from_looking_at: true`` in
+settings.yaml. The map only ever contains blocks the AI saw
+*directly under the crosshair*.
 
-1. **SCAN** — slowly pan the camera (yaw + a small pitch sweep) so
-   the perception layer's patch grid covers new regions of the
-   world. Each frame the curiosity queue grows with candidates.
-2. **INVESTIGATE** — periodically pop one uncertain voxel from the
-   curiosity queue, compute the (yaw, pitch) needed to point the
-   crosshair at it, and ease the mouse over to that aim. The next
-   few ticks the F3 OCR confirms what's actually there. The
-   perception layer auto-saves a labelled training sample, the
-   voxel commits to the WorldMap, and we move on.
+Why this matters for future learning
+------------------------------------
+Each F3 confirmation also writes a labelled screen patch to
+``data/samples/<block_id>/`` (crosshair pixels inpainted out so they
+don't contaminate the texture). Over time this builds a dataset of
+``texture → block id`` pairs harvested at the AI's own viewpoint and
+lighting.
 
-The result: a self-driving "look at everything, learn each block,
-build a verified 3-D map" agent. Sample-NN improves over time,
-which in turn means future SCAN frames need less INVESTIGATE work,
-because the recogniser starts confidently identifying blocks
-without F3 confirmation. That's the AI's path to self-improvement.
+The next phase (gated behind ``commit_only_from_looking_at: false``)
+will let the agent identify blocks it ISN'T directly looking at:
+
+  * For every visible voxel the WorldMap already knows about,
+    :class:`vision.world.screen_ray.ScreenRay` projects its centre
+    onto the current frame using ``(pose.x, pose.y, pose.z, yaw,
+    pitch)`` and the calibrated camera intrinsics (FOV + aspect).
+  * That screen patch is compared against the labelled samples via
+    :class:`vision.world.sample_recognizer.SampleBlockRecognizer`.
+  * Confident matches at non-crosshair locations get committed as
+    ``source="extrapolation"`` observations — the agent has now
+    "seen" dirt without ever centring the crosshair on it.
+
+The infrastructure (ScreenRay, SampleBlockRecognizer,
+HybridBlockClassifier, InverseRenderer) is already in place; the
+present-phase agent intentionally does NOT use it so the dataset
+stays clean.
 
 Safety
 ------
@@ -44,7 +64,7 @@ from __future__ import annotations
 import math
 import os
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 from brain.interfaces import AgentAction, BaseAgent
 from control.mouse_calibration import (
@@ -83,6 +103,19 @@ SYSTEMATIC_SCAN_PHASES: Tuple[_ScanPhase, ...] = (
     _ScanPhase("sweep_floor", 80.0, True),
     _ScanPhase("sweep_up",   -45.0, True),
     _ScanPhase("sweep_ceil", -80.0, True),
+)
+
+
+# Short plan used in REACTIVE mode (``scan_only_mode=False``). We only
+# want a quick coverage pass to seed the WorldMap + curiosity queue
+# before handing over to the SCAN ↔ INVESTIGATE loop. The full 6-phase
+# plan takes ~5 minutes at the configured 30°/s yaw rate — way too long
+# when the whole point is to exercise the curiosity loop. orient +
+# one 360° sweep gives the player enough confirmations to seed
+# extrapolation + populate the curiosity queue in ~30-60 s.
+SYSTEMATIC_SCAN_PHASES_SHORT: Tuple[_ScanPhase, ...] = (
+    _ScanPhase("orient",      0.0, False),
+    _ScanPhase("sweep_level", 0.0, True),
 )
 
 
@@ -128,29 +161,46 @@ class WorldExplorerConfig:
     # between OCR reads, fast enough to feel responsive.
     investigate_p_gain:     float = 0.7
 
+    # Systematic-settle P-controller gain. Used by orient + the
+    # per-phase pitch-aim step. Larger than investigate_p_gain
+    # because settle errors are usually big (e.g. swinging pitch
+    # from 16° to 0° between phases), and we want to converge
+    # within the settle-timeout budget instead of leaving the
+    # camera mid-pitch and hoping the sweep self-corrects.
+    settle_p_gain:          float = 1.6
+    # Higher angular-velocity cap during settle than during
+    # investigate aiming. Investigates target a specific voxel
+    # and overshoot is bad; settles just need to reach a coarse
+    # target pose quickly. 60°/s = full 16° pitch correction in
+    # ~0.25 s under the new gain.
+    settle_max_deg_per_sec: float = 60.0
+
     # Stop applying mouse correction when within this many degrees
     # of the target aim. Below this, F3 OCR will register the voxel
     # under the crosshair as the targeted block.
     aim_tolerance_deg: float = 1.4
 
-    # Looser tolerance used by the SYSTEMATIC scan phases — the
-    # orient + pitch-settle steps just need to be "close enough",
-    # not precise (the goal is starting position for a 360° sweep,
-    # not aiming at a specific voxel). Tight tolerance interacted
-    # badly with OCR yaw jitter and could leave the agent stuck
-    # nudging in orient forever.
-    systematic_settle_tolerance_deg: float = 5.0
+    # Tolerance for the SYSTEMATIC settle step. Tighter than it used
+    # to be (was 5°) because the sweep that follows is now pure-yaw —
+    # if pitch is off when the sweep starts, it stays off for the
+    # whole 360°, so we want it pretty close to target. 2° still
+    # converges in a couple of ticks even with OCR jitter.
+    systematic_settle_tolerance_deg: float = 2.0
+
+    # During the 360° sweep we lock pitch (vy=0) so the camera turns
+    # in a clean horizontal arc instead of wobbling diagonally. If
+    # pitch DOES drift beyond this threshold mid-sweep (e.g. the
+    # auto-calibrator overshot), the agent pauses the sweep, re-
+    # settles pitch, and resumes. This is the safety net — in
+    # practice pitch doesn't drift because nothing in MC moves it
+    # without an explicit vertical mouse input.
+    sweep_pitch_drift_tol_deg: float = 5.0
 
     # Hard cap on settle-phase iterations — after this many ticks
     # we accept whatever camera position we're in and advance the
     # phase plan anyway. Prevents an unsettleable axis from blocking
     # the whole sweep schedule.
     systematic_settle_max_ticks: int = 80
-
-    # How many ticks to dwell on an investigation target after the
-    # crosshair settles, so the F3 OCR (which fires at ~3 Hz) has
-    # time to lock onto the new target. ~12 ticks at 20 Hz = 0.6 s.
-    investigate_dwell_ticks: int = 12
 
     # Cap how long we'll spend trying to align on one target before
     # giving up and moving to the next. Prevents the agent from
@@ -172,8 +222,32 @@ class WorldExplorerConfig:
     # over the canonical value to handle off-centre crosshair aiming.
     max_reach_blocks: float = 5.0
 
+    # Pre-baseline grace window: how many ticks we wait for F3 OCR
+    # to produce its first parseable pose before falling into the
+    # BLIND yaw sweep. 60 ticks at 20 Hz = 3 s — enough for ~9 OCR
+    # cycles, which is plenty to recover yaw/pitch from a quiet
+    # frame. After this window expires we sweep yaw blindly so the
+    # camera doesn't sit on a single block forever when Facing-line
+    # OCR is degraded.
+    open_loop_initial_idle_ticks: int = 60
+
+    # ── Scan-only mode (current default) ──────────────────────────
+    # When True (the current phase of the project) the agent ONLY runs
+    # the systematic 360° plan and loops it forever — no curiosity
+    # queue, no investigate, no patch sweep. The WorldMap is built
+    # exclusively from F3 "Looking at block" confirmations. Flip to
+    # False once the sample-recogniser is trusted enough to commit
+    # blocks the AI ISN'T directly looking at (see module docstring).
+    scan_only_mode: bool = True
+
+    # When True (scan-only mode) and the systematic plan completes,
+    # restart from the second phase (skip the one-shot ORIENT) so
+    # the camera keeps producing F3 confirmations indefinitely.
+    loop_systematic: bool = True
+
     # SCAN behaviour: which curiosity-queue ordering to prefer
-    # ("closest", "oldest", "lowest_conf").
+    # ("closest", "oldest", "lowest_conf"). Only consulted when
+    # ``scan_only_mode`` is False.
     queue_priority: str = "closest"
 
     # In SCAN mode the agent sweeps the camera with this many pixels
@@ -210,6 +284,17 @@ class WorldExplorerConfig:
     # scanning for this many ticks before falling back to a slow
     # "just rotate" mode that gradually exposes new geometry.
     idle_scan_ticks: int = 200
+
+    # After GIVE-UP / DROP on a voxel, remember it for this many
+    # agent ticks before allowing another attempt. 20 Hz × 600 ticks
+    # = 30 s — long enough that the player has likely moved or the
+    # camera angle has changed (so geometry differs), short enough
+    # that a transient occlusion clears within one TTL window. The
+    # patch sweep WILL keep re-adding the same voxel to the
+    # curiosity queue every time it sees the same view; without
+    # this cooldown the agent burns its investigate budget on the
+    # same hallucinated voxel forever.
+    failed_target_ttl_ticks: int = 600
 
 
 # ---------------------------------------------------------------------------
@@ -253,7 +338,6 @@ class WorldExplorerAgent(BaseAgent):
         self._scan_tick = 0
         self._inv_tick  = 0
         self._target_voxel: Optional[Tuple[int, int, int]] = None
-        self._target_aim:   Optional[Tuple[float, float]]   = None
         self._n_investigated = 0
         self._last_log_tick = -1000
         self._perception_ref = None     # set by build_world_explorer_agent
@@ -270,6 +354,15 @@ class WorldExplorerAgent(BaseAgent):
         # this gets high the curiosity queue is full of bad voxels
         # from misread poses — we purge and restart from scan.
         self._consecutive_drops = 0
+        # Voxels we've already investigated and failed to confirm,
+        # keyed by voxel pos → tick at which we gave up. Used to skip
+        # the SAME hallucinated voxel on future investigate cycles —
+        # otherwise the patch sweep keeps re-adding it to the curiosity
+        # queue and the agent re-attempts an unwinnable aim every few
+        # seconds. Entries expire after ``failed_target_ttl_ticks`` so
+        # a voxel can be re-tried later if the player has moved /
+        # rotated meaningfully and the geometry has changed.
+        self._failed_targets: Dict[Tuple[int, int, int], int] = {}
         # Last good pose (cached when state.f3 misses on later ticks).
         self._last_yaw: Optional[float] = None
         self._last_pitch: Optional[float] = None
@@ -306,6 +399,18 @@ class WorldExplorerAgent(BaseAgent):
 
     # ── Lifecycle ─────────────────────────────────────────────────
 
+    def _phase_plan(self) -> Tuple[_ScanPhase, ...]:
+        """Return the systematic phase list appropriate for the current
+        config. In reactive mode (``scan_only_mode=False``) the short
+        plan runs — orient + one horizontal sweep — so the agent hands
+        off to the curiosity-driven INVESTIGATE loop in ~30-60 s
+        instead of ~5 min. Scan-only mode (the conservative deployment)
+        keeps the full 6-phase plan because that IS the operating
+        mode there."""
+        if self.cfg.scan_only_mode:
+            return SYSTEMATIC_SCAN_PHASES
+        return SYSTEMATIC_SCAN_PHASES_SHORT
+
     def _print_startup_banner(self) -> None:
         s = self.calibrator.stats()
         if s["calibrated"]:
@@ -327,9 +432,9 @@ class WorldExplorerAgent(BaseAgent):
         self._scan_tick = 0
         self._inv_tick  = 0
         self._target_voxel = None
-        self._target_aim = None
         self._n_investigated = 0
         self._last_log_tick = -1000
+        self._failed_targets.clear()
         # Re-run the systematic scan plan from scratch on every reset.
         self._sys_phase_idx = -1
         self._sys_done = False
@@ -430,12 +535,22 @@ class WorldExplorerAgent(BaseAgent):
                 self._sys_phase_idx = 0
                 self._reset_sweep_tracking(float(f3.yaw))
                 self._log(f"[sys] starting systematic scan — "
-                          f"{len(SYSTEMATIC_SCAN_PHASES)} phases")
+                          f"{len(self._phase_plan())} phases "
+                          f"({'short' if not self.cfg.scan_only_mode else 'full'})")
             return self._emit(self._tick_systematic(f3, eye, pose_fresh))
 
-        # Feedback control: the velocity command computed below
-        # remains in effect until the next agent decide(). With
-        # F3 OCR at ~3 Hz and the conservative aim_max_deg_per_sec
+        # Past systematic completion. In ``scan_only_mode`` we never get
+        # here (the systematic plan loops indefinitely), but guard
+        # explicitly so a misconfigured ``loop_systematic=False`` doesn't
+        # silently activate the reactive curiosity-driven path the
+        # scan-only project phase is meant to suppress.
+        if self.cfg.scan_only_mode:
+            self._log_periodic("[sys] scan-only mode: systematic done — idling")
+            return self._halt()
+
+        # Legacy reactive mode. Feedback control: the velocity command
+        # computed below remains in effect until the next agent decide().
+        # With F3 OCR at ~3 Hz and the conservative aim_max_deg_per_sec
         # cap, the velocity moves the camera at most ~10° per OCR
         # cycle — well under any realistic aim error — so re-running
         # the controller every tick from stale data simply re-emits
@@ -476,20 +591,53 @@ class WorldExplorerAgent(BaseAgent):
     # ── Fallback scan (no pose) ───────────────────────────────────
 
     def _open_loop_scan(self) -> AgentAction:
-        """Pan the camera at a constant humanlike rate without
-        referencing world coords. Used when F3 OCR isn't producing
-        a parseable pose this tick — we still want the camera to
-        keep moving so the OCR's next attempt sees a different scene
-        that might parse cleanly. Pitch is forced downward if the
-        looking_at target has been empty for a while (cursor on sky).
+        """
+        Fallback when F3 OCR hasn't produced a parseable pose yet.
+
+        Two regimes, separated by whether we've ever seen yaw/pitch
+        in this session:
+
+        * **Pre-baseline** (no pose ever): sit still for the FIRST
+          ``open_loop_initial_idle_ticks`` ticks so F3 OCR gets a
+          chance to catch up without us drifting the camera. After
+          that grace window, switch to BLIND YAW SCAN — emit a
+          constant yaw velocity even though we can't close the loop
+          on pitch. This is exactly the case where the user has F3
+          panel on but the Facing line is too OCR-garbled to recover
+          yaw/pitch: ``looking_at`` and XYZ still parse fine, so the
+          perception layer can keep committing blocks while the
+          camera sweeps. Without this the agent would be stuck on
+          a single frame forever and only ever log one block.
+
+        * **Post-baseline** (we've seen pose at least once): gentle
+          yaw scan, pitch forced down only if we've also been on
+          empty sky for a while.
         """
         px_yaw   = self.calibrator.px_per_deg_yaw()
         px_pitch = self.calibrator.px_per_deg_pitch()
+
+        if self._last_yaw is None or self._last_pitch is None:
+            # Pre-baseline — give F3 OCR a brief grace window to
+            # produce a clean read before we start panning blindly.
+            if self._tick < self.cfg.open_loop_initial_idle_ticks:
+                return AgentAction(look_vx=0.0, look_vy=0.0,
+                                    force_velocity=True)
+            # No pose yet but we've waited long enough; sweep the
+            # camera blindly so perception can see new Targeted
+            # Blocks as the crosshair traverses the world. Pitch
+            # stays at whatever it was — we have no feedback to
+            # correct it, but MC doesn't drift pitch on its own.
+            vx = self.cfg.scan_yaw_deg_per_sec * px_yaw
+            return AgentAction(look_vx=vx, look_vy=0.0,
+                                force_velocity=True)
+
+        # Post-baseline: gentle yaw scan, pitch only forced down if
+        # we've also been on empty sky for a while.
         vx = self.cfg.scan_yaw_deg_per_sec * px_yaw     # px/sec
         vy = 0.0
         if self._no_target_streak >= self.cfg.no_target_pitch_down_after_ticks:
             vy = self.cfg.scan_pitch_deg_per_sec * px_pitch
-        return AgentAction(look_vx=vx, look_vy=vy)
+        return AgentAction(look_vx=vx, look_vy=vy, force_velocity=True)
 
     # ── Systematic scan mode ──────────────────────────────────────
 
@@ -528,21 +676,37 @@ class WorldExplorerAgent(BaseAgent):
         return abs(self._sweep_yaw_unwrapped)
 
     def _tick_systematic(self, f3, eye, pose_fresh: bool) -> AgentAction:
-        phase = SYSTEMATIC_SCAN_PHASES[self._sys_phase_idx]
+        """
+        One tick of the systematic scan plan.
+
+        Two STRICTLY SEPARATED axes of motion:
+
+        1. SETTLE step — pitch (and yaw for the orient phase) eased
+           toward the phase's target. NO yaw rotation during this
+           step except for orient. Once pitch is within tolerance the
+           settle step is done and we hand off to the sweep step.
+
+        2. SWEEP step — pure yaw rotation at a constant rate; pitch
+           velocity is HARD-LOCKED at zero. If pitch happens to drift
+           beyond ``sweep_pitch_drift_tol_deg`` mid-sweep the sweep
+           is paused and we drop back to the settle step. This is the
+           fix for the "wobble down-right then up-left" pattern: by
+           keeping the two axes orthogonal, the camera describes a
+           clean horizon-aligned arc instead of a diagonal corkscrew.
+        """
+        phase = self._phase_plan()[self._sys_phase_idx]
         cur_pitch = float(f3.pitch)
         cur_yaw   = float(f3.yaw)
 
         px_per_deg_yaw   = self.calibrator.px_per_deg_yaw()
         px_per_deg_pitch = self.calibrator.px_per_deg_pitch()
-        p_gain  = self.cfg.investigate_p_gain
-        max_dps = self.cfg.aim_max_deg_per_sec
-        # Use a LOOSER tolerance for systematic settle than for
-        # investigate aiming — the systematic phases just need a
-        # rough starting position, and OCR yaw jitter can otherwise
-        # leave the agent nudging forever.
-        tol = self.cfg.systematic_settle_tolerance_deg
+        # Settle uses its own (faster) P-gain + speed cap so it
+        # actually converges within the settle-timeout budget. The
+        # sweep below still uses investigate-grade smoothness.
+        p_gain  = self.cfg.settle_p_gain
+        max_dps = self.cfg.settle_max_deg_per_sec
+        tol     = self.cfg.systematic_settle_tolerance_deg
 
-        # 1. Aim pitch to target first.
         pitch_err = phase.target_pitch - cur_pitch
         pitch_ok  = abs(pitch_err) < tol
         # For the orient phase we also aim yaw to 0.
@@ -559,6 +723,7 @@ class WorldExplorerAgent(BaseAgent):
             self._sys_settle_ticks >= self.cfg.systematic_settle_max_ticks
         )
 
+        # ── SETTLE: pitch first, yaw only for orient ──────────────
         if (not pitch_ok or not yaw_orient_ok) and not settle_timeout_hit:
             self._sys_settle_ticks += 1
             pitch_dps = max(-max_dps, min(max_dps, pitch_err * p_gain))
@@ -566,6 +731,9 @@ class WorldExplorerAgent(BaseAgent):
                 yaw_dps = max(-max_dps, min(max_dps,
                                             yaw_err_for_orient * p_gain))
             else:
+                # Pure pitch settle — never move yaw during a non-orient
+                # settle. This is what the old code did already; keeping
+                # it explicit for the symmetry with the sweep below.
                 yaw_dps = 0.0
             vx = yaw_dps   * px_per_deg_yaw
             vy = pitch_dps * px_per_deg_pitch
@@ -577,14 +745,12 @@ class WorldExplorerAgent(BaseAgent):
             )
             return AgentAction(look_vx=vx, look_vy=vy)
 
-        # Settle complete (within tolerance, or we hit the timeout).
-        # Reset the settle counter for the NEXT phase's settle step.
         if settle_timeout_hit and not (pitch_ok and yaw_orient_ok):
             self._log(f"[sys:{phase.name}] settle TIMEOUT — proceeding "
                       f"with yaw={cur_yaw:.1f} pitch={cur_pitch:.1f}")
         self._sys_settle_ticks = 0
 
-        # 2. Once aim is achieved, either advance (no sweep) or sweep.
+        # Once aim is achieved, either advance (no sweep) or sweep.
         if not phase.sweep_360:
             self._log(f"[sys:{phase.name}] settled — advancing")
             self._advance_systematic_phase(cur_yaw)
@@ -604,33 +770,69 @@ class WorldExplorerAgent(BaseAgent):
         else:
             swept_abs = abs(self._sweep_yaw_unwrapped)
 
-        # Constant yaw velocity while sweeping, with mild pitch
-        # correction in case it drifts.
+        # ── SWEEP: pure yaw, pitch HARD-LOCKED at zero ────────────
+        # If pitch has somehow drifted (it shouldn't, but a wonky
+        # auto-calibration could overshoot during the previous settle)
+        # pause the sweep and re-enter the settle path. The unwrapped
+        # yaw counter is preserved so we resume the same 360° later.
+        if abs(pitch_err) > self.cfg.sweep_pitch_drift_tol_deg:
+            self._sys_settle_ticks = 0  # restart the settle budget
+            pitch_dps = max(-max_dps, min(max_dps, pitch_err * p_gain))
+            self._log_periodic(
+                f"[sys:{phase.name}] pitch drift {pitch_err:+.1f}° — "
+                f"pausing sweep, re-settling"
+            )
+            return AgentAction(look_vx=0.0,
+                                look_vy=pitch_dps * px_per_deg_pitch,
+                                force_velocity=True)
+
         sweep_yaw_dps = self.cfg.scan_yaw_deg_per_sec
-        pitch_dps     = max(-max_dps, min(max_dps, pitch_err * p_gain * 0.5))
         vx = sweep_yaw_dps * px_per_deg_yaw
-        vy = pitch_dps     * px_per_deg_pitch
 
         self._log_periodic(
             f"[sys:{phase.name}] sweeping: yaw={cur_yaw:.1f} "
             f"pitch={cur_pitch:.1f} swept={swept_abs:.0f}/360°  "
-            f"v=({vx:+.0f},{vy:+.0f})px/s"
+            f"v=({vx:+.0f},+0)px/s"
         )
-        return AgentAction(look_vx=vx, look_vy=vy)
+        return AgentAction(look_vx=vx, look_vy=0.0, force_velocity=True)
 
     def _advance_systematic_phase(self, cur_yaw: float) -> None:
+        plan = self._phase_plan()
         self._sys_phase_idx += 1
         self._sys_settle_ticks = 0    # fresh budget for next phase
-        if self._sys_phase_idx >= len(SYSTEMATIC_SCAN_PHASES):
+        if self._sys_phase_idx >= len(plan):
+            if self.cfg.scan_only_mode and self.cfg.loop_systematic:
+                # Loop the plan forever, skipping the one-shot ORIENT
+                # phase on subsequent passes (we know the camera is
+                # already roughly oriented from the previous cycle).
+                self._sys_phase_idx = 1
+                self._reset_sweep_tracking(cur_yaw)
+                confirmed = self._confirmed_count()
+                self._log(f"[sys] full pass complete (confirmed={confirmed}) "
+                          f"— restarting at "
+                          f"{plan[self._sys_phase_idx].name}")
+                return
+            # Legacy path: drop into reactive SCAN/INVESTIGATE — only
+            # reachable when ``scan_only_mode`` is False, which is the
+            # eventual self-improvement phase.
             self._sys_done = True
             self._mode = self._SCAN
             self._scan_tick = 0
-            self._log(f"[sys] systematic scan COMPLETE — switching to "
-                      f"reactive SCAN")
+            self._log("[sys] systematic scan COMPLETE — switching to "
+                      "reactive SCAN")
         else:
             self._reset_sweep_tracking(cur_yaw)
-            self._log(f"[sys] phase → "
-                      f"{SYSTEMATIC_SCAN_PHASES[self._sys_phase_idx].name}")
+            self._log(f"[sys] phase -> {plan[self._sys_phase_idx].name}")
+
+    def _confirmed_count(self) -> int:
+        """Cheap read of how many distinct voxels F3 has confirmed so
+        far this session. Best-effort — perception versions without
+        ``stats()`` fall through to a 0 so the log still prints."""
+        try:
+            return int(self._perception_ref.stats().get(
+                "confirmed_count", 0))
+        except (AttributeError, KeyError, TypeError):
+            return 0
 
     # ── SCAN mode ─────────────────────────────────────────────────
 
@@ -680,16 +882,38 @@ class WorldExplorerAgent(BaseAgent):
     def _maybe_enter_investigate(self, eye) -> bool:
         """Look for a curiosity target within reach; switch mode if
         one is found."""
+        # Garbage-collect expired entries from the failed-target
+        # cooldown table so the dict doesn't grow without bound
+        # over a long-running session.
+        if self._failed_targets:
+            ttl = self.cfg.failed_target_ttl_ticks
+            expired = [k for k, t in self._failed_targets.items()
+                       if self._tick - t > ttl]
+            for k in expired:
+                self._failed_targets.pop(k, None)
+
         # Pop up to N candidates, skipping any that lie beyond MC's
         # block-reach distance from the current eye (those would
         # never produce an F3 looking_at confirmation no matter how
         # long we aimed at them).
+        cur_yaw = self._last_yaw  # cached last good yaw
         for _ in range(16):
             target = self._perception_ref.take_curiosity_target(
-                eye=eye, prefer=self.cfg.queue_priority,
+                eye=eye,
+                prefer=self.cfg.queue_priority,
+                yaw_deg=cur_yaw,
             )
             if target is None:
                 return False
+            # Skip recent failures so we don't burn the investigate
+            # budget on the same hallucinated voxel cycle after cycle.
+            if target in self._failed_targets:
+                self._log_periodic(
+                    f"[invst] skip recently-failed target {target} "
+                    f"(cooldown ends in "
+                    f"{self.cfg.failed_target_ttl_ticks - (self._tick - self._failed_targets[target])} ticks)"
+                )
+                continue
             tcx = target[0] + 0.5
             tcy = target[1] + 0.5
             tcz = target[2] + 0.5
@@ -705,7 +929,6 @@ class WorldExplorerAgent(BaseAgent):
                 )
                 continue
             self._target_voxel = target
-            self._target_aim   = None
             self._mode = self._INVESTIGATE
             self._inv_tick = 0
             self._scan_tick = 0
@@ -740,19 +963,34 @@ class WorldExplorerAgent(BaseAgent):
         yaw_err   = self._normalize_angle(desired_yaw - float(f3.yaw))
         pitch_err = desired_pitch - float(f3.pitch)
 
-        # If the F3 OCR has confirmed THIS voxel since we chose it,
-        # we're done. We use the O(1) membership check rather than
-        # copying the whole confirmed-set every tick.
-        if self._perception_ref.is_confirmed(target):
-            self._n_investigated += 1
-            self._consecutive_drops = 0
-            self._log(f"[invst] CONFIRMED {target} after "
-                      f"{self._inv_tick} ticks — total confirmed by "
-                      f"agent: {self._n_investigated}")
-            self._target_voxel = None
-            self._mode = self._SCAN
-            self._scan_tick = 0
-            return self._halt()
+        # If the F3 OCR has confirmed THIS voxel — or any 1-block
+        # neighbour — since we chose it, we're done. Why the
+        # neighbourhood check: even with perfect aim, MC's block
+        # raytrace can resolve to a NEIGHBOURING voxel when the
+        # crosshair lands on a face edge — especially for short blocks
+        # (grass, fern) on top of a full block, where the raytrace
+        # tie-breaks between the grass voxel and the grass_block
+        # below. Without this relaxation the agent would aim, MC
+        # would happily confirm the neighbour, the agent would still
+        # see ``is_confirmed(target) == False``, and time out. The
+        # neighbour confirm is just as valuable — the sample-store
+        # auto-collect already wrote a labelled patch for it.
+        tx0, ty0, tz0 = target
+        for dx, dy, dz in ((0,0,0), (0,1,0), (0,-1,0),
+                            (1,0,0), (-1,0,0),
+                            (0,0,1), (0,0,-1)):
+            if self._perception_ref.is_confirmed((tx0+dx, ty0+dy, tz0+dz)):
+                self._n_investigated += 1
+                self._consecutive_drops = 0
+                hit_voxel = (tx0+dx, ty0+dy, tz0+dz)
+                via = "exact" if hit_voxel == target else f"neighbour@{hit_voxel}"
+                self._log(f"[invst] CONFIRMED {target} ({via}) after "
+                          f"{self._inv_tick} ticks — total confirmed by "
+                          f"agent: {self._n_investigated}")
+                self._target_voxel = None
+                self._mode = self._SCAN
+                self._scan_tick = 0
+                return self._halt()
 
         # Timeout — voxel is unreachable / occluded behind another
         # block. Drop it and resume scan.
@@ -760,6 +998,7 @@ class WorldExplorerAgent(BaseAgent):
             self._log(f"[invst] GIVE UP on {target} after "
                       f"{self._inv_tick} ticks (yaw_err={yaw_err:+.1f}, "
                       f"pitch_err={pitch_err:+.1f})")
+            self._failed_targets[target] = self._tick
             self._target_voxel = None
             self._mode = self._SCAN
             self._scan_tick = 0
@@ -796,6 +1035,7 @@ class WorldExplorerAgent(BaseAgent):
             self._log(f"[invst] DROP {target} — close for "
                       f"{self._close_ticks} ticks with no F3 confirm "
                       f"(probably out-of-reach hallucination)")
+            self._failed_targets[target] = self._tick
             self._target_voxel = None
             self._close_ticks = 0
             self._consecutive_drops += 1
@@ -868,27 +1108,34 @@ def build_world_explorer_agent(settings: dict) -> WorldExplorerAgent:
         "aim_max_deg_per_sec", "scan_yaw_deg_per_sec",
         "scan_pitch_deg_per_sec", "investigate_p_gain",
         "systematic_settle_tolerance_deg",
+        "sweep_pitch_drift_tol_deg",
+        "settle_p_gain", "settle_max_deg_per_sec",
     ):
         if key in cfg_raw and cfg_raw[key] is not None:
             setattr(cfg, key, float(cfg_raw[key]))
     for key in (
         "max_mouse_dx", "max_mouse_dy",
-        "investigate_dwell_ticks", "investigate_max_ticks",
+        "investigate_max_ticks",
         "scan_yaw_pixels_per_tick", "scan_pitch_period_ticks",
         "scan_ticks_before_investigate", "idle_scan_ticks",
         "no_target_pitch_down_after_ticks",
         "no_target_pitch_down_per_tick",
         "close_confirm_grace_ticks",
         "systematic_settle_max_ticks",
+        "open_loop_initial_idle_ticks",
+        "failed_target_ttl_ticks",
     ):
         if key in cfg_raw and cfg_raw[key] is not None:
             setattr(cfg, key, int(cfg_raw[key]))
+    for key in ("scan_only_mode", "loop_systematic"):
+        if key in cfg_raw and cfg_raw[key] is not None:
+            setattr(cfg, key, bool(cfg_raw[key]))
     if "queue_priority" in cfg_raw and cfg_raw["queue_priority"]:
         cfg.queue_priority = str(cfg_raw["queue_priority"])
     # Tick rate ultimately drives the velocity-to-px-per-tick mapping
     # inside ``_emit``. Plumbed through here so a future settings change
     # to ``agent.tick_rate`` is honoured instead of silently using 20 Hz.
-    tick_rate = (settings or {}).get("agent", {}).get("tick_rate", 20)
+    tick_rate = ((settings or {}).get("agent", {}) or {}).get("tick_rate", 20)
     try:
         tick_hz = float(tick_rate)
     except (TypeError, ValueError):

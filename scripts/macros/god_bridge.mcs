@@ -1,0 +1,78 @@
+name god_bridge
+# God bridge — diagonal back-strafe variant.
+# The player faces a block corner (yaw at a 45° offset), looks down
+# ~+66° so the crosshair lands on the SIDE face of the block-under-feet
+# diagonally, then holds S+A (back + strafe-left) while spam-clicking.
+# Each placement attaches to the side face → new block at the same y
+# level, diagonally adjacent. Player drifts onto it, repeats.
+#
+# Manual setup BEFORE running:
+#   1. Stand centred on a block.
+#   2. Yaw must be at a corner offset (45°, 135°, -45°, or -135°). This
+#      macro can't align yaw — use `python tools/run_god_bridge.py`
+#      which does it for you with F3 feedback.
+#   3. Have blocks in the selected hotbar slot.
+# NOTE: input macros are bannable on competitive servers (Hypixel etc.).
+#
+# Pitch sequence assumes you're already near horizontal. It's chunked
+# so single-large-delta drops don't bite:
+#   13 × -100 px UP   → guarantees the -90° clamp.
+#   8  × +90  px DOWN → ~+66° at 6.7 px/° (mid range). Re-tune chunks
+#                       for your rig, or use the adaptive runner.
+# Sensitivity varies between sessions; this can land anywhere from
+# +45° to +85°. The runner is more reliable.
+move 0 -100
+sleep 20
+move 0 -100
+sleep 20
+move 0 -100
+sleep 20
+move 0 -100
+sleep 20
+move 0 -100
+sleep 20
+move 0 -100
+sleep 20
+move 0 -100
+sleep 20
+move 0 -100
+sleep 20
+move 0 -100
+sleep 20
+move 0 -100
+sleep 20
+move 0 -100
+sleep 20
+move 0 -100
+sleep 20
+move 0 -100             # 13 × -100 → -195° → -90° clamp guaranteed
+sleep 100
+move 0 90
+sleep 20
+move 0 90
+sleep 20
+move 0 90
+sleep 20
+move 0 90
+sleep 20
+move 0 90
+sleep 20
+move 0 90
+sleep 20
+move 0 90
+sleep 20
+move 0 90               # 8 × 90 → +156° → +66° from -90° at 6.7 px/°
+sleep 200
+
+down s                  # walk backward
+down a                  # strafe left (use 'd' for the mirror variant)
+
+# 80 placements at MC's vanilla place-cooldown rate (5/sec). Loop time:
+# 80 × 200 ms = 16 s of placement.
+loop 80
+  click right
+  sleep 200
+endloop
+
+up a
+up s

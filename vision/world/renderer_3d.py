@@ -50,7 +50,7 @@ from typing import List, Optional, Tuple
 import cv2
 import numpy as np
 
-from vision.world.map import WorldMap, AIR_BLOCK
+from vision.world.map import WorldMap
 from vision.world.map_renderer import _color_for_block
 from vision.world.types import PlayerPose
 
@@ -254,8 +254,19 @@ class IsoWorldRenderer:
             if not (cy - cfg.layers_below <= y <= cy + cfg.layers_above):
                 continue
             candidates.append(obs.pos)
-        # Sort by depth: smaller x+y+z = further away → drawn first.
-        candidates.sort(key=lambda p: (-p[0] - p[2] + p[1]))
+        # Painter's algorithm: draw farther voxels first so nearer
+        # ones overdraw them. The iso camera looks at the world from
+        # the +X +Y +Z corner, so the depth axis (into-screen) is
+        # the negative of (x+y+z). FAR voxels have SMALLER (x+y+z).
+        # Sorting by (x+y+z) ascending paints far-first → correct
+        # occlusion.
+        #
+        # Earlier key ``(-x - z + y)`` was a transcription error:
+        # it sorts by ``y - (x + z)`` which makes high-altitude
+        # voxels on the back-left of the scene paint LAST,
+        # producing visible occlusion artefacts (small far voxels
+        # drawn on top of large near voxels in the iso snapshot).
+        candidates.sort(key=lambda p: (p[0] + p[1] + p[2]))
 
         for pos in candidates:
             obs = world_map.get_block(pos, dimension=dimension)

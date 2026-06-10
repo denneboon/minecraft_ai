@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -110,7 +109,7 @@ def main(argv=None) -> int:
 
     src = args.json or _latest_json()
     if src is None or not src.is_file():
-        print(f"[ERR] No source JSON found. Pass --json PATH.")
+        print("[ERR] No source JSON found. Pass --json PATH.")
         return 2
     print(f"[..] loading {src}")
     data = _load_json(src)
@@ -123,8 +122,8 @@ def main(argv=None) -> int:
     written = write_schematic(wm, out)
     size = written.stat().st_size
     print(f"[ok] wrote {written}  ({size} bytes)")
-    print(f"     open in Amulet Editor (https://amuletmc.com) or "
-          f"import via Litematica.")
+    print("     open in Amulet Editor (https://amuletmc.com) or "
+          "import via Litematica.")
     return 0
 
 

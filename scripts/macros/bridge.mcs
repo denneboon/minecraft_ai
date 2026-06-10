@@ -1,0 +1,13 @@
+# Sneak-bridge backward (simple line DSL).
+# Face AWAY from where you want the bridge to go, stand at the edge,
+# then run this. Timings are a starting point — tune per latency.
+name sneak_bridge
+move 0 150        # look down at a steep angle toward the edge
+down shift        # sneak so we don't walk off
+down s            # walk backward toward the gap
+loop 15           # place ~15 blocks (0 = until Ctrl+Shift+F12 / focus loss)
+  click right     # place a block behind us
+  sleep 260       # let the player shuffle back onto the new block
+endloop
+up s
+up shift

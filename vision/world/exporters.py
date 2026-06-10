@@ -117,13 +117,29 @@ def write_compact_json(world_map: WorldMap,
                         *,
                         dimension: Optional[str] = None,
                         ) -> Path:
-    """Write the compact JSON. Returns the path written."""
+    """Write the compact JSON. Returns the path written.
+
+    Atomic: serialises to a ``.tmp`` sibling and os.replace into the
+    final path. If the process crashes mid-write (OOM during
+    json.dumps, power loss, signal) the destination either holds the
+    previous good snapshot or doesn't exist at all — never a
+    truncated half-file the loader would later misread.
+    """
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     data = world_map_to_compact_dict(world_map, dimension=dimension)
-    # ``separators`` minimises whitespace for further size reduction.
-    p.write_text(json.dumps(data, separators=(",", ":")),
-                 encoding="utf-8")
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        # ``separators`` minimises whitespace for further size reduction.
+        f.write(json.dumps(data, separators=(",", ":")))
+        f.flush()
+        try:
+            import os as _os
+            _os.fsync(f.fileno())
+        except (OSError, AttributeError):
+            pass
+    import os as _os
+    _os.replace(tmp, p)
     return p
 
 
@@ -618,9 +634,26 @@ def write_schematic(world_map: WorldMap,
 
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    with gzip.open(p, "wb") as f:
-        f.write(w.getvalue())
+    # Atomic write: gzip to a .tmp sibling, then os.replace into
+    # place. A crash mid-write (OOM, signal, power loss) would
+    # otherwise leave a truncated .schem that Amulet / Litematica
+    # / our own NBTReader would reject — silently destroying the
+    # session's recorded WorldMap.
+    _atomic_write_gzip(p, w.getvalue())
     return p
+
+
+def _atomic_write_gzip(path: Path, data: bytes) -> None:
+    """Gzip ``data`` to ``path`` atomically via ``.tmp`` + os.replace."""
+    import os as _os
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with gzip.open(tmp, "wb") as f:
+        f.write(data)
+        try:
+            _os.fsync(f.fileno())
+        except (OSError, AttributeError):
+            pass
+    _os.replace(tmp, path)
 
 
 def _write_schematic_empty(path: Union[str, Path],
@@ -646,8 +679,7 @@ def _write_schematic_empty(path: Union[str, Path],
     w.write_named("Schematic", schem)
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    with gzip.open(p, "wb") as f:
-        f.write(w.getvalue())
+    _atomic_write_gzip(p, w.getvalue())
     return p
 
 

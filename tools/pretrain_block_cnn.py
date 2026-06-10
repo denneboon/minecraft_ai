@@ -72,7 +72,11 @@ def _usable_texture(tex: np.ndarray) -> bool:
 
 
 def _gather_textures(assets, max_blocks: int):
-    """block_id -> list of face texture RGB arrays (collapsed by base)."""
+    """block_id -> list of ``(face_stem, RGB array)`` (collapsed by base).
+
+    Keeps the face stem so the sample generator knows WHICH face each
+    texture is — needed to tint ``grass_block_top`` (green) without
+    tinting ``grass_block_side`` (dirt)."""
     by_block = {}
     for stem in assets.list_block_textures():
         if stem.endswith("_overlay"):
@@ -82,7 +86,7 @@ def _gather_textures(assets, max_blocks: int):
             continue
         rgb = tex[..., :3] if tex.shape[2] == 4 else tex
         bid = _block_id_for_stem(stem)
-        by_block.setdefault(bid, []).append(np.ascontiguousarray(rgb))
+        by_block.setdefault(bid, []).append((stem, np.ascontiguousarray(rgb)))
     if max_blocks and len(by_block) > max_blocks:
         # Keep a deterministic subset (sorted) so reruns are stable.
         keep = sorted(by_block)[:max_blocks]
@@ -90,15 +94,41 @@ def _gather_textures(assets, max_blocks: int):
     return by_block
 
 
-def _make_samples(by_block, patches_per_block: int, seed: int = 0):
+def _face_is_tinted(block_base: str, face_stem: str) -> bool:
+    """Does Minecraft apply a biome/fixed tint to THIS face of THIS block?
+
+    Plants / leaves / vines are single-texture and fully tinted. The one
+    common partial case is ``grass_block``: only the TOP (and the side
+    grass overlay, which we skip) is tinted; the ``_side`` face is plain
+    dirt and must stay untinted."""
+    from vision.world.biome_tint import is_tintable
+    if not is_tintable(block_base):
+        return False
+    if block_base == "grass_block":
+        return face_stem == "grass_block_top"
+    return True
+
+
+def _make_samples(by_block, patches_per_block: int, seed: int = 0,
+                  tinted: bool = True):
     import cv2
+    from vision.world.biome_tint import tints_for_block, apply_tint
     rng = np.random.default_rng(seed)
     samples = []
     for bid, faces in by_block.items():
+        block_base = bid.split(":", 1)[-1]
+        tints = tints_for_block(block_base) if tinted else []
         for k in range(patches_per_block):
-            face = faces[rng.integers(len(faces))]
+            face_stem, face = faces[rng.integers(len(faces))]
             patch = cv2.resize(face, (SAMPLE_SIZE, SAMPLE_SIZE),
                                interpolation=cv2.INTER_NEAREST)
+            # Apply a random biome tint so grass/foliage prototypes are
+            # GREEN like the real render, not grey like the raw atlas.
+            # One untinted patch per block is kept too (k == 0) for
+            # robustness to odd lighting / shaders that wash out tint.
+            if tints and k > 0 and _face_is_tinted(block_base, face_stem):
+                _, tint = tints[int(rng.integers(len(tints)))]
+                patch = apply_tint(patch, tint)
             patch = _augment(patch, rng)        # render-condition jitter
             samples.append(StoredWorldSample(
                 block_id=bid, path=Path(f"_tex/{bid}/{k}"), rgb=patch))

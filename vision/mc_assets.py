@@ -82,19 +82,22 @@ query touches one.
 from __future__ import annotations
 
 import json
-import os
-import sys
 import time
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import cv2
 import numpy as np
 
 # Reuse the jar-discovery logic from mcfont.
 from vision.mcfont import find_mc_jars, _version_key
+
+# Sentinel for the texture cache so a legitimately-cached ``None`` (a
+# texture that doesn't exist on disk) is distinguished from a cache miss
+# — without it a missing texture would re-hit the filesystem every call.
+_MISSING = object()
 
 
 # ---------------------------------------------------------------------------
@@ -225,6 +228,9 @@ def _version_from_jar_path(jar_path: str) -> str:
     return name
 
 
+_zip_warn_state = {"emitted": False}
+
+
 def extract_assets(
     jar_path: str,
     output_dir: str,
@@ -272,7 +278,21 @@ def extract_assets(
                     continue
                 try:
                     data = z.read(name)
-                except Exception:
+                except Exception as e:
+                    # A genuinely-corrupted entry inside the jar
+                    # silently dropped here would leave downstream
+                    # code with a None texture and degrade recogniser
+                    # quality without explanation. Surface the FIRST
+                    # corruption so the user knows the jar may be
+                    # incomplete; subsequent failures cached but
+                    # silent so a thoroughly-broken jar doesn't
+                    # produce thousands of identical log lines.
+                    if not _zip_warn_state["emitted"]:
+                        _zip_warn_state["emitted"] = True
+                        print(f"[mc_assets][WARN] corrupted jar entry "
+                              f"{name!r}: {e!r}. The asset will be "
+                              f"missing from the cache; further "
+                              f"corruption warnings silenced.")
                     continue
                 dest.write_bytes(data)
                 stats[cat]["count"] += 1
@@ -346,6 +366,14 @@ class MCAssets:
     _lang_cache:    Dict[str, dict] = field(default_factory=dict, repr=False)
     _recipe_cache:  Dict[str, dict] = field(default_factory=dict, repr=False)
     _model_cache:   Dict[str, dict] = field(default_factory=dict, repr=False)
+    # Decoded-texture cache. Texture PNGs are immutable for the life of
+    # a run, but the inverse renderer + block classifier re-request the
+    # same handful every tick — without this they hit cv2.imread (disk +
+    # decode) ~28×/tick (~4 ms). Keyed by (path, rgb-flag). Cached arrays
+    # are treated read-only by all callers (resize/cvtColor/astype all
+    # return new arrays), so sharing the reference is safe.
+    _png_cache:     Dict[Tuple[str, bool], Optional[np.ndarray]] = field(
+        default_factory=dict, repr=False)
 
     # ─── Constructors ───────────────────────────────────────────────
 
@@ -397,6 +425,17 @@ class MCAssets:
         return self._read_png(self.root / "textures" / "gui" / f"{name}.png", rgb=False)
 
     def _read_png(self, path: Path, *, rgb: bool) -> Optional[np.ndarray]:
+        # Memoised on (path, rgb): immutable assets, hot-path re-reads.
+        key = (str(path), rgb)
+        cached = self._png_cache.get(key, _MISSING)
+        if cached is not _MISSING:
+            return cached
+        out = self._decode_png(path)
+        self._png_cache[key] = out
+        return out
+
+    @staticmethod
+    def _decode_png(path: Path) -> Optional[np.ndarray]:
         if not path.is_file():
             return None
         bgr = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)

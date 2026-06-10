@@ -11,6 +11,10 @@ capture:
   downscale: 1.0
   ui_scale: 2
   fov: 90
+  # Grab frames on a background thread so the ~16-30 ms screen grab
+  # never blocks the agent loop. The control loop reads the most-recent
+  # frame instantly. Set to false to force synchronous grabs.
+  threaded: true
   track_window_each_frame: true
   strict_window_find: true
   use_client_area: true
@@ -27,10 +31,23 @@ vision:
     - 6
     - 4
     patch_size_px: 24
+    # Patch-sweep bounding box. These margins exclude regions of the
+    # frame that are ALWAYS UI (not world):
+    #   * top  220 → clears MC's full F3 panel header (Minecraft
+    #                version / biome / FPS / mem stats lines that
+    #                render from y≈0..200 when F3 is held)
+    #   * bot  200 → clears the hotbar (already covered by an
+    #                exclude_rect, but the margin keeps the patch
+    #                grid from spending ANY of its 24 slots there)
+    #   * left/right 80 → minimal trim of the screen edges where the
+    #                Minecraft block-fog gradient lives
+    # Additional UI holes (crosshair, F3 right column, hand) are
+    # masked by the exclude_rects block below — those are points
+    # INSIDE the grid that should also be skipped per-patch.
     margin_left_px: 80
     margin_right_px: 80
-    margin_top_px: 120
-    margin_bottom_px: 180
+    margin_top_px: 220
+    margin_bottom_px: 200
     max_walk_distance: 16.0
     crosshair_reach_blocks: 5.0
     min_block_confidence: 0.25
@@ -38,29 +55,97 @@ vision:
     use_sample_recognizer: true
     auto_sample_from_looking_at: true
     sample_cooldown_ticks: 6
-    sample_capture_px: 32
+    # Capture 48×48 actual pixels around the crosshair. After the cross
+    # arms are inpainted away (mask_crosshair_in_samples) there's still
+    # plenty of surrounding block surface for the recogniser to learn
+    # from. Bigger = more context but also more cross to remove and
+    # more risk of straddling a block boundary; smaller = nothing left
+    # after masking.
+    sample_capture_px: 48
     sample_reload_every_n_saves: 3
-    # CONSERVATIVE MODE: only blocks the AI directly looked at via F3
-    # "Targeted Block" go into the WorldMap. Vision-patch guesses,
-    # sample-NN matches, inverse-renderer cross-validation, and
-    # F3-seed neighbour expansion are all DISABLED — they exist in
-    # code but are gated behind this flag for future re-enablement
-    # after the heuristic-quality issues are sorted out.
-    commit_only_from_looking_at: true
+    # Inpaint MC's crosshair (15-GUI-px '+') out of every saved sample
+    # so future training learns the underlying block texture instead
+    # of the synthetic cross. Geometry knobs cover non-vanilla
+    # crosshairs (resource packs / overlay mods).
+    mask_crosshair_in_samples: true
+    crosshair_arm_half_len_gui:   8
+    crosshair_arm_half_thick_gui: 1
+    # Diagnostic — dumps the latest F3 OCR text every 100 ticks so
+    # you can see WHY blocks aren't being logged. Turn this off
+    # once the agent is reliably committing. The dump only shows
+    # the parse result + the first 240 chars of raw text.
+    debug_f3_dump: true
+    # ── Commit gate ──────────────────────────────────────────────
+    # When ``true`` the WorldMap holds ONLY blocks F3's "Targeted
+    # Block" line confirmed directly. When ``false`` the sample-NN
+    # recogniser also commits patches it confidently identifies
+    # anywhere in the gameplay region — multiplying map growth per
+    # tick at the cost of accepting a small false-positive rate
+    # (gated by ``sample_commit_confidence`` + ``min_samples_for_commit``
+    # below). Flip after the sample dataset has accumulated enough
+    # diverse captures.
+    commit_only_from_looking_at: false
 
-    # ── HUD / hand exclusion zones ───────────────────────────────
-    # Pixel rectangles where the camera sees the player's HOTBAR or
-    # their first-person HAND — patches that fall inside are
-    # ignored. Tuned for the calibrated 1920x1129 capture; adjust
-    # via tools/window_inspector.py if the GUI scale changes.
+    # ── UI exclusion zones ───────────────────────────────────────
+    # Reference resolution that exclude_rects + margins are tuned
+    # against. At capture time the actual frame size is divided by
+    # this reference and every pixel-space value (margins, rects) is
+    # scaled accordingly — so windowed MC, different monitors, and
+    # the player resizing the window all keep the hotbar / hand /
+    # F3 panel correctly masked without re-calibration.
+    frame_ref_resolution: [1920, 1129]
+
+    # Pixel rectangles inside the patch-sweep bounding box where the
+    # camera sees UI rather than world. Patch CENTRES landing in any
+    # of these rects are skipped — without it the classifier would
+    # confidently label crosshair pixels as a "block" or sample F3
+    # text as a wall.
+    #
+    # Format: [x, y, w, h]. Coordinates are FRAME pixels at
+    # ``frame_ref_resolution`` (above). Adjust via
+    # tools/window_inspector.py + a few one-off captures if the GUI
+    # scale or window aspect changes substantially.
     exclude_rects:
-      - [760, 1030, 410, 100]      # hotbar + health/hunger bars
-      - [1200,  700, 720, 430]     # first-person hand bottom-right
+      # Crosshair at frame centre (1920/2, 1094/2) = (960, 547). The
+      # 15-GUI-px '+' renders as a ~30×30 region; 60×60 buffer covers
+      # any subtle anti-aliased edge plus a margin for the attack
+      # indicator that sometimes overlays the crosshair.
+      - [930, 517, 60, 60]
+      # F3 panel RIGHT column (when F3 is held / always-lines show).
+      # Right column runs from ~x=1300 to the right edge, top of
+      # frame down to about y=560 with the full panel rendered.
+      # Always-lines (player_position etc.) live inside this same
+      # box, so the rect is correct either way.
+      - [1300, 0, 620, 560]
+      # Hotbar + health / hunger / armour / xp bars.
+      - [760, 1030, 410, 100]
+      # First-person hand bottom-right quadrant.
+      - [1200, 700, 720, 430]
 
     strict_commit_gate: true
-    sample_commit_confidence: 0.92
+    # Confidence floor for a vision_patch commit. The sample-NN's
+    # ``confidence`` is a blend of top-K agreement + normalised
+    # margin; well-recognised vine / short_grass / grass_block
+    # patches typically score 0.85-0.95. The per-block sample gate
+    # (``min_samples_per_block_for_commit``) already prevents
+    # baseline-classifier hallucinations from passing, so the
+    # confidence floor's role is only to drop genuinely ambiguous
+    # patches inside the trained-block set. 0.85 is the
+    # post-per-block-gate sweet spot — high enough to skip
+    # near-misses, low enough to actually commit the bulk of clear
+    # foliage / ground patches the NN sees every tick.
+    sample_commit_confidence: 0.85
     min_samples_for_commit: 30   # require this many labelled samples on
                                   # disk before sample-NN can commit a block
+    # Per-block sample floor. A prediction for, say, ``acacia_leaves``
+    # is only trusted if the sample store actually has ≥N captures of
+    # acacia_leaves on disk. Without this gate, the
+    # HybridBlockClassifier's colour-signature fallback (1157 generic
+    # MC block templates) can label random foliage / dirt patches as
+    # whatever the closest template is — flooding the WorldMap with
+    # blocks we've never trained on. Unbacked predictions still go
+    # to the curiosity queue so the player can teach them via F3.
+    min_samples_per_block_for_commit: 20
     curiosity_queue_max: 256
     # Inverse-rendering ground-truth expansion. When F3 confirms a
     # voxel, project neighbouring voxels' visible faces to the
@@ -72,6 +157,17 @@ vision:
     expand_score_min:               0.55
     expand_neighbour_radius:        2
     expand_max_voxels_per_tick:     32
+    # Unified per-tick wall-clock budget (ms) for ALL heavy perception
+    # work (expansion + curiosity cross-validation + patch sweep). Keeps
+    # the control loop near its target rate in block-dense scenes; the
+    # map just fills a little slower. 0 = no cap. Kept modest (12 ms) so
+    # the main thread releases the GIL quickly and the F3 OCR worker
+    # (pose / looking-at — the priority) gets CPU instead of being
+    # starved by inverse-render expansion / patch-sweep.
+    perception_time_budget_ms:      12
+    # Skip redundant re-commit/re-expansion on control ticks that reuse
+    # the same (threaded-OCR) pose; map growth tracks the OCR cadence.
+    skip_stale_pose_updates:        true
     # Cross-validate curiosity-queue entries every tick against the
     # inverse renderer: when patch sweep + texture geometry agree
     # on the same block id, commit (no F3 needed).
@@ -82,6 +178,41 @@ vision:
     use_f3_depth_anchor: true
     default_anchor_depth: 4.0
     depth_search_radius: 6.0
+    # Recognise weather from the screen each tick (clear/rain/snow/
+    # thunder/unknown) and attach it to the WorldFrame + tag block
+    # samples with it. See vision.weather and tools/collect_weather.py.
+    detect_weather: true
+    # Weather changes over minutes — re-check at most this often (sec) and
+    # hold the verdict in between, so the F3 OCR (pose / looking-at) gets
+    # the CPU/GIL instead of a per-tick weather scan.
+    weather_check_interval_sec: 5.0
+  # Weather recogniser tuning. The heuristic works out of the box;
+  # collecting command-labelled samples (tools/collect_weather.py)
+  # builds a trained classifier that supersedes it.
+  weather:
+    smooth_window: 9            # majority-vote over the last N frames
+    min_samples_per_state: 8    # trained classifier needs >=this per state
+    cave_open_frac: 0.18        # below this fraction of open sky -> unknown
+  ocr:
+    # Run F3 OCR on a background thread (requires capture.threaded). The
+    # control loop reads the latest pose instantly instead of blocking
+    # on the ~70 ms read. read_interval_sec paces the worker; the read
+    # itself takes ~70 ms so values below that just mean "read as fast
+    # as possible". ~0.12 s gives ~6-8 Hz pose updates (vs the old 3 Hz)
+    # while leaving a CPU core free for perception.
+    threaded: true
+    # 0 = read back-to-back (fire as fast as the ~70 ms read allows,
+    # ~12-14 Hz) for maximum pose / looking-at throughput. The interval
+    # only adds delay when set ABOVE the read time; raise it (e.g. 0.1)
+    # to cap OCR and free CPU if the control loop needs it.
+    read_interval_sec: 0.0
+    # Cap F3 line scanning. The F3 fields we need (XYZ, Block, Facing,
+    # Targeted Block, block id, Chunk, dimension) all live in the
+    # first ~5 lines of each column at half-line stride; line steps
+    # past that are pure overhead. Dropping from 25 -> 8 cuts F3 OCR
+    # from ~430 ms to ~80 ms per cycle on the user's machine, which
+    # was the dominant bottleneck of the main agent loop.
+    max_lines: 8
   hud_regions:
     hotbar_region:
     - 778
@@ -191,11 +322,33 @@ control:
     max_events_per_sec: 480           # high cap so the easing micro-steps
                                        # are never rate-limited
     enable_scroll: true
+
+    # Absolute screen-cursor reach (humanlike easing for menus /
+    # inventory hovers). Used by ``Mouse.move_to_screen_xy``; never
+    # touches gameplay camera (that uses the relative-delta APIs
+    # above). Defaults below are tuned to feel like a deliberate hand
+    # reach — minimum-jerk velocity profile, slight perpendicular
+    # bow, sub-pixel wobble.
+    screen_move:
+      min_ms:    80      # short hops still take at least this long
+      max_ms:    450     # cap for big diagonal traversals
+      ms_per_px: 0.6     # base distance scaling (linear)
+      step_hz:   240     # micro-step cadence; matches velocity worker
+      curvature: 0.06    # perpendicular bow as fraction of distance
+      jitter_px: 0.4     # per-step random offset to break the curve
 safety:
   check_focus_interval: 0.075
   auto_stop_on_focus_loss: true
   allow_run_without_focus: false
   assume_focused_when_unknown: false
+  # Tolerance for capture vs. calibration size mismatch (per axis, in
+  # pixels). Below this we warn but still run; above this we still
+  # warn — there is no hard abort. The HUD coordinates in
+  # ``vision.hud_regions`` were measured at the calibrated resolution,
+  # so HUD-dependent agents (Navigation eating food, etc.) may degrade
+  # if the offset is large. World-perception is unaffected because it
+  # rebuilds its screen-ray from the actual capture each tick.
+  capture_size_tolerance_px: 64
   focus_loss_debounce_ms: 250
   startup_focus_grace_ms: 800
   debug_focus_trace: false
@@ -217,7 +370,7 @@ logging:
     draw_mob_detection: false
     draw_hotbar_state: false
 agent:
-  default_agent: navigation
+  default_agent: world_explorer    # scan-only mode — see agent.world_explorer below
   max_runtime_sec: 30
   tick_rate: 20
   action_rate: 60
@@ -234,6 +387,20 @@ agent:
     imagination_rollouts: 0
     use_latent_model: false
   world_explorer:
+    # ── Phase 2: curiosity-driven investigate ─────────────────────
+    # Systematic 360° plan still runs FIRST (one full pass) to seed
+    # ground truth and grow F3-confirmed extrapolations. After that
+    # the agent drops into reactive SCAN ↔ INVESTIGATE:
+    #   * SCAN: pan camera, let perception fill the curiosity queue
+    #   * INVESTIGATE: pop the freshest queue entry, aim crosshair
+    #     at the voxel, wait for F3 "Looking at block" to confirm
+    #     or contradict the guess, save a labelled sample, repeat.
+    # This closes the self-improvement loop: every unknown-block
+    # guess turns into either a new sample (correct) or a recorded
+    # correction (wrong → tighten gate / discard guess).
+    scan_only_mode:  false
+    loop_systematic: false
+
     # All mouse-motion knobs tuned for HUMANLIKE easing (no flicks).
     # Effective speed limits (at MC sensitivity 100 %, ~6.5 px/°):
     #   * yaw scan rate         ≈ 9°/sec  (2 px/tick × 20 Hz / 6.5 px/°)
@@ -246,18 +413,29 @@ agent:
     max_mouse_dx: 25
     max_mouse_dy: 20
     aim_tolerance_deg: 1.4
-    investigate_dwell_ticks: 12
     investigate_max_ticks: 140       # extra budget for the gentler gain
     close_confirm_grace_ticks: 12
     max_reach_blocks: 5.0
     scan_yaw_pixels_per_tick: 2      # ~9°/sec — slow, deliberate pan
+    # Velocity for the systematic 360° sweep. The default is 18°/s
+    # which feels human but takes ~20s per sweep. In reactive mode
+    # (``scan_only_mode: false``) the short systematic plan
+    # (orient + sweep_level) runs ONCE before handing off to INVESTIGATE
+    # — so we'd rather get through it quickly. 30°/s is still well
+    # under "twitch" speed (humans casually turn at 100°/s+) but
+    # cuts the warmup from ~25s to ~15s.
+    scan_yaw_deg_per_sec: 30.0
     scan_pitch_amplitude_deg: 25.0
     scan_pitch_period_ticks: 360     # 18 s sweep
     scan_pitch_center_deg: 25.0      # biased downward
     scan_ticks_before_investigate: 14
     no_target_pitch_down_after_ticks: 30
     no_target_pitch_down_per_tick: 4  # gentle pitch-down
-    queue_priority: closest
+    # Curiosity-queue priority: "in_view" prefers voxels currently in
+    # front of the camera over voxels behind (which would require a
+    # 140°+ rotation to confirm — usually times out). "closest" is
+    # the legacy spatial-distance pick.
+    queue_priority: in_view
   navigation:
     target_x: null
     target_z: null
@@ -272,6 +450,39 @@ agent:
     eat_below_hunger: 0.0
     food_slot: 9
     eat_hold_ticks: 30
+  pathwalker:
+    # A* pathfinder + waypoint follower. Set target_x/y/z to drive the
+    # agent to a specific voxel; leave null to keep the agent idle
+    # (useful for higher-level autonomous agents that build on
+    # WalkerController). All other fields fall back to WalkerConfig
+    # defaults — they're listed here for discoverability.
+    target_x: -89
+    target_y: 91
+    target_z: -94
+    arrived_tolerance: 0.8
+    arrived_y_tol: 1.5
+    waypoint_tolerance: 0.65
+    aim_tolerance_deg: 6.0
+    aim_p_gain: 0.7
+    aim_max_deg_per_sec: 90.0
+    # Pitch-level controller — keeps the head roughly horizontal
+    # while walking so F3 picks up the block in front and the agent
+    # doesn't sprint forward with its head stuck pointing at the sky
+    # (a common post-systematic-scan handoff state).
+    target_pitch_deg: 5.0
+    pitch_p_gain: 0.5
+    pitch_max_deg_per_sec: 25.0
+    mouse_per_degree: 6.5
+    stuck_progress_window: 30
+    stuck_min_progress: 0.1
+    stuck_replan_retries: 2
+    # Pathfinder knobs:
+    #   * unknown_policy: "ground_only" (default) | "passable"
+    #   * max_fall_blocks: 3 (safe drops)
+    #   * max_nodes_expanded: 20_000 (A* budget)
+    unknown_policy: passable
+    max_fall_blocks: 3
+    max_nodes_expanded: 50000
 training:
   enable_training_mode: false
   data_path: data/

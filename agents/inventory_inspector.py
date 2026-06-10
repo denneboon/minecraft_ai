@@ -21,14 +21,17 @@ What this isn't
 
 Design choices
 --------------
-* **Absolute cursor positioning via win32.** Our ``control.mouse``
-  module exposes RELATIVE moves only (dx, dy) because in-game camera
-  control uses relative deltas. For hovering over inventory slots we
-  need a fixed screen pixel — we use ``SetCursorPos`` directly. MC's
-  inventory cursor reads OS cursor position so this works without any
-  detection.
-* **Cursor restore.** After all hovers complete we put the cursor back
-  where the user left it, so they can keep using their mouse.
+* **Absolute cursor positioning.** Our ``control.mouse`` module exposes
+  RELATIVE moves for the gameplay camera (where MC reads Raw Input with
+  the cursor locked) AND eased ABSOLUTE moves via
+  :meth:`Mouse.move_to_screen_xy` for menus (where MC reads the OS
+  cursor). This inspector always uses the eased absolute path so a
+  hover sequence looks like a human reaching for the slot — minimum-
+  jerk velocity profile, slight perpendicular bow, per-step wobble.
+  The bare-teleport helpers below remain available for callers that
+  genuinely want an instant jump (e.g. unit tests).
+* **Cursor restore.** After all hovers complete we ease the cursor
+  back where the user left it, so they can keep using their mouse.
 * **Respect the input gate.** If the safety gate is closed we skip the
   hover entirely — the agent should never move the cursor against the
   user's wishes.
@@ -46,11 +49,15 @@ import numpy as np
 from vision.inventory import InventorySnapshot, SlotContent
 from vision.inventory_layout import SlotRect, slot_rects
 from vision.sample_store import SampleStore
-from vision.tooltip import TooltipReader, TooltipInfo
+from vision.tooltip import TooltipReader
 
 
 # ---------------------------------------------------------------------------
 # Absolute cursor helpers — Windows only (the project runs on Windows).
+#
+# These remain as MODULE-LEVEL helpers for callers that want an instant
+# teleport (e.g. test fixtures). The inspector itself uses
+# ``Mouse.move_to_screen_xy`` for an eased, humanlike reach instead.
 # ---------------------------------------------------------------------------
 
 _user32 = ctypes.windll.user32
@@ -66,7 +73,9 @@ def get_cursor_xy() -> Tuple[int, int]:
 
 
 def set_cursor_xy(x: int, y: int) -> None:
-    """Teleport the cursor to (x, y) in screen coordinates."""
+    """Teleport the cursor to (x, y) in screen coordinates. Prefer
+    :meth:`Mouse.move_to_screen_xy` from the runtime — this is a
+    no-easing primitive kept for tests and one-off scripts."""
     _user32.SetCursorPos(int(x), int(y))
 
 
@@ -119,11 +128,19 @@ class InventoryInspector:
                  tooltip_reader: TooltipReader,
                  capture,
                  *,
+                 mouse=None,
                  gate=None,
                  sample_store: Optional[SampleStore] = None,
                  config: Optional[InspectorConfig] = None):
         self._tooltip = tooltip_reader
         self._capture = capture
+        # ``mouse`` is the runtime :class:`control.mouse.Mouse`. When
+        # provided, hovers and cursor-restores use its eased absolute
+        # path (humanlike minimum-jerk reach). When omitted (tests,
+        # standalone scripts) we fall back to the bare teleport so
+        # nothing breaks — but agents in the main loop should always
+        # pass it.
+        self._mouse   = mouse
         self._gate    = gate
         self.cfg      = config or InspectorConfig()
         # If provided, every successful hover writes the slot crop
@@ -133,6 +150,15 @@ class InventoryInspector:
         # SampleRecognizer matches against on subsequent runs, so the
         # hover cost amortises over time.
         self._sample_store = sample_store
+
+    def _move_cursor_to(self, x: int, y: int) -> None:
+        """Eased reach to (x, y) if a Mouse instance is wired in,
+        otherwise the legacy instant teleport. Either path respects
+        the input gate."""
+        if self._mouse is not None:
+            self._mouse.move_to_screen_xy(int(x), int(y))
+        else:
+            set_cursor_xy(int(x), int(y))
 
     # ------------------------------------------------------------------
     # Public
@@ -158,7 +184,7 @@ class InventoryInspector:
         cx, cy = slot.center()
         desktop_x = window_origin[0] + cx
         desktop_y = window_origin[1] + cy
-        set_cursor_xy(desktop_x, desktop_y)
+        self._move_cursor_to(desktop_x, desktop_y)
 
         # First attempt: wait the configured settle time. Subsequent
         # attempts add a small linear backoff (capped) — the tooltip
@@ -267,7 +293,10 @@ class InventoryInspector:
                 resolved += 1
         finally:
             if original_cursor is not None:
-                set_cursor_xy(*original_cursor)
+                # Ease back to where the user left the cursor — the
+                # restore should look like the bot finished its job
+                # and put the cursor down, not snap it to a teleport.
+                self._move_cursor_to(*original_cursor)
 
         return results
 
@@ -291,8 +320,20 @@ class InventoryInspector:
             y1 = min(frame_rgb.shape[0], y0 + slot.h)
             crop = frame_rgb[y0:y1, x0:x1]
             self._sample_store.save(item_id, crop)
-        except Exception:
-            pass
+        except Exception as e:
+            # Sample save is best-effort but a SYSTEMATIC failure
+            # (disk full, sample-store corrupted, sample-store mount
+            # offline) silently kills the Phase-3 learning loop. The
+            # recogniser would otherwise still answer hovers from the
+            # in-memory templates, masking the data-loss for hours.
+            # First-failure WARN; subsequent failures silenced to
+            # avoid spamming at hover rate.
+            if not getattr(self, "_save_warn_emitted", False):
+                self._save_warn_emitted = True
+                print(f"[inventory_inspector][WARN] sample save for "
+                      f"{item_id!r} failed: {e!r}. Phase-3 dataset "
+                      f"growth disabled until restart. Further "
+                      f"failures silenced.")
 
 
 __all__ = [

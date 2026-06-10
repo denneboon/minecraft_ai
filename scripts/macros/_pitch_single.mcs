@@ -1,0 +1,4 @@
+name pitch_single_530
+sleep 300
+move 0 530
+sleep 1500

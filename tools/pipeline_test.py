@@ -13,7 +13,6 @@ from __future__ import annotations
 import os
 import sys
 import time
-import traceback
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
@@ -443,23 +442,32 @@ if answer == "y":
         gate = InputGate()
         gate.set_allowed(True)
 
+        # try/finally around start...stop so a mid-test crash doesn't
+        # leak the velocity worker. Without this, an exception in
+        # the motion or hotbar sequence would skip ``ms.stop()`` and
+        # the daemon thread would keep emitting motion until process
+        # exit — the "mouse still moves after the program says it's
+        # done" symptom. Same for the keyboard.
         ms = build_mouse(settings, gate=gate)
         ms.start()
-        ms.track_target(40, 0)
-        time.sleep(0.3)
-        ms.track_target(-40, 0)
-        time.sleep(0.2)
-        ms.stop()
+        try:
+            ms.track_target(40, 0)
+            time.sleep(0.3)
+            ms.track_target(-40, 0)
+            time.sleep(0.2)
+        finally:
+            ms.stop()
 
         with open(os.path.join(ROOT, "config", "keymap.json")) as f:
             raw = json.load(f)
-        from main import _flatten_keymap_for_keyboard, build_keyboard
         flat = _flatten_keymap_for_keyboard(raw)
         kb = build_keyboard(settings, flat, gate=gate)
         kb.start()
-        for slot in [1, 2, 3, 1]:
-            kb.select_hotbar_slot(slot)
-        kb.stop()
+        try:
+            for slot in [1, 2, 3, 1]:
+                kb.select_hotbar_slot(slot)
+        finally:
+            kb.stop()
 
     check("Live mouse + hotbar (Minecraft focused)", _test_live_input)
 else:

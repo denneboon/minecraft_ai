@@ -32,8 +32,9 @@ Detection strategy
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Dict, Optional, Tuple
 
+import cv2
 import numpy as np
 
 from vision.glyph_ocr import GlyphOCR, GlyphOCRConfig
@@ -146,11 +147,34 @@ class MenuDetector:
         band_h = glyph_h + 6   # ample margin for descenders and bevels
 
         recognised_chunks = []
-        for y in range(y0, y1 - band_h + 1, step):
+        # Inclusive end: the last valid scan row is exactly
+        # ``y1 - band_h`` (its crop ends at y1). The previous
+        # ``range(y0, y1 - band_h + 1, step)`` was correct in
+        # principle, but with ``step`` > 1 the loop could END at
+        # ``y0 + k*step`` < the last valid row, missing a menu
+        # whose text sits at the very bottom of the scan band.
+        # We add a final explicit-row pass so the bottom is
+        # always sampled regardless of step alignment.
+        scan_rows = list(range(y0, y1 - band_h + 1, step))
+        last_valid = y1 - band_h
+        if scan_rows and scan_rows[-1] < last_valid:
+            scan_rows.append(last_valid)
+        for y in scan_rows:
             crop = frame[y:y + band_h, :]
             try:
                 text = self._ocr.recognize_line(crop)
-            except Exception:
+            except (cv2.error, ValueError, IndexError, AttributeError) as e:
+                # Glyph OCR can raise on malformed crops (zero-size,
+                # wrong dtype) or internal state issues. Surface the
+                # first occurrence so a SYSTEMATIC failure doesn't
+                # leave the agent thinking it's PLAYING while a menu
+                # is actually open. Subsequent failures silenced to
+                # avoid 20 Hz console spam.
+                if not getattr(self, "_ocr_warn_emitted", False):
+                    self._ocr_warn_emitted = True
+                    print(f"[menu_detect][WARN] OCR row y={y} failed: "
+                          f"{e!r} — menu detection may be unreliable. "
+                          f"Further errors silenced.")
                 continue
             if text:
                 recognised_chunks.append(text)

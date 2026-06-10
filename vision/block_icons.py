@@ -51,7 +51,7 @@ import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -588,8 +588,10 @@ def ensure_block_icon_cache(
     cache = BlockIconCache(cache_dir=Path(cache_root), version=version)
 
     manifest = cache.load_manifest()
-    block_names = assets.list_block_textures()  # one entry per block-texture file
-    # Use the model registry instead — every block has a model JSON.
+    # We used to drive icon discovery from ``assets.list_block_textures()``
+    # but switched to the model registry — every block has a model JSON,
+    # whereas texture files exist for non-cube block parts too. Texture
+    # listing remains available via MCAssets if a future caller needs it.
     model_dir = Path(assets.root) / "models" / "block"
     if model_dir.is_dir():
         block_models = sorted(p.stem for p in model_dir.iterdir()
@@ -614,8 +616,20 @@ def ensure_block_icon_cache(
             continue
         try:
             icon = renderer.render(name)
-        except Exception:
+        except Exception as e:
             icon = None
+            # Surface the first render failure — corrupted texture
+            # PNG / broken model JSON / missing parent in the asset
+            # cache. The skipped block falls back to flat icon
+            # template, degrading recogniser quality silently.
+            # First-failure WARN; subsequent failures cached but
+            # silent so a 1200-block scan doesn't print 50 lines.
+            if not getattr(ensure_block_icon_cache,
+                           "_render_warn_emitted", False):
+                ensure_block_icon_cache._render_warn_emitted = True
+                print(f"[block_icons][WARN] render({name!r}) raised "
+                      f"{e!r}. The block falls back to its flat-icon "
+                      f"template. Further render failures silenced.")
         cache.put(name, icon)
         if icon is None:
             skipped.append(name)
@@ -649,10 +663,7 @@ def _is_variant_model_name(name: str) -> bool:
     Heuristic: ends with one of the known variant suffixes. The canonical
     model file (e.g. ``oak_door``) does NOT end in these.
     """
-    for s in _VARIANT_SUFFIXES:
-        if name.endswith(s):
-            return True
-    return False
+    return any(name.endswith(s) for s in _VARIANT_SUFFIXES)
 
 
 def list_rendered_icons(cache: BlockIconCache) -> List[str]:

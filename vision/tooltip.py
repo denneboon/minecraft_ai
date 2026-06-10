@@ -297,6 +297,11 @@ def _parse_durability(line: str) -> Optional[Tuple[int, int]]:
     """
     Parse "Durability: 328 / 336" → (328, 336). Returns None on any
     other layout.
+
+    Rejects ``mx <= 0`` outright so a malformed OCR (digits missing
+    on the max side) doesn't return ``(cur, 0)`` and trip a
+    ZeroDivisionError when a caller computes ``cur / mx`` for a
+    durability bar.
     """
     parts = line.replace("Durability:", "").strip().split("/")
     if len(parts) != 2:
@@ -304,9 +309,11 @@ def _parse_durability(line: str) -> Optional[Tuple[int, int]]:
     try:
         cur = int("".join(c for c in parts[0] if c.isdigit()))
         mx  = int("".join(c for c in parts[1] if c.isdigit()))
-        return cur, mx
     except ValueError:
         return None
+    if mx <= 0 or cur < 0 or cur > mx:
+        return None
+    return cur, mx
 
 
 def _parse_component_count(line: str) -> Optional[int]:

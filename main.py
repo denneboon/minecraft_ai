@@ -1,9 +1,26 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
+import sys
 import time
 from typing import Any, Dict, Optional
+
+# Reconfigure stdout/stderr to UTF-8 BEFORE any other module imports so
+# that every print across the codebase can emit Unicode (arrows, degrees,
+# ⏎ marks in the F3 dump, etc.) without crashing the Windows default
+# cp1252 console with UnicodeEncodeError. Python 3.7+ guarantees
+# ``reconfigure`` on the underlying io.TextIOWrapper. ``errors="replace"``
+# is the belt-and-suspenders fallback if a TTY somehow rejects UTF-8 —
+# offending chars become "?" rather than tearing down the agent loop.
+for _stream in (sys.stdout, sys.stderr):
+    _reconfig = getattr(_stream, "reconfigure", None)
+    if _reconfig is not None:
+        try:
+            _reconfig(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError, ValueError):
+            pass
 
 from control.input_gate import InputGate
 
@@ -19,7 +36,7 @@ from control.mouse import Mouse, MouseConfig
 from control.action_wrapper import ActionWrapper
 from vision.capture import Capture, CaptureConfig
 from vision.processing import build_processor, FrameProcessor, ScreenState
-from vision.ocr import build_f3_reader, F3Reader
+from vision.ocr import build_f3_reader, F3Reader, F3ReaderWorker
 from vision.pose_filter import PoseFilter
 from utils.focus import activate_minecraft, _find_minecraft_hwnd
 
@@ -127,8 +144,7 @@ def build_safety(settings: Dict[str, Any], gate=None) -> Safety:
         auto_stop_on_focus_loss=bool(_get(settings, "safety.auto_stop_on_focus_loss", True)),
         print_status_table=bool(_get(settings, "safety.print_status_table", True)),
     )
-    setattr(sc, "assume_focused_when_unknown",
-            bool(_get(settings, "safety.assume_focused_when_unknown", False)))
+    sc.assume_focused_when_unknown = bool(_get(settings, "safety.assume_focused_when_unknown", False))
     return Safety(sc, gate=gate)
 
 
@@ -156,6 +172,7 @@ def build_keyboard(
 
 
 def build_mouse(settings: Dict[str, Any], gate=None) -> Mouse:
+    defaults = MouseConfig()
     mc = MouseConfig(
         move_duration_ms=int(_get(settings, "control.mouse.move_duration_ms", 40)),
         flick_multiplier=float(_get(settings, "control.mouse.flick_multiplier", 0.35)),
@@ -163,6 +180,29 @@ def build_mouse(settings: Dict[str, Any], gate=None) -> Mouse:
         default_click_duration=float(_get(settings, "control.mouse.default_click_duration", 0.05)),
         max_events_per_sec=int(_get(settings, "control.mouse.max_events_per_sec", 240)),
         enable_scroll=bool(_get(settings, "control.mouse.enable_scroll", True)),
+        # Humanlike absolute reach (menus / inventory hovers). Defaults
+        # are picked to feel like a deliberate UI move; users can tune
+        # via ``control.mouse.screen_move.*`` in settings.yaml. Each
+        # ``_get`` falls back to the MouseConfig dataclass default so
+        # we don't restate magic numbers here.
+        screen_move_min_ms=int(_get(
+            settings, "control.mouse.screen_move.min_ms",
+            defaults.screen_move_min_ms)),
+        screen_move_max_ms=int(_get(
+            settings, "control.mouse.screen_move.max_ms",
+            defaults.screen_move_max_ms)),
+        screen_move_ms_per_px=float(_get(
+            settings, "control.mouse.screen_move.ms_per_px",
+            defaults.screen_move_ms_per_px)),
+        screen_move_step_hz=int(_get(
+            settings, "control.mouse.screen_move.step_hz",
+            defaults.screen_move_step_hz)),
+        screen_move_curvature=float(_get(
+            settings, "control.mouse.screen_move.curvature",
+            defaults.screen_move_curvature)),
+        screen_move_jitter_px=float(_get(
+            settings, "control.mouse.screen_move.jitter_px",
+            defaults.screen_move_jitter_px)),
     )
     return Mouse(config=mc, gate=gate)
 
@@ -209,6 +249,11 @@ def build_capture(settings: Dict[str, Any]) -> Capture:
         strict_window_find=bool(_get(settings, "capture.strict_window_find", False)),
         clamp_to_monitor=True,
         use_client_area=bool(_get(settings, "capture.use_client_area", True)),
+        # Background grabber keeps the ~16-30 ms screen grab off the
+        # agent loop's critical path. On for the live loop by default;
+        # set ``capture.threaded: false`` to force the old synchronous
+        # grab (useful when debugging capture timing).
+        threaded=bool(_get(settings, "capture.threaded", True)),
         name="minecraft_capture",
     )
     return Capture(config=cc)
@@ -340,6 +385,70 @@ def _run_test_sequence(mouse: Mouse, keyboard: Keyboard, safety: Safety) -> None
 
 
 # ---------------------------------------------------------------------------
+# F3 panel state management
+# ---------------------------------------------------------------------------
+
+def _panel_top_left_brightness(frame) -> float:
+    """Mean greyscale brightness of the top-left 60×600 region — used
+    to tell whether MC's F3 panel is currently rendered (dark overlay
+    pulls the mean down to ~55-60) or gameplay is showing through
+    (no overlay → mean ~70+ in most biomes)."""
+    if frame is None or frame.size == 0:
+        return 0.0
+    region = frame[:60, :600]
+    return float(region.mean()) if region.size else 0.0
+
+
+def _ensure_f3_panel_on(capture, keyboard,
+                       *,
+                       panel_threshold: int = 68,
+                       max_tries: int = 3) -> bool:
+    """
+    Make sure MC's F3 debug panel is rendered. Returns True if the
+    panel was already on (caller should NOT toggle it off at shutdown),
+    False if WE turned it on (caller should toggle off on cleanup).
+
+    Why this is non-trivial: in MC 1.21.x the F3 key behaves as a
+    TOGGLE — one keydown event flips the panel state. So a blind
+    ``keyboard.press("f3")`` is a coin flip. We sample the top-left
+    brightness, classify (dark panel ≈ 55-65, no panel ≈ 70+), and
+    only tap when the panel is missing. If the first tap doesn't
+    register (focus race / window switch), we tap again up to
+    ``max_tries`` times.
+    """
+    try:
+        frame0 = capture.get_frame()
+    except Exception as e:
+        print(f"[MAIN][WARN] F3-panel check: capture failed ({e})")
+        return False
+    brightness = _panel_top_left_brightness(frame0)
+    if brightness <= panel_threshold:
+        print(f"[MAIN] F3 panel already on (top-left mean={brightness:.1f})")
+        return True
+
+    print(f"[MAIN] F3 panel off (top-left mean={brightness:.1f}); tapping F3...")
+    for attempt in range(1, max_tries + 1):
+        keyboard.tap("f3", 0.05)
+        time.sleep(0.25)
+        try:
+            frame_now = capture.get_frame()
+        except Exception as e:
+            print(f"[MAIN][WARN] F3-panel verify: capture failed ({e})")
+            return False
+        new_brightness = _panel_top_left_brightness(frame_now)
+        if new_brightness <= panel_threshold:
+            print(f"[MAIN] F3 panel ON after {attempt} tap(s) "
+                  f"(top-left mean={new_brightness:.1f})")
+            return False
+        print(f"[MAIN][WARN] F3 panel still off after tap {attempt}/{max_tries} "
+              f"(mean={new_brightness:.1f}); retrying...")
+    print(f"[MAIN][WARN] F3 panel did NOT come on after {max_tries} taps. "
+          f"Agent will run without F3 — pose / Targeted Block reads will be "
+          f"degraded. Try toggling F3 manually before starting the agent.")
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Agent loop
 # ---------------------------------------------------------------------------
 
@@ -409,12 +518,44 @@ def _dispatch_action(
     has_velocity_field = (action.look_vx != 0.0 or action.look_vy != 0.0
                           or action.force_velocity)
     if has_velocity_field:
+        # NaN / inf / absurd-magnitude guard. A buggy agent (broken
+        # P-controller divide-by-zero, calibrator returning 0 px/deg,
+        # uncapped velocity command, etc.) can hand us NaN, inf, or
+        # 1e308. Without this guard those values pass through to the
+        # mouse worker which then emits uncontrolled motion until the
+        # value wraps. Clamp to a generous but finite range: 8000 px/s
+        # at ~1.9 px/deg = 4200°/s, well past any humanlike rotation
+        # rate, but bounded enough that a single bad value can't
+        # produce a teleport.
+        vx = action.look_vx
+        vy = action.look_vy
+        if not math.isfinite(vx):
+            vx = 0.0
+        if not math.isfinite(vy):
+            vy = 0.0
+        _VEL_CAP = 8000.0
+        if abs(vx) > _VEL_CAP:
+            vx = math.copysign(_VEL_CAP, vx)
+        if abs(vy) > _VEL_CAP:
+            vy = math.copysign(_VEL_CAP, vy)
         try:
-            mouse.set_velocity(float(action.look_vx), float(action.look_vy))
+            mouse.set_velocity(float(vx), float(vy))
         except Exception as e:
             print(f"[AGENT][WARN] mouse.set_velocity failed: {e}")
     if action.look_dx or action.look_dy:
-        mouse.track_target(int(action.look_dx), int(action.look_dy))
+        # Same NaN / inf / absurd-magnitude guard for the one-shot
+        # path. ``int()`` on NaN raises ValueError; on +inf returns
+        # OverflowError. Either way main would have crashed; clamp first.
+        dx = action.look_dx
+        dy = action.look_dy
+        if not math.isfinite(dx):
+            dx = 0.0
+        if not math.isfinite(dy):
+            dy = 0.0
+        _PX_CAP = 20000  # ~10000° at calibrated px/deg — way past anything sane
+        dx = max(-_PX_CAP, min(_PX_CAP, dx))
+        dy = max(-_PX_CAP, min(_PX_CAP, dy))
+        mouse.track_target(int(dx), int(dy))
 
     # One-shot interactions
     if action.interact == "attack":
@@ -437,6 +578,7 @@ def _run_agent_loop(
     settings: Dict[str, Any],
     max_runtime_sec: float,
     world_perception: Optional[Any] = None,
+    f3_worker: Optional[F3ReaderWorker] = None,
 ) -> None:
     """
     Main perception → decision → action loop.
@@ -476,6 +618,9 @@ def _run_agent_loop(
     profile_ticks  = 0
     profile_window_start = start_ts
     total_ticks    = 0   # monotonic counter for the shutdown summary
+    # Throttled error log: each distinct exception repr is printed once
+    # so a recurring failure is visible without 20 Hz spam.
+    _world_perception_errors_seen: set = set()
 
     try:
         while True:
@@ -503,24 +648,33 @@ def _run_agent_loop(
             # last good F3Info across ticks so state.f3 is always
             # populated for the agent — staleness is at most ~330 ms
             # which is fine for navigation.
-            now = time.perf_counter()
-            if (now - last_f3_ts >= f3_interval
-                    and state.screen_state == ScreenState.PLAYING):
-                try:
-                    fresh = f3_reader.read(frame)
-                    # Validate the raw read against physical priors.
-                    # Outlier rejection prevents a single misread from
-                    # teleporting the perception eye 100 blocks and
-                    # polluting the curiosity queue.
-                    fresh = pose_filter.accept(fresh, now=now)
-                    if fresh is not None and fresh.x is not None:
-                        last_f3 = fresh
-                    state.f3 = fresh
-                except Exception as e:
-                    print(f"[AGENT][WARN] F3 OCR failed: {e}")
-                last_f3_ts = time.perf_counter()
-            if state.f3 is None:
-                state.f3 = last_f3
+            if f3_worker is not None:
+                # Threaded path: the OCR worker reads + pose-filters on
+                # its own thread; we just grab the latest good pose. This
+                # keeps the ~70 ms OCR entirely off the control loop.
+                state.f3 = f3_worker.latest()
+            else:
+                # Synchronous fallback (capture.threaded == false): OCR
+                # inline, throttled to 3 Hz, carrying the last good pose
+                # across the cheaper ticks in between.
+                now = time.perf_counter()
+                if (now - last_f3_ts >= f3_interval
+                        and state.screen_state == ScreenState.PLAYING):
+                    try:
+                        fresh = f3_reader.read(frame)
+                        # Validate the raw read against physical priors.
+                        # Outlier rejection prevents a single misread from
+                        # teleporting the perception eye 100 blocks and
+                        # polluting the curiosity queue.
+                        fresh = pose_filter.accept(fresh, now=now)
+                        if fresh is not None and fresh.x is not None:
+                            last_f3 = fresh
+                        state.f3 = fresh
+                    except Exception as e:
+                        print(f"[AGENT][WARN] F3 OCR failed: {e}")
+                    last_f3_ts = time.perf_counter()
+                if state.f3 is None:
+                    state.f3 = last_f3
 
             # --- World perception (optional) ---
             # Runs alongside the existing pipeline — adds a WorldFrame
@@ -530,8 +684,19 @@ def _run_agent_loop(
                 try:
                     state.world = world_perception.update(frame, state.f3)
                 except Exception as e:
-                    if keyboard.cfg.verbose:
+                    # Throttled WARN: print once per error message so a
+                    # recurring failure surfaces, but doesn't spam at
+                    # 20 Hz. Silent-swallow is dangerous — the prior
+                    # gate only printed when ``keyboard.cfg.verbose``
+                    # was on, which meant perception crashes flew
+                    # under the radar of every normal run.
+                    key = repr(e)
+                    if key not in _world_perception_errors_seen:
+                        _world_perception_errors_seen.add(key)
                         print(f"[AGENT][WARN] world perception failed: {e}")
+                        if keyboard.cfg.verbose:
+                            import traceback as _tb
+                            _tb.print_exc()
 
             # --- Log screen-state transitions ---
             if state.screen_state != prev_screen:
@@ -621,6 +786,20 @@ def _run_agent_loop(
     except KeyboardInterrupt:
         print("[AGENT] Ctrl+C received — stopping.")
     finally:
+        # Halt the velocity worker IMMEDIATELY when the loop ends.
+        # Without this, the last commanded velocity (e.g. mid-sweep
+        # yaw rate of +68 px/s) keeps emitting motion in the
+        # background until ``mouse.stop()`` runs — and ``mouse.stop()``
+        # runs AFTER the multi-second world-map dump, so the cursor
+        # visibly drifts for the entire duration of the shutdown
+        # sequence. ``set_velocity(0, 0)`` updates the worker's
+        # in-memory vx/vy to zero on the next loop iteration (~4 ms),
+        # stopping motion well before the user sees the "Loop ended"
+        # message.
+        try:
+            mouse.set_velocity(0.0, 0.0)
+        except Exception:
+            pass
         # ALWAYS release every movement key on exit so we don't strand
         # the player walking forward into lava after the loop ends.
         try:
@@ -639,6 +818,14 @@ def _run_agent_loop(
         print(f"[AGENT] Loop ended after {wall:.1f}s "
               f"({total_ticks} ticks, {actual_rate:.1f} Hz actual / "
               f"{tick_rate:.0f} Hz target).")
+        # OCR throughput — the high-value perception (pose / looking-at).
+        if f3_worker is not None:
+            try:
+                n_ocr = f3_worker.reads()
+                print(f"[AGENT] F3 OCR reads: {n_ocr} "
+                      f"({n_ocr / wall:.1f} Hz) over the run.")
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -662,6 +849,14 @@ def _build_cli() -> argparse.ArgumentParser:
     p.add_argument(
         "--test", action="store_true",
         help="Run the legacy hardware smoke test instead of an agent.",
+    )
+    p.add_argument(
+        "--script", type=str, default=None,
+        help="Play a recorded macro/script file instead of an agent. "
+             "Supports AutoHotkey (.ahk), Macro/Keybind-Mod (.txt), a "
+             "clean op list (.json), or the simple line DSL (.mcs). "
+             "e.g. --script scripts/macros/bridge.ahk. --duration caps "
+             "the run (wall-clock safety cap).",
     )
     p.add_argument(
         "--duration", type=float, default=None,
@@ -724,7 +919,9 @@ def main(argv: Optional[list] = None) -> int:
 
     # ── Resolve the run mode ──────────────────────────────────────────
     # CLI > settings > default. "none" disables the agent loop.
-    if args.test:
+    if args.script:
+        agent_name = None      # macro playback — no agent / perception
+    elif args.test:
         agent_name = None
     elif args.agent:
         agent_name = None if args.agent.lower() == "none" else args.agent
@@ -753,11 +950,39 @@ def main(argv: Optional[list] = None) -> int:
     capture   = build_capture(settings)
     processor = build_processor(settings)
     f3_reader = build_f3_reader(settings)
+
+    # Optional: ask the F3 OCR to dump every line crop to disk for
+    # post-mortem analysis. Enabled via the ``MCAI_F3_DUMP_DIR``
+    # environment variable so it can be turned on from the shell
+    # without editing settings.yaml. Each call adds a handful of PNG
+    # files, so leave this off in normal use.
+    f3_dump_dir = os.environ.get("MCAI_F3_DUMP_DIR")
+    if f3_dump_dir:
+        os.makedirs(f3_dump_dir, exist_ok=True)
+        f3_reader.set_debug_dump_dir(f3_dump_dir)
+        print(f"[MAIN] F3 OCR debug dump → {f3_dump_dir}")
     actions   = ActionWrapper(keyboard=keyboard, mouse=mouse, gate=gate)
+
+    # Background F3 OCR worker. Enabled when capture is threaded (the
+    # worker reads frames from a second thread, which the synchronous
+    # Capture would refuse) and ``vision.ocr.threaded`` is on. It runs
+    # F3Reader + PoseFilter off the control loop so the ~70 ms read
+    # never stalls a tick. Falls back to inline OCR when disabled.
+    f3_worker: Optional[F3ReaderWorker] = None
+    if (not args.script
+            and bool(_get(settings, "capture.threaded", True))
+            and bool(_get(settings, "vision.ocr.threaded", True))):
+        f3_worker = F3ReaderWorker(
+            f3_reader, capture,
+            pose_filter=PoseFilter(),
+            interval_sec=float(_get(settings, "vision.ocr.read_interval_sec", 0.12)),
+        )
+
     # Optional world perception layer. Off unless vision.world.enabled
     # is set in settings.yaml. Built up-front so the heavy classifier
-    # init doesn't land inside the first agent tick.
-    world_perception = _maybe_build_world_perception(settings)
+    # init doesn't land inside the first agent tick. Skipped entirely in
+    # macro-playback mode (it's blind input replay — no perception needed).
+    world_perception = None if args.script else _maybe_build_world_perception(settings)
 
     # Wire --debug → keyboard verbose flag. (Mouse verbose can be
     # added the same way later if we ever need to debug camera issues.)
@@ -807,6 +1032,14 @@ def main(argv: Optional[list] = None) -> int:
                 sub.emergency_stop()
             except Exception:
                 pass
+        # Stop the OCR worker BEFORE capture — otherwise its next
+        # ``get_frame`` would re-spawn the capture grab thread we're
+        # trying to tear down.
+        if f3_worker is not None:
+            try:
+                f3_worker.stop()
+            except Exception:
+                pass
         for sub in (keyboard, mouse, capture):
             try:
                 sub.stop()
@@ -821,6 +1054,9 @@ def main(argv: Optional[list] = None) -> int:
     mouse.start()
     capture.start()
     time.sleep(0.25)
+    if f3_worker is not None:
+        f3_worker.start()
+        print("[MAIN] F3 OCR worker started (threaded).")
     if menu_detector is not None:
         _maybe_focus_and_unpause(settings, safety, keyboard, capture, menu_detector)
 
@@ -830,27 +1066,66 @@ def main(argv: Optional[list] = None) -> int:
         print(f"[MAIN] Capture OK: {w}x{h} px")
         safety.notify_action(f"capture_frame({w}x{h})")
 
-        # Refuse to run the agent if the window isn't at calibration size.
-        # Off by a pixel or two is fine; off by hundreds means HUD reads
-        # and F3 OCR will all target gameplay-area pixels.
-        calib_res = (
-            (_get(settings, "vision_calibration.last.resolution") or [None, None])
-        )
-        if (agent is not None and calib_res and len(calib_res) == 2
+        # Compare capture size against the calibration snapshot in
+        # settings. A small mismatch is normal — DPI scaling, hidden
+        # title bars, and Windows DWM border changes can each shift
+        # the client rect by 30 px or so. Only HUD-dependent reads
+        # (health/hunger/hotbar) actually break when the offset is
+        # large; F3 OCR sits at the top-left and works regardless,
+        # and world perception lazy-rebuilds its screen-ray from the
+        # actual capture size each tick.
+        #
+        # So: WARN on mismatch, do NOT disable the agent. The agent
+        # whose features actually need pixel-accurate HUD coords
+        # (currently only NavigationAgent's food-eating) can handle
+        # missing HUD reads gracefully (health defaults to 0 → eat
+        # never triggers). The world-explorer doesn't read HUD at all.
+        tol_px = int(_get(settings, "safety.capture_size_tolerance_px", 64))
+        calib_res = _get(settings, "vision_calibration.last.resolution") or [None, None]
+        if (calib_res and len(calib_res) == 2
                 and calib_res[0] and calib_res[1]):
             cw, ch = int(calib_res[0]), int(calib_res[1])
-            if abs(w - cw) > 8 or abs(h - ch) > 8:
-                print(f"[MAIN][ERROR] Capture size {w}x{h} differs from "
-                      f"calibration {cw}x{ch} by more than 8 px. "
-                      f"Maximize the Minecraft window or re-run calibration.")
-                agent = None  # Fall back to smoke test instead of moving blind.
+            dw, dh = abs(w - cw), abs(h - ch)
+            if dw > tol_px or dh > tol_px:
+                print(f"[MAIN][WARN] Capture size {w}x{h} differs from "
+                      f"calibration {cw}x{ch} by ({dw}, {dh}) px "
+                      f"(tolerance {tol_px}). HUD-dependent reads may "
+                      f"be off — re-run calibration if health / hunger "
+                      f"detection misbehaves. The agent will still run.")
     except Exception as e:
         print(f"[MAIN][WARN] Could not capture a frame: {e}")
 
     # Always clean up, even on Ctrl+C or exceptions.
     chat_announced = False
     try:
-        if agent is None:
+        if args.script:
+            # Macro/script playback mode — run a recorded input script
+            # (.ahk / .txt / .json / .mcs) through the gated keyboard +
+            # mouse instead of an agent. Focus-loss auto-stop and the
+            # emergency hotkey still apply via the same gate.
+            from control.script_runner import (
+                ScriptRunner, ScriptRunnerConfig, load_script,
+            )
+            try:
+                name, ops = load_script(args.script)
+            except Exception as e:
+                print(f"[MAIN][ERROR] could not load script {args.script!r}: {e}")
+                return 2
+            if safety.allow_input():
+                _send_chat_message(keyboard, f"[bot] running macro {name}")
+                chat_announced = True
+                time.sleep(0.3)
+            # Finite-loop macros end on their own; this wall-clock cap is
+            # only a safety backstop. Use --duration to override; default
+            # generous so a long macro isn't cut off by the agent's
+            # (short) default runtime.
+            script_cap = float(args.duration) if args.duration is not None else 300.0
+            runner = ScriptRunner(
+                keyboard, mouse, gate=gate,
+                config=ScriptRunnerConfig(max_runtime_sec=script_cap),
+            )
+            runner.run(ops, name=name)
+        elif agent is None:
             _run_test_sequence(mouse, keyboard, safety)
         else:
             print(f"[MAIN] Agent mode '{agent.name}'. "
@@ -865,14 +1140,87 @@ def main(argv: Optional[list] = None) -> int:
                 )
                 chat_announced = True
                 time.sleep(0.3)  # let the chat line settle on screen
-            _run_agent_loop(
-                capture=capture, processor=processor, f3_reader=f3_reader,
-                actions=actions, mouse=mouse, keyboard=keyboard,
-                safety=safety, agent=agent, settings=settings,
-                max_runtime_sec=max_runtime,
-                world_perception=world_perception,
-            )
+
+            # Ensure the F3 panel is ON before the agent loop starts.
+            # Without it the agent can't parse pose (Facing line is
+            # in-panel only) or read Targeted Block reliably (the
+            # dark panel background is what makes the OCR work on
+            # busy biomes).
+            #
+            # IMPORTANT: in MC 1.21.x the F3 key behaves as a TOGGLE,
+            # not a hold-to-show. ``keyboard.press("f3")`` sends one
+            # keydown, which MC interprets as a tap → toggles the
+            # panel ON or OFF depending on its current state. To make
+            # this deterministic we sample a frame, classify the
+            # top-left brightness (dark panel ≈ 50-60, gameplay-only
+            # ≈ 70+), and tap F3 only when the panel isn't already on.
+            # After tapping, we re-sample and tap again if the panel
+            # is still off — covers the unlucky case where MC missed
+            # the first keypress (focus race at startup, etc.).
+            # Auto F3-toggle is OPT-IN. MC 1.21.x treats F3 as a toggle
+            # (one tap flips panel state), and detecting "is the panel
+            # already on?" reliably across biomes is hard — the dark
+            # translucent overlay only drops the top-left brightness
+            # by ~15-20 vs the gameplay underneath, and a bright biome
+            # (jungle leaves, ocean, snow) can hit that range without
+            # any panel. Wrong detection → we toggle the panel OFF
+            # mid-run, killing OCR until the next tap.
+            #
+            # In practice the agent works fine on the always-visible
+            # debug lines (``looking_at_block: always``, etc.) alone.
+            # If you want the dark panel for cleaner OCR, set
+            # ``agent.auto_hold_f3: true`` AND make sure your starting
+            # MC view has a uniformly bright top-left so the
+            # threshold discriminator stays accurate.
+            hold_f3 = bool(_get(settings, "agent.auto_hold_f3", False))
+            f3_was_already_on = False
+            if hold_f3 and safety.allow_input():
+                try:
+                    # Make double-sure MC has the keyboard focus right
+                    # now. The startup ``activate_minecraft()`` ran
+                    # earlier, but anything between then and here
+                    # (status-table prints, capture grabs, the chat
+                    # announce sequence) could have caused Windows to
+                    # briefly pull focus away. A focus race is the
+                    # most likely reason the 3 retry taps "didn't
+                    # register" in earlier runs — the key events went
+                    # to the terminal instead of MC.
+                    activate_minecraft()
+                    time.sleep(0.15)
+                    f3_was_already_on = _ensure_f3_panel_on(
+                        capture, keyboard,
+                        panel_threshold=int(_get(
+                            settings, "agent.f3_panel_brightness_threshold", 68)),
+                    )
+                except Exception as e:
+                    print(f"[MAIN][WARN] could not toggle F3 panel: {e}")
+
+            try:
+                _run_agent_loop(
+                    capture=capture, processor=processor, f3_reader=f3_reader,
+                    actions=actions, mouse=mouse, keyboard=keyboard,
+                    safety=safety, agent=agent, settings=settings,
+                    max_runtime_sec=max_runtime,
+                    world_perception=world_perception,
+                    f3_worker=f3_worker,
+                )
+            finally:
+                # Restore the user's F3 state if WE turned it on. If
+                # the user already had it on at startup, leave it on.
+                if hold_f3 and not f3_was_already_on:
+                    try:
+                        keyboard.tap("f3", 0.05)
+                    except Exception:
+                        pass
     finally:
+        # Stop the OCR worker FIRST — before the world-map dump (it no
+        # longer needs fresh poses) and crucially before capture stops,
+        # so its next ``get_frame`` can't re-spawn the grab thread.
+        if f3_worker is not None:
+            try:
+                f3_worker.stop()
+            except Exception:
+                pass
         # Dump the WorldMap (and a rendered iso 3D snapshot) so the
         # user can inspect what the perception layer built during the
         # run. Best-effort — never block shutdown on render errors.
@@ -899,11 +1247,11 @@ def main(argv: Optional[list] = None) -> int:
                         out_dir, f"world_map_{ts}.schem"
                     )
                     write_schematic(world_perception.world_map, schem_path)
-                    print(f"[MAIN] World map exported:")
+                    print("[MAIN] World map exported:")
                     print(f"         compact JSON -> {json_path}")
                     print(f"         schematic    -> {schem_path}")
-                    print(f"         Open the .schem in Amulet Editor "
-                          f"(https://amuletmc.com) or Litematica.")
+                    print("         Open the .schem in Amulet Editor "
+                          "(https://amuletmc.com) or Litematica.")
                 except Exception as e:
                     print(f"[MAIN][WARN] compact export failed: {e}")
                     world_perception.world_map.dump_json(
@@ -923,6 +1271,125 @@ def main(argv: Optional[list] = None) -> int:
                     except Exception:
                         last_pose = None
                     stats = world_perception.stats()
+                    # Print the commit / correction breakdown so the
+                    # user can see per-source contributions. Critical
+                    # when ``commit_only_from_looking_at`` is False
+                    # and we want to audit vision_patch quality.
+                    by_src = stats.get("commits_by_source") or {}
+                    by_cor = stats.get("corrections_by_source") or {}
+                    if by_src or by_cor:
+                        print("[MAIN] Perception commit breakdown:")
+                        for k, n in by_src.items():
+                            print(f"         commit  {n:5d}  {k}")
+                        for k, n in by_cor.items():
+                            print(f"         WRONG   {n:5d}  {k}")
+                        n_commit = sum(by_src.values())
+                        n_correct = sum(by_cor.values())
+                        rate = (100.0 * n_correct / max(1, n_commit))
+                        print(f"         total commits = {n_commit}; "
+                              f"corrections = {n_correct} "
+                              f"({rate:.1f}% of commits were wrong)")
+                    # Print rejected-vision_patch breakdown — patches
+                    # the classifier did predict but the commit gate
+                    # turned away (most commonly: predictions for
+                    # blocks we haven't trained on yet). This is the
+                    # signal that tells us where to grow the dataset.
+                    try:
+                        curi = world_perception.curiosity_queue() or {}
+                    except Exception:
+                        curi = {}
+                    if curi:
+                        from collections import Counter as _Counter
+                        cnt = _Counter(v.get("block_id", "?") for v in curi.values())
+                        print(f"[MAIN] Curiosity queue ({len(curi)} entries) "
+                              f"— blocks the gate rejected:")
+                        for k, n in cnt.most_common(12):
+                            print(f"         curio   {n:5d}  {k}")
+                    # Curiosity-correction breakdown: when F3 confirms a
+                    # voxel that was sitting in the curiosity queue under
+                    # a DIFFERENT block id, that's a direct measurement of
+                    # how often the classifier is wrong (and what it
+                    # confuses for what). Steers dataset growth.
+                    curio_cor = stats.get("curiosity_corrections") or {}
+                    if curio_cor:
+                        print("[MAIN] Curiosity corrections "
+                              "(guess -> actual):")
+                        for k, n in list(curio_cor.items())[:12]:
+                            print(f"         curio?  {n:5d}  {k}")
+                    samp = (stats.get("sample_store") or {})
+                    print(f"[MAIN] Sample store: blocks_known="
+                          f"{samp.get('blocks_known', 0)} "
+                          f"total_samples={samp.get('total_samples', 0)}")
+
+                    # Persist per-block accuracy stats across sessions.
+                    # Each run appends to a JSON log; cumulative counters
+                    # let us see whether a given block id has racked up
+                    # corrections (sign of a misclassification pattern)
+                    # or grown its commit count smoothly over time.
+                    # Best-effort — never block shutdown on a write error.
+                    try:
+                        import json as _json
+                        acc_path = _os.path.join(
+                            out_dir, "perception_accuracy.json"
+                        )
+                        try:
+                            with open(acc_path, "r", encoding="utf-8") as f:
+                                acc = _json.load(f)
+                            if not isinstance(acc, dict):
+                                acc = {}
+                        except (FileNotFoundError, _json.JSONDecodeError):
+                            acc = {}
+                        cum_commits = dict(acc.get("cumulative_commits", {}))
+                        cum_corrs   = dict(acc.get("cumulative_corrections", {}))
+                        cum_curio   = dict(acc.get("cumulative_curiosity_corrections", {}))
+                        curio_cor   = stats.get("curiosity_corrections") or {}
+                        for k, n in by_src.items():
+                            kk = str(k)  # tuples come back as strings on rehydrate
+                            cum_commits[kk] = int(cum_commits.get(kk, 0)) + int(n)
+                        for k, n in by_cor.items():
+                            kk = str(k)
+                            cum_corrs[kk] = int(cum_corrs.get(kk, 0)) + int(n)
+                        for k, n in curio_cor.items():
+                            cum_curio[k] = int(cum_curio.get(k, 0)) + int(n)
+                        sessions = list(acc.get("sessions", []))
+                        sessions.append({
+                            "ts": ts,
+                            "commits":     {str(k): int(v) for k, v in by_src.items()},
+                            "corrections": {str(k): int(v) for k, v in by_cor.items()},
+                            "curiosity_corrections": {k: int(v) for k, v in curio_cor.items()},
+                            "curiosity_size":  int(stats.get("curiosity_size", 0)),
+                            "confirmed_count": int(stats.get("confirmed_count", 0)),
+                            "sample_total":    int(samp.get("total_samples", 0)),
+                        })
+                        # Cap the per-session list so a long-lived
+                        # accuracy log doesn't grow without bound.
+                        # The cumulative counters carry the long memory.
+                        max_sessions = 200
+                        if len(sessions) > max_sessions:
+                            sessions = sessions[-max_sessions:]
+                        acc["cumulative_commits"]                = cum_commits
+                        acc["cumulative_corrections"]            = cum_corrs
+                        acc["cumulative_curiosity_corrections"]  = cum_curio
+                        acc["sessions"]                          = sessions
+                        # Atomic write: serialise to a temp file, then
+                        # os.replace into place. Prevents a crash /
+                        # power loss mid-write from corrupting the
+                        # file and silently zeroing the cumulative
+                        # counters on the next start (the load path
+                        # catches JSONDecodeError but at the cost of
+                        # losing all prior session history).
+                        tmp_path = acc_path + ".tmp"
+                        with open(tmp_path, "w", encoding="utf-8") as f:
+                            _json.dump(acc, f, indent=2, sort_keys=True)
+                            f.flush()
+                            try:
+                                _os.fsync(f.fileno())
+                            except (OSError, AttributeError):
+                                pass
+                        _os.replace(tmp_path, acc_path)
+                        print(f"[MAIN] Accuracy log updated -> {acc_path}")
+                    except Exception as e:
+                        print(f"[MAIN][WARN] Could not write accuracy log: {e}")
                     extra = [f"solid={sum(1 for _ in world_perception.world_map.iter_solid_blocks())}",
                              f"curi={stats.get('curiosity_size',0)}",
                              f"conf'd={stats.get('confirmed_count',0)}",

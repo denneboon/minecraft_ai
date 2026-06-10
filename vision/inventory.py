@@ -52,10 +52,9 @@ Designed to be:
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -63,9 +62,6 @@ import numpy as np
 from vision.inventory_layout import (
     SlotRect,
     slot_rects,
-    background_rect,
-    available_layouts,
-    get_layout,
     ARMOR_SLOTS, HOTBAR_SLOTS, MAIN_SLOTS,
 )
 

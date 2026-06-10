@@ -1,0 +1,11 @@
+# Harmless live smoke-test: nudges the camera and selects a hotbar slot.
+# No movement keys, no clicks — safe to run anywhere to verify the
+# script runner drives real input end-to-end.
+name smoketest
+move 80 0
+sleep 200
+move -80 0
+sleep 200
+tap 1
+sleep 100
+tap 2

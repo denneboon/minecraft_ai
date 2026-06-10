@@ -1,0 +1,14 @@
+# Sneak-bridge backward (Macro / Keybind Mod syntax, Mumfrey).
+# key(<bind>,true/false) holds/releases; key.use is right-click (place),
+# key.sneak/key.back map to your bound keys; do(n)...loop() repeats;
+# wait(ms) sleeps (a bare number would be ticks * 50ms).
+key(key.sneak,true)
+key(key.back,true)
+do(15)
+    key(key.use,true)
+    wait(60ms)
+    key(key.use,false)
+    wait(200ms)
+loop()
+key(key.back,false)
+key(key.sneak,false)

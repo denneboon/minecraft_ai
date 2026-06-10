@@ -15,11 +15,13 @@ from typing import Any, Callable, Dict
 
 from brain.interfaces import BaseAgent
 from agents.navigation import build_navigation_agent
+from agents.walker import build_pathwalker_agent
 from agents.world_explorer import build_world_explorer_agent
 
 
 _REGISTRY: Dict[str, Callable[[Dict[str, Any]], BaseAgent]] = {
     "navigation":      build_navigation_agent,
+    "pathwalker":      build_pathwalker_agent,
     "world_explorer":  build_world_explorer_agent,
 }
 

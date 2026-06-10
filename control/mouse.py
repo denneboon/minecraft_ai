@@ -22,12 +22,31 @@ from __future__ import annotations
 import time
 import threading
 from dataclasses import dataclass, field
-from typing import Optional, Tuple, Callable, Dict
+from typing import Optional, Tuple, Callable
 
 try:
     from pynput.mouse import Button, Controller
-except Exception:
-    raise RuntimeError("pynput is required for mouse control. Install via pip install pynput")
+except ImportError as e:
+    # ``raise ... from e`` preserves the original ImportError context so
+    # a missing-pynput failure shows both messages (the friendly hint
+    # AND the underlying "no module named pynput") instead of hiding
+    # the cause behind the bare RuntimeError.
+    raise RuntimeError(
+        "pynput is required for mouse control. Install via pip install pynput"
+    ) from e
+
+
+# ---------------------------------------------------------------------------
+# Win32 detection — hoisted above the absolute-cursor helpers so they
+# can branch on it. The SendInput-based backend below uses the same
+# flag plus ``wintypes`` / the ``ctypes`` symbol imported here.
+# ---------------------------------------------------------------------------
+try:
+    import ctypes
+    from ctypes import wintypes
+    _WIN32_OK = True
+except ImportError:
+    _WIN32_OK = False
 
 
 # -------------------------------
@@ -57,6 +76,29 @@ class MouseConfig:
         lambda t: 1.0 - (1.0 - t) ** 3
     ))
 
+    # ================= ABSOLUTE-POSITION HUMANLIKE REACH =================
+    # Used in MENUS where MC's cursor is unlocked and movement is
+    # ABSOLUTE (inventory hover, GUI navigation). Gameplay camera uses
+    # the relative-delta APIs above, never this one.
+    #
+    # Motion follows a minimum-jerk velocity profile (zero velocity +
+    # zero acceleration at both endpoints) over a distance-scaled
+    # duration. A small perpendicular bow and per-step jitter keep
+    # the path from looking mechanically straight — real arms don't
+    # reach in a perfect line.
+    screen_move_min_ms:   int   = 80        # short hops still take this long
+    screen_move_max_ms:   int   = 450       # cap for big diagonal traversals
+    screen_move_ms_per_px: float = 0.6      # base distance scaling
+    screen_move_step_hz:  int   = 240       # micro-step cadence
+    # Perpendicular bow as a fraction of the move's straight-line
+    # distance. 0.0 = perfectly straight; 0.06 ≈ what real hand
+    # tracking looks like for a deliberate UI hover.
+    screen_move_curvature: float = 0.06
+    # Per-step random offset in pixels. Adds the high-frequency wobble
+    # that no smooth easing curve produces. Set to 0 for deterministic
+    # paths (testing).
+    screen_move_jitter_px: float = 0.4
+
     # ================= CLICK PARAMETERS =================
     default_click_duration: float = 0.05  # seconds held for a tap
     allow_simultaneous: bool = True
@@ -81,6 +123,168 @@ class _IMouseBackend:
     def press_right(self) -> None: ...
     def release_right(self) -> None: ...
     def scroll(self, dx: int, dy: int) -> None: ...
+
+
+# -------------------------------
+# Absolute-cursor helpers (Win32) — used by the eased screen-reach API
+# -------------------------------
+# The OS-level cursor APIs live in user32. They're cheap (single syscall
+# each) but the easing path calls them ~240 times per move, so we read
+# the handle once and stash it. On non-Windows hosts both functions
+# silently no-op — callers gate behaviour on whether ``Mouse`` (or
+# ``eased_screen_move``) is supported via runtime checks elsewhere.
+
+if _WIN32_OK:
+    try:
+        _USER32_CURSOR = ctypes.windll.user32
+    except (OSError, AttributeError):
+        _USER32_CURSOR = None
+else:
+    _USER32_CURSOR = None
+
+
+class _CURSOR_POINT(ctypes.Structure if _WIN32_OK else object):
+    if _WIN32_OK:
+        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+
+def _get_screen_xy_raw() -> Tuple[int, int]:
+    """Instant read of the OS cursor position. ``(0, 0)`` if unavailable."""
+    if _USER32_CURSOR is None:
+        return (0, 0)
+    pt = _CURSOR_POINT()
+    try:
+        _USER32_CURSOR.GetCursorPos(ctypes.byref(pt))
+    except (OSError, AttributeError):
+        return (0, 0)
+    return (int(pt.x), int(pt.y))
+
+
+def _set_screen_xy_raw(x: int, y: int) -> None:
+    """Instant teleport of the OS cursor. The :func:`eased_screen_move`
+    function calls this many times along a smooth path; external callers
+    should prefer the eased version."""
+    if _USER32_CURSOR is None:
+        return
+    try:
+        _USER32_CURSOR.SetCursorPos(int(x), int(y))
+    except (OSError, AttributeError):
+        pass
+
+
+def _smoothstep_min_jerk(t: float) -> float:
+    """Minimum-jerk position curve ``10t³ − 15t⁴ + 6t⁵``. Velocity AND
+    acceleration are zero at both endpoints, which matches biological
+    reach motion (Flash & Hogan, 1985)."""
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+
+
+def eased_screen_move(target_x: int,
+                      target_y: int,
+                      *,
+                      min_ms:    int   = 80,
+                      max_ms:    int   = 450,
+                      ms_per_px: float = 0.6,
+                      step_hz:   int   = 240,
+                      curvature: float = 0.06,
+                      jitter_px: float = 0.4,
+                      duration_ms: Optional[int] = None,
+                      gate=None,
+                      interrupt_event: Optional[threading.Event] = None) -> None:
+    """
+    Standalone humanlike absolute move of the OS cursor.
+
+    Pulled out of :class:`Mouse` so unit tests and standalone scripts
+    can ease the cursor without spinning up the full runtime — and
+    so the ``Mouse`` method is just a thin wrapper that also zeros
+    velocity-mode commands before driving the path.
+
+    Parameters
+    ----------
+    target_x, target_y : int
+        Desktop pixel coordinates.
+    duration_ms : Optional[int]
+        Override auto-scaling. ``None`` means
+        ``clamp(min_ms, distance × ms_per_px, max_ms)``.
+    curvature, jitter_px : float
+        Path realism. Curvature is a perpendicular bow as a fraction
+        of straight-line distance; jitter is a per-step random offset
+        in pixels.
+    gate : Optional[InputGate-like]
+        Anything with ``.allow() -> bool``. Aborts the move when False.
+    interrupt_event : Optional[threading.Event]
+        Sleeps use ``event.wait(timeout)`` so setting the event mid-
+        move cuts the in-flight reach short — used by ``Mouse.stop``
+        to drop animation on shutdown.
+    """
+    if _USER32_CURSOR is None:
+        return
+    if gate is not None and not gate.allow():
+        return
+
+    sx, sy = _get_screen_xy_raw()
+    dx = float(target_x) - sx
+    dy = float(target_y) - sy
+    dist = (dx * dx + dy * dy) ** 0.5
+    if dist < 1.0:
+        _set_screen_xy_raw(target_x, target_y)
+        return
+
+    if duration_ms is None:
+        duration_ms = int(max(min_ms, min(max_ms, dist * ms_per_px)))
+
+    hz = max(60, step_hz)
+    n_steps = max(2, int(duration_ms * hz / 1000))
+    step_dt = (duration_ms / 1000.0) / n_steps
+
+    # Perpendicular bow direction; sign deterministic per destination
+    # so consecutive hovers over neighbouring slots don't oscillate
+    # between left- and right-bowing paths.
+    perp_x = -dy / dist
+    perp_y =  dx / dist
+    bow_sign = 1.0 if ((target_x * 1103515245 + target_y) & 1) else -1.0
+    bow_amplitude = curvature * dist * bow_sign
+
+    # Deterministic 32-bit LCG seeded by the endpoints — the same hover
+    # always replays identically, which is useful for bug reports.
+    jitter_state = (sx * 2654435761
+                    + sy * 40503
+                    + target_x * 7
+                    + target_y) & 0xFFFFFFFF
+
+    for i in range(1, n_steps + 1):
+        if gate is not None and not gate.allow():
+            return
+        u = i / n_steps
+        s = _smoothstep_min_jerk(u)
+        # Bow vanishes at the endpoints, max at the midpoint.
+        # 4u(1−u) peaks at 1.0 when u=0.5, equals 0 at the ends.
+        bow = bow_amplitude * (4.0 * u * (1.0 - u))
+
+        # LCG: x_{n+1} = (1664525 * x_n + 1013904223) mod 2^32
+        jitter_state = (1664525 * jitter_state + 1013904223) & 0xFFFFFFFF
+        jx = ((jitter_state & 0xFFFF) / 0xFFFF - 0.5) * 2.0 * jitter_px
+        jitter_state = (1664525 * jitter_state + 1013904223) & 0xFFFFFFFF
+        jy = ((jitter_state & 0xFFFF) / 0xFFFF - 0.5) * 2.0 * jitter_px
+
+        x = sx + dx * s + perp_x * bow + jx
+        y = sy + dy * s + perp_y * bow + jy
+        _set_screen_xy_raw(int(round(x)), int(round(y)))
+
+        if interrupt_event is not None:
+            # Interruptible sleep — ``event.set()`` from another thread
+            # cuts the wait short. The event being set doesn't end the
+            # reach (the gate / loop counter does that), it only avoids
+            # blocking shutdown on a step that's still snoozing.
+            if interrupt_event.wait(timeout=step_dt):
+                break
+        else:
+            time.sleep(step_dt)
+
+    if gate is None or gate.allow():
+        # Land exactly on target — float math + jitter on the last
+        # step can otherwise leave the cursor a pixel off.
+        _set_screen_xy_raw(int(target_x), int(target_y))
 
 
 # -------------------------------
@@ -120,14 +324,9 @@ class _PynputBackend(_IMouseBackend):
 # This backend is the right choice whenever the bot is driving an
 # active 3-D game window on Windows. The pynput backend remains for
 # Linux / macOS / non-game GUIs.
-
-try:
-    import ctypes
-    from ctypes import wintypes
-    _WIN32_OK = True
-except Exception:
-    _WIN32_OK = False
-
+#
+# (Win32 / ctypes detection is hoisted to the top of the module so the
+# absolute-cursor helpers above can also branch on ``_WIN32_OK``.)
 
 if _WIN32_OK:
     # SendInput input struct layout (see MSDN INPUT / MOUSEINPUT).
@@ -250,7 +449,15 @@ class Mouse:
                     backend = _Win32SendInputBackend()
                 else:
                     backend = _PynputBackend()
-            except Exception:
+            except Exception as e:
+                # Falling back to pynput is a correctness DEGRADATION
+                # on Windows — pynput uses SetCursorPos, which MC's
+                # Raw Input listener ignores during in-game play. The
+                # camera will NOT respond to bot input in this fallback.
+                # Surface it so the user knows why the AI looks broken.
+                print(f"[mouse][WARN] Win32 SendInput backend init failed "
+                      f"({e!r}); falling back to pynput. MC's raw-input "
+                      f"camera will NOT respond to bot input in-game.")
                 backend = _PynputBackend()
         self._backend: _IMouseBackend = backend
 
@@ -307,12 +514,30 @@ class Mouse:
             if self._pressed["right"]:
                 self._backend.release_right()
                 self._pressed["right"] = False
+            # CRITICAL: zero out velocity state BEFORE signalling stop.
+            # The worker thread reads ``_velocity_vx/vy`` once per loop
+            # iteration at the TOP of the loop, then emits motion at
+            # the bottom. If we set ``_velocity_stop`` first WITHOUT
+            # zeroing velocity, a worker iteration already past the
+            # ``while not _velocity_stop.is_set()`` check will still
+            # emit one more motion event with the old non-zero
+            # velocity — that's the "mouse moves a bit AFTER the
+            # program says it's done" symptom. Zeroing first means
+            # even if one stray iteration races through, it emits
+            # nothing.
+            self._velocity_vx = 0.0
+            self._velocity_vy = 0.0
+            self._velocity_residual_x = 0.0
+            self._velocity_residual_y = 0.0
             self._running = False
             self._velocity_stop.set()
-        # Wait outside the lock so the worker can exit cleanly.
+        # Wait outside the lock so the worker can exit cleanly. Bumped
+        # the join timeout to 0.5 s (was 0.25) so a worker mid-sleep
+        # on a slow Windows scheduler has time to wake and exit
+        # before we tear the backend down.
         try:
             if self._velocity_thread is not None:
-                self._velocity_thread.join(timeout=0.25)
+                self._velocity_thread.join(timeout=0.5)
         except Exception:
             pass
         self._velocity_thread = None
@@ -347,7 +572,17 @@ class Mouse:
     def _velocity_loop(self) -> None:
         """Background thread that converts the current velocity into
         a stream of single-pixel mouse-move events. Sleeps when
-        velocity is zero so it costs nothing when idle."""
+        velocity is zero so it costs nothing when idle.
+
+        Three places we check the stop event:
+
+        1. Loop-top ``while not _velocity_stop.is_set()`` — usual exit.
+        2. After computing the integer step, RIGHT BEFORE emitting —
+           ``stop()`` zeros velocity before signalling, so this is
+           the last-line defence against emitting motion after the
+           shutdown sequence began.
+        3. After the gate-closed path — same belt-and-suspenders.
+        """
         period = 1.0 / max(30, self._velocity_tick_hz)
         last_t = time.perf_counter()
         while not self._velocity_stop.is_set():
@@ -374,10 +609,41 @@ class Mouse:
             if ix or iy:
                 self._velocity_residual_x -= ix
                 self._velocity_residual_y -= iy
-                try:
-                    self._backend.move(ix, iy)
-                except Exception:
-                    pass
+                # Two final race-guards — both eliminate the
+                # symptom "mouse moves a bit after the program
+                # says it's done":
+                #
+                # 1. stop() was signalled while this iteration was
+                #    in flight — don't emit a stale residual on the
+                #    way out.
+                # 2. set_velocity(0, 0) was called mid-iteration —
+                #    the vx/vy we cached at the top of the loop are
+                #    now stale and the user's intent is "no more
+                #    motion". Honour that even though our residuals
+                #    still hold the leftover from the previous
+                #    accumulation step.
+                if self._velocity_stop.is_set():
+                    break
+                if (self._velocity_vx == 0.0
+                        and self._velocity_vy == 0.0):
+                    self._velocity_residual_x = 0.0
+                    self._velocity_residual_y = 0.0
+                else:
+                    try:
+                        self._backend.move(ix, iy)
+                    except Exception as e:
+                        # First-failure warning: a recurring move-error
+                        # means MC is no longer reachable (window closed,
+                        # off-screen, permission revoked). Without
+                        # surfacing this, the agent silently fails to
+                        # rotate forever. After the first warn we stay
+                        # silent so the 240 Hz worker can't spam the
+                        # console.
+                        if not getattr(self, "_move_warn_emitted", False):
+                            self._move_warn_emitted = True
+                            print(f"[mouse][WARN] backend.move({ix}, "
+                                  f"{iy}) raised {e!r} — further "
+                                  f"errors silenced")
             self._velocity_stop.wait(timeout=period)
 
 
@@ -528,6 +794,76 @@ class Mouse:
             return
         if self.cfg.enable_scroll:
             self._backend.scroll(amount, 0)
+
+    # -----------------------------------------------------------------
+    # Absolute (screen-coord) movement — used in MENUS only.
+    #
+    # Gameplay camera control uses ``track_target`` / ``set_velocity``
+    # which emit RELATIVE deltas to MC's locked-cursor raw-input
+    # listener. When the cursor is UNLOCKED (inventory, paused menu,
+    # crafting screen) MC reads the OS cursor position directly — for
+    # those screens we need absolute moves, and a teleport via raw
+    # SetCursorPos reads as a robotic snap. ``move_to_screen_xy``
+    # produces a minimum-jerk reach that feels like a real hand
+    # arriving at the target.
+    # -----------------------------------------------------------------
+
+    @staticmethod
+    def get_screen_xy() -> Tuple[int, int]:
+        """Read the OS cursor position (desktop pixels). Windows only —
+        on other platforms returns ``(0, 0)``. Used by callers that want
+        to remember the original cursor before a hover sequence so they
+        can restore it later via :meth:`move_to_screen_xy`."""
+        return _get_screen_xy_raw()
+
+    def move_to_screen_xy(self,
+                          target_x: int,
+                          target_y: int,
+                          *,
+                          duration_ms: Optional[int] = None,
+                          curvature: Optional[float] = None,
+                          jitter_px: Optional[float] = None) -> None:
+        """
+        Eased absolute move of the OS cursor to ``(target_x, target_y)``.
+
+        Motion follows the minimum-jerk profile
+        ``s(t) = 10t³ − 15t⁴ + 6t⁵`` so velocity AND acceleration are
+        zero at both endpoints — the same accel-then-decel pattern a
+        human arm produces when reaching for a UI target. A perpendicular
+        bow scaled by ``curvature`` keeps the path from being perfectly
+        straight, and a small per-step random offset (``jitter_px``)
+        adds the high-frequency wobble no smooth curve has.
+
+        Duration auto-scales with distance unless explicitly overridden:
+        ``clamp(min_ms, distance × ms_per_px, max_ms)``. Short hops
+        stay snappy, long traversals don't take forever.
+
+        Side effects:
+        * Zeros any in-flight velocity command so the background worker
+          doesn't fight the absolute path.
+        * Respects the input gate — aborts mid-move if the gate closes.
+        """
+        if self._gate and not self._gate.allow():
+            return
+        # Cancel any active velocity command — otherwise the worker
+        # keeps emitting relative motion while we're trying to position
+        # absolutely, and the cursor judders along a compound path.
+        self._velocity_vx = 0.0
+        self._velocity_vy = 0.0
+
+        cfg = self.cfg
+        eased_screen_move(
+            target_x, target_y,
+            min_ms=cfg.screen_move_min_ms,
+            max_ms=cfg.screen_move_max_ms,
+            ms_per_px=cfg.screen_move_ms_per_px,
+            step_hz=cfg.screen_move_step_hz,
+            curvature=cfg.screen_move_curvature if curvature is None else curvature,
+            jitter_px=cfg.screen_move_jitter_px if jitter_px is None else jitter_px,
+            duration_ms=duration_ms,
+            gate=self._gate,
+            interrupt_event=self._velocity_stop,
+        )
 
     def emergency_stop(self) -> None:
         """Force-release every mouse button and halt velocity-mode motion

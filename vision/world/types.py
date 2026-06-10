@@ -162,6 +162,32 @@ class LookingAtBlock:
 
 
 # ---------------------------------------------------------------------------
+# Weather — recognised from the screen (no API / no in-game data)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class WeatherObservation:
+    """
+    The current weather as inferred from the rendered frame.
+
+    Weather changes how blocks LOOK (rain darkens + desaturates and
+    overlays streaks; snow brightens + adds white flakes; thunder dims
+    further), so downstream block recognition can condition on this.
+
+    ``state`` is one of the ``vision.weather.WeatherState`` constants:
+    ``"clear" | "rain" | "snow" | "thunder" | "unknown"``. ``unknown``
+    means the sky isn't visible (the player is in a cave / fully
+    enclosed) so weather can't be told from pixels.
+    """
+
+    state: str = "unknown"
+    confidence: float = 0.0
+    sky_visible: float = 0.0          # 0..1 fraction of sky region that's open sky
+    source: str = "heuristic"         # "heuristic" | "trained"
+    features: Dict[str, float] = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
 # Per-tick world frame returned by WorldPerception.update()
 # ---------------------------------------------------------------------------
 
@@ -181,6 +207,9 @@ class WorldFrame:
     visible_blocks: List[BlockObservation] = field(default_factory=list)
     visible_entities: List[EntityObservation] = field(default_factory=list)
     visible_drops: List[ItemDropObservation] = field(default_factory=list)
+    # Current weather inferred from the frame (None if the weather
+    # detector is disabled). Downstream recognition can condition on it.
+    weather: Optional["WeatherObservation"] = None
     # Diagnostics: per-patch best/second scores, timings, etc. Useful
     # for debugging and offline analysis; agents should ignore.
     diagnostics: Dict[str, Any] = field(default_factory=dict)
@@ -196,5 +225,6 @@ __all__ = [
     "EntityObservation",
     "ItemDropObservation",
     "LookingAtBlock",
+    "WeatherObservation",
     "WorldFrame",
 ]

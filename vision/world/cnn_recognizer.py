@@ -552,6 +552,14 @@ class CNNBlockRecognizer:
                 by_cls[s.block_id].append(s.rgb)
         per_cap = max(1, cfg.max_train_samples // max(1, len(classes)))
         rng = np.random.default_rng(1234)
+        # Seed torch's global RNG too, so weight init + the throwaway head
+        # are reproducible. Without this the numpy augmentation is seeded
+        # but the CNN weights init randomly each run — the trained model
+        # (and its held-out accuracy) then varies run-to-run, which made
+        # the offline accuracy gate in tools/test_cnn_recognizer.py flaky
+        # right at its threshold. Deterministic training is also strictly
+        # better for the self-teaching loop: same samples → same model.
+        torch.manual_seed(1234)
         train_imgs: List[np.ndarray] = []
         train_lbls: List[int] = []
         for b in classes:

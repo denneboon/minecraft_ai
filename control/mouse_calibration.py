@@ -42,11 +42,10 @@ config default until enough samples accumulate.
 from __future__ import annotations
 
 import json
-import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Deque, List, Optional, Tuple
+from typing import Deque, Optional, Tuple
 from collections import deque
 
 
@@ -263,11 +262,21 @@ class MouseCalibrator:
                 "yaw_samples":      list(self._yaw_samples),
                 "pitch_samples":    list(self._pitch_samples),
             }
-            Path(self.persist_path).write_text(
-                json.dumps(data, indent=2), encoding="utf-8"
-            )
-        except Exception:
-            pass
+            # Atomic write (tmp + fsync + replace) so a crash / power-loss
+            # mid-write can't leave a truncated JSON the loader silently
+            # discards (which would cold-start calibration). The helper
+            # also retries the replace through Windows' transient
+            # PermissionError (AV / indexer briefly holding the file).
+            from utils.atomic import atomic_write_text
+            atomic_write_text(self.persist_path, json.dumps(data, indent=2))
+        except Exception as e:
+            # First-failure log so we notice silently-failing persistence
+            # (permission denied on the calibration dir, disk full, etc.).
+            # Subsequent occurrences stay silent so the hot path doesn't
+            # spam at 240 Hz worker rate × N agents.
+            if not getattr(self, "_save_warn_emitted", False):
+                self._save_warn_emitted = True
+                print(f"[mouse_cal][WARN] persistence save failed: {e!r}")
 
 
 # ---------------------------------------------------------------------------

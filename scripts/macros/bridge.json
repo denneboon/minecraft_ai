@@ -1,0 +1,14 @@
+{
+  "name": "sneak_bridge",
+  "ops": [
+    {"op": "move", "dx": 0, "dy": 150},
+    {"op": "key_down", "key": "shift"},
+    {"op": "key_down", "key": "s"},
+    {"op": "loop", "count": 15, "ops": [
+      {"op": "mouse_click", "button": "right"},
+      {"op": "sleep", "ms": 260}
+    ]},
+    {"op": "key_up", "key": "s"},
+    {"op": "key_up", "key": "shift"}
+  ]
+}

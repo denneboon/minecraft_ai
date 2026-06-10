@@ -114,6 +114,14 @@ def parse_looking_at_block(lines: Iterable[str]) -> Optional[LookingAtBlock]:
         # Search forward for the first non-tag id-line. Cap the lookup
         # at a handful of lines so we don't grab an unrelated id far
         # down the panel.
+        #
+        # We try the STRICT line-form first (``^minecraft:<id>$``) so
+        # that a clean line wins, and fall back to the INLINE form
+        # (``minecraft:<id>`` anywhere in the line) when the OCR added
+        # trailing garble like ``minecraft:stone ?``. The inline form
+        # has the same plausibility guards (real-block namespace,
+        # min length, property/dimension blacklist) so it doesn't
+        # mistakenly accept tag lines or dimension lines.
         for j in range(label_idx + 1, min(label_idx + 12, len(lst))):
             cand = lst[j]
             if not cand:
@@ -121,6 +129,8 @@ def parse_looking_at_block(lines: Iterable[str]) -> Optional[LookingAtBlock]:
             if cand.startswith("#"):
                 continue
             bid = _extract_block_id_line(cand)
+            if bid is None:
+                bid = _extract_block_id_inline(cand)
             if bid is not None:
                 block_id = bid
                 break
@@ -136,9 +146,16 @@ def parse_looking_at_block(lines: Iterable[str]) -> Optional[LookingAtBlock]:
             break
 
     if coord_pos is None:
-        # No coords resolved — return id-only with reduced confidence.
-        return LookingAtBlock(block_id=block_id, pos=(0, 0, 0),
-                              face=face, confidence=0.5)
+        # No coords resolved. The old code returned a (0, 0, 0)
+        # sentinel with confidence=0.5 here, expecting downstream to
+        # reject it on the confidence floor — but that produced
+        # confusing "[F3] looking_at: id=X pos=(0, 0, 0) conf=0.5"
+        # diagnostic lines that LOOKED like phantom origin commits.
+        # Returning None makes the parser API honest: we know there's
+        # a block, we just can't localise it, so don't pretend we can.
+        # Downstream code already handles ``looking_at = None``
+        # gracefully (it treats the read as "no target this tick").
+        return None
 
     return LookingAtBlock(block_id=block_id, pos=coord_pos,
                           face=face, confidence=1.0)
@@ -151,13 +168,24 @@ def parse_looking_at_block(lines: Iterable[str]) -> Optional[LookingAtBlock]:
 def _find_label_line(lines: List[str]) -> Optional[int]:
     """Find the index of the line that announces a targeted-block readout.
 
-    Two paths:
-      1. Strict: the line contains a full known label ("targeted block",
-         "looking at block", "target block").
-      2. Tolerant: the line contains a *partial* label keyword AND a
-         coord triple. This catches OCR-corrupted captures where a
-         single glyph in the label was misread (e.g. "Targeted |?lock:
-         -83, 96, -114") but the structural cues are otherwise intact.
+    Three paths, in order of confidence:
+
+      1. **Strict** — the line contains a full known label
+         ("targeted block", "looking at block", "target block").
+      2. **Partial-label tolerant** — the line contains a partial
+         label keyword AND a coord triple. Catches single-glyph
+         misreads (``Targeted |?lock: -83, 96, -114``).
+      3. **Structural fallback** — when the label is fully garbled
+         (busy biome backgrounds eat the whole "Targeted Block:"
+         line, leaving ``???????? ?????? ???? ??? ??? ?'????``), we
+         look for the line IMMEDIATELY ABOVE a ``minecraft:<id>``
+         block-line that's followed by at least one ``#minecraft:``
+         tag line. That pattern is unique to the Targeted Block
+         section of the F3 panel; no other place in the panel
+         emits a tag list right under a ``minecraft:<id>`` row.
+         Returning that index lets the rest of the parser try to
+         pull the coord triple from it — even if it can only
+         partial-match a few digits, that's better than no log at all.
     """
     for i, raw in enumerate(lines):
         low = raw.lower()
@@ -168,6 +196,37 @@ def _find_label_line(lines: List[str]) -> Optional[int]:
         if any(hint in low for hint in _TARGET_LABELS_HINT):
             if _RE_TARGET_COORDS.search(raw):
                 return i
+    # Structural fallback: pair (minecraft:<id>) + (#minecraft:...).
+    # Use the LENIENT inline-id extractor here so we still match when
+    # the OCR appends a trailing garble char (``minecraft:stone ?``).
+    for i, raw in enumerate(lines):
+        bid = _extract_block_id_inline(raw)
+        if bid is None:
+            continue
+        # Skip lines where the id is preceded by ``#`` (tag lines —
+        # those should never be claimed as the block-id row).
+        stripped = (raw or "").strip()
+        if stripped.startswith("#"):
+            continue
+        # Look forward up to a few lines for a #-tag pattern. That
+        # pattern is unique to the Targeted Block section of the
+        # F3 panel.
+        found_tag = False
+        for j in range(i + 1, min(i + 6, len(lines))):
+            adj = (lines[j] or "").strip().lower()
+            if adj.startswith("#minecraft:") or adj.startswith("#"):
+                found_tag = True
+                break
+        if not found_tag:
+            continue
+        # The Targeted Block "label" line is whichever line sits
+        # immediately before this block-id line. Returning i-1 lets
+        # ``parse_looking_at_block`` look there (and at neighbours)
+        # for the coord triple. If the label was eaten beyond
+        # recognition the coords may also be lost — but the
+        # block-id-from-this-line still succeeds and we at least get
+        # the identity of the block.
+        return max(0, i - 1)
     return None
 
 
@@ -193,30 +252,105 @@ _SUSPICIOUS_PARTIAL_IDS = frozenset({
     "outer", "double",
 })
 
+# The F3 panel renders block PROPERTY rows (``axis: y``, ``snowy: false``,
+# ``east: true``, ``waterlogged: false``, ``power: 0``, ``half: bottom``)
+# directly under the ``minecraft:<id>`` row. Each of those lines has the
+# same ``key:value`` shape our block-id regex matches, so without a
+# guard the parser would happily commit ``east:true`` or ``axis:y`` as
+# the player's "Looking at block" entry — that's exactly the
+# ``south:t @ (-92, 92, -93)`` bogus log line we just observed.
+#
+# We block these by NAMESPACE: real block ids are always under the
+# ``minecraft:`` namespace (or a modded one), never under property
+# names like ``east`` / ``axis`` / ``snowy``. The list mirrors the
+# canonical block-state property names from MC 1.20+.
+_NON_BLOCK_NAMESPACES = frozenset({
+    # Sides used in fence/wall connections, redstone, glass_pane, etc.
+    "north", "south", "east", "west", "up", "down",
+    # Orientation properties.
+    "axis", "facing", "rotation", "orientation",
+    # Boolean state properties.
+    "snowy", "waterlogged", "powered", "lit", "open", "berries",
+    "persistent", "attached", "disarmed", "extended", "hanging",
+    "in_wall", "occupied", "triggered", "unstable",
+    "drag", "conditional", "has_book", "has_bottle_0", "has_bottle_1",
+    "has_bottle_2", "has_record", "inverted", "locked", "short",
+    "enabled", "tilt", "sculk_sensor_phase", "vault_state",
+    # Position-in-multipart properties.
+    "half", "part", "type", "leaves", "mode", "shape", "face",
+    "instrument", "attachment", "thickness", "bites",
+})
+
+# These NAME COMPONENTS are never the second half of a block id.
+# Dimension ids (``minecraft:overworld``, ``minecraft:the_nether``)
+# share the ``minecraft:`` namespace with real blocks, so the
+# namespace check above doesn't catch them — they're rejected here
+# by the BID name instead. Also covers the FC marker that ends MC's
+# dimension line (``minecraft:overworld FC: 0`` → after the regex
+# strips the ``FC: 0``, we get ``minecraft:overworld``).
+_NON_BLOCK_IDS = frozenset({
+    "overworld", "the_nether", "the_end", "the_void",
+    # Item / entity namespaces sometimes share text in the F3 panel
+    # (e.g. damage indicator). Block ids never include these stems.
+    "air",  # never targeted; rejecting is safe and prevents a stray
+            # OCR misread from committing ``minecraft:air``.
+})
+
+# Real vanilla block ids are at least this many chars (the shortest
+# normally-targeted block is ``stone`` = 5 chars; ``air`` = 3 is
+# excluded above). 4 is a safe floor that rejects OCR truncations
+# like ``minecraft:s`` while still accepting every legitimate block.
+_MIN_BLOCK_ID_LEN = 4
+
+
+def _looks_like_block_id(ns: str, bid: str) -> bool:
+    """True iff ``ns:bid`` plausibly names a real block."""
+    if ns in _NON_BLOCK_NAMESPACES:
+        return False
+    if bid in _NON_BLOCK_IDS:
+        return False
+    if bid in _SUSPICIOUS_PARTIAL_IDS:
+        return False
+    if len(bid) < _MIN_BLOCK_ID_LEN:
+        return False
+    # OCR-garble guard: real MC block ids consist of lowercase letters,
+    # digits, and single underscores SEPARATING words — they never
+    # start with ``_``, end with ``_``, or contain ``__``. The
+    # glyph_ocr backend occasionally reads a trailing character as a
+    # stray underscore (e.g. ``vine`` -> ``vine_``); accepting these
+    # would pollute the WorldMap with ids no exporter or agent can
+    # match. Cheap structural reject saves a lot of pain.
+    if bid.startswith("_") or bid.endswith("_") or "__" in bid:
+        return False
+    return True
+
 
 def _extract_block_id_line(line: str) -> Optional[str]:
-    """If ``line`` is exactly an ``ns:id`` token, return ``ns:id``."""
+    """If ``line`` is exactly an ``ns:id`` token AND it plausibly names
+    a real block, return ``ns:id``. Property rows under the panel
+    (``axis: y``, ``snowy: false``, ``east: true``) match the same
+    pattern but are rejected by :func:`_looks_like_block_id`."""
     m = _RE_BLOCK_ID_LINE.match(line)
     if not m:
         return None
     ns  = m.group(1)
     bid = m.group(2)
-    # Reject suspicious partial-stem ids that aren't real block names.
-    # These come from texture-stem misreads, not legitimate F3 output.
-    if bid in _SUSPICIOUS_PARTIAL_IDS:
+    if not _looks_like_block_id(ns, bid):
         return None
     return f"{ns}:{bid}"
 
 
 def _extract_block_id_inline(line: str) -> Optional[str]:
-    """Find a ``ns:id`` token anywhere in a line, skipping ``#`` tags."""
+    """Find a ``ns:id`` token anywhere in a line, skipping ``#`` tags
+    and applying the same plausibility check as the line-form parser."""
     m = _RE_BLOCK_ID_INLINE.search(line)
     if not m:
         return None
+    ns  = m.group(1)
     bid = m.group(2)
-    if bid in _SUSPICIOUS_PARTIAL_IDS:
+    if not _looks_like_block_id(ns, bid):
         return None
-    return f"{m.group(1)}:{bid}"
+    return f"{ns}:{bid}"
 
 
 __all__ = ["parse_looking_at_block"]

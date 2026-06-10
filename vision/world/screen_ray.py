@@ -65,6 +65,25 @@ class CameraIntrinsics:
     def cy(self) -> float:
         return self.height / 2.0
 
+    # Sane FOV range. MC's slider goes from 30° to 110°; we accept a
+    # wider band defensively (some mods extend it). 0° would produce
+    # ``tan(0) = 0`` and ``fx = inf`` → NaN ray projection downstream.
+    # Values >=180° fold the camera inside out.
+    _MIN_FOV_DEG = 0.5
+    _MAX_FOV_DEG = 179.0
+
+    def __post_init__(self) -> None:
+        # Defensive clamp + log so a bad ``vision.world.h_fov_deg``
+        # YAML value doesn't silently NaN the entire perception
+        # pipeline. We don't raise — the caller might still want a
+        # best-effort answer — but we surface the correction once.
+        if (not math.isfinite(self.h_fov_deg)
+                or not (self._MIN_FOV_DEG <= self.h_fov_deg <= self._MAX_FOV_DEG)):
+            print(f"[screen_ray][WARN] h_fov_deg={self.h_fov_deg!r} "
+                  f"out of range [{self._MIN_FOV_DEG}, {self._MAX_FOV_DEG}]; "
+                  f"clamped to 90°.")
+            self.h_fov_deg = 90.0
+
     @property
     def fx(self) -> float:
         return self.cx / math.tan(math.radians(self.h_fov_deg) / 2.0)
@@ -120,17 +139,39 @@ class ScreenRay:
 
     @staticmethod
     def right_vector(yaw_deg: float) -> Tuple[float, float, float]:
-        """Unit right vector (perpendicular to forward, in the XZ plane)."""
+        """Unit *screen-right* vector (perpendicular to forward, in the
+        XZ plane) — i.e. the world direction that appears on the RIGHT
+        edge of the player's view.
+
+        MC geometry check: facing south (yaw=0, forward=+Z) with the
+        head up (+Y), the player's right hand points WEST (-X) — face
+        the bottom of an overhead map and your right hand reaches its
+        left edge. So screen-right at yaw=0 must be -X, NOT +X. At
+        yaw=90 (facing west, -X) screen-right is north (-Z). Both are
+        reproduced by ``(-cos yaw, 0, -sin yaw)``.
+
+        This vector is always perpendicular to ``forward`` and has no
+        Y component, so ``up = right × forward`` (see ``up_vector``)
+        comes out as world-up (+Y) at level pitch — keeping the whole
+        screen↔world basis right-side-up and not horizontally mirrored.
+        """
         ry = math.radians(yaw_deg)
-        # When yaw = 0 (facing +Z), right = +X (east). Forward = +Z, so
-        # right = forward × world_up = (+Z) × (+Y) = (+X). The formula
-        # below reproduces that for any yaw.
-        return (math.cos(ry), 0.0, math.sin(ry))
+        return (-math.cos(ry), 0.0, -math.sin(ry))
 
     @staticmethod
     def up_vector(yaw_deg: float, pitch_deg: float) -> Tuple[float, float, float]:
         """Unit up vector for the current camera frame (perpendicular
-        to both right and forward)."""
+        to both right and forward).
+
+        At extreme pitch (|pitch| approaching 90°) the right and
+        forward vectors become nearly parallel, so their cross
+        product magnitude collapses. We use a generous 1e-6 floor
+        (was 1e-9) — float rounding can leave the magnitude just
+        above 1e-9 even at pitch=±90°, producing a near-zero
+        normalisation that NaNs the projection. The geometric
+        fallback `(0, 1, 0)` is correct when the camera is looking
+        straight up or down: world-up is still up in screen space.
+        """
         fx, fy, fz = ScreenRay.forward_vector(yaw_deg, pitch_deg)
         rx, ry_, rz = ScreenRay.right_vector(yaw_deg)
         # up = right × forward (right-handed convention)
@@ -138,7 +179,7 @@ class ScreenRay:
         uy = rz * fx - rx * fz
         uz = rx * fy - ry_ * fx
         n = math.sqrt(ux * ux + uy * uy + uz * uz)
-        if n < 1e-9:
+        if n < 1e-6:
             return (0.0, 1.0, 0.0)
         return (ux / n, uy / n, uz / n)
 

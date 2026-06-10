@@ -48,11 +48,11 @@ class SafetyConfig:
     print_status_table: bool = True
     assume_focused_when_unknown: bool = False
 
-    
+
     focus_loss_debounce_ms: int = 250
     startup_focus_grace_ms: int = 800
 
-    
+
     debug_focus_trace: bool = False
 
 
@@ -111,11 +111,11 @@ class Safety:
 
         self._on_emergency_stop = None
 
-        self._focused_state: bool = False   
-        self._regain_ts: float = 0.0        
-        self._loss_start_ts: float = 0.0    
+        self._focused_state: bool = False
+        self._regain_ts: float = 0.0
+        self._loss_start_ts: float = 0.0
 
-        
+
         self._target_hwnd = None
         try:
             wins = _find_minecraft_hwnd()
@@ -124,9 +124,9 @@ class Safety:
         except Exception:
             pass
 
-    
-    
-    
+
+
+
 
     def set_emergency_callback(self, fn: Callable) -> None:
         self._on_emergency_stop = fn
@@ -137,9 +137,9 @@ class Safety:
         self._last_action = action_name
         self._action_count += 1
 
-    
-    
-    
+
+
+
 
     def _window_has_focus(self) -> bool:
         """
@@ -233,18 +233,23 @@ class Safety:
 
             time.sleep(self.cfg.check_focus_interval)
 
-    
-    
-    
+
+
+
 
     def _hotkey_loop(self):
         combo = set(self.cfg.emergency_hotkey)
         pressed = set()
 
         def on_press(key):
+            # ``key.char`` exists for character keys but is missing on
+            # ``Key.shift`` / ``Key.f12`` / etc., which raise
+            # AttributeError. We use the named form for those so the
+            # emergency-hotkey combo (e.g. ``<ctrl>+<shift>+<f12>``)
+            # matches the registered combo string.
             try:
                 name = key.char.lower()
-            except:
+            except AttributeError:
                 name = f"<{str(key).replace('Key.', '')}>"
             pressed.add(name)
             if combo.issubset(pressed):
@@ -253,7 +258,7 @@ class Safety:
         def on_release(key):
             try:
                 name = key.char.lower()
-            except:
+            except AttributeError:
                 name = f"<{str(key).replace('Key.', '')}>"
             pressed.discard(name)
 
@@ -263,9 +268,9 @@ class Safety:
         while self._running:
             time.sleep(0.1)
 
-    
-    
-    
+
+
+
 
     def _trigger_emergency_stop(self, reason: str):
         self.logger.error(f"EMERGENCY STOP: {reason}")
@@ -285,7 +290,7 @@ class Safety:
         self._running = True
         self.logger.log("Safety controller starting…")
 
-        
+
         if self.gate and self._window_has_focus():
             self.gate.set_allowed(True)
 
@@ -304,23 +309,40 @@ class Safety:
         self._running = False
         if self.gate:
             self.gate.set_allowed(False)
-        if self._hotkey_thread and self._hotkey_thread.is_alive():
-            self._hotkey_thread.join(timeout=1.0)
-            self._hotkey_thread = None
 
-        
+        # Join ALL three daemon threads (focus monitor, status-table
+        # renderer, hotkey listener) so they don't print anything
+        # AFTER the caller has logged its shutdown line. Without
+        # joining, the focus loop's ~75 ms sleep interval can let it
+        # fire one more "Minecraft lost focus" message after the user
+        # sees "[MAIN] Done." — exactly the kind of trailing noise
+        # that makes "is the agent really done?" hard to answer.
+        # 1.0 s is a generous timeout; threads exit promptly when
+        # ``_running`` flips False.
+        for attr in ("_focus_thread", "_status_table_thread",
+                      "_hotkey_thread"):
+            th = getattr(self, attr, None)
+            if th is not None and th.is_alive():
+                th.join(timeout=1.0)
+            setattr(self, attr, None)
+
         try:
             if self._hotkey_listener:
                 self._hotkey_listener.stop()
                 self._hotkey_listener = None
-        except:
+        except Exception:
+            # pynput's Listener.stop() can raise RuntimeError if the
+            # internal listener thread has already exited or its
+            # backing OS hook is gone — both are fine during shutdown.
+            # Anything else is also best-effort cleanup; don't block
+            # the rest of safety.stop() on it.
             pass
 
         self.logger.warn("Safety controller stopped.")
 
-    
-    
-    
+
+
+
 
     def _status_table_loop(self):
         last_snapshot: dict = {}
@@ -336,9 +358,9 @@ class Safety:
                 last_snapshot = dict(data)
             time.sleep(0.5)
 
-    
-    
-    
+
+
+
 
     def allow_input(self) -> bool:
         if self.cfg.allow_run_without_focus:

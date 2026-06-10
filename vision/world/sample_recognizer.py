@@ -99,8 +99,28 @@ class SampleBlockRecognizer:
     # ── Public API ────────────────────────────────────────────────
 
     def reload(self) -> None:
-        """Re-scan the disk store and rebuild the in-memory tensor."""
+        """Re-scan the disk store from scratch and rebuild the tensor."""
         self._samples = self._store.load_all()
+        self._rebuild_tensor()
+
+    def reload_incremental(self) -> None:
+        """Append only samples that appeared on disk since the last load.
+
+        The full ``reload`` re-decodes every PNG — fine at startup, but
+        the perception layer calls it every few auto-saved samples, and
+        re-reading the entire (growing) dataset each time was the single
+        biggest perception cost in profiling. Here we read ONLY the new
+        files (``skip_paths`` = what we already hold) and append, so a
+        reload costs O(new samples) instead of O(all samples).
+        """
+        known = {s.path for s in self._samples}
+        new = self._store.load_all(skip_paths=known)
+        if not new:
+            return
+        self._samples.extend(new)
+        self._rebuild_tensor()
+
+    def _rebuild_tensor(self) -> None:
         if not self._samples:
             self._tensor = None
             self._ids = []
@@ -114,6 +134,18 @@ class SampleBlockRecognizer:
 
     def block_count(self) -> int:
         return len(set(self._ids))
+
+    def count_for(self, block_id: str) -> int:
+        """Public accessor for the per-block sample count. Used by
+        the perception layer's commit-gate to require ``>= N`` samples
+        of the specific predicted block id before trusting it.
+
+        Reads from the immutable in-memory list created during the
+        last ``reload()``. Safe even if a concurrent ``reload()`` is
+        in flight — the worst case is reading the previous snapshot,
+        which is identical to the perception layer running one tick
+        earlier."""
+        return sum(1 for sid in self._ids if sid == block_id)
 
     # The two methods that match BlockClassifierProtocol.
 
@@ -229,8 +261,9 @@ class HybridBlockClassifier:
 
     def reload_samples(self) -> None:
         """Convenience pass-through for callers that just wrote a new
-        sample and want it reflected immediately."""
-        self.sample.reload()
+        sample and want it reflected immediately. Incremental: only the
+        newly-saved patches are read from disk, not the whole dataset."""
+        self.sample.reload_incremental()
 
 
 # ---------------------------------------------------------------------------

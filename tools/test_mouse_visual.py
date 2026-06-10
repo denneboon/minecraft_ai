@@ -43,43 +43,51 @@ def main() -> int:
 
     out_dir = os.path.join(ROOT, "data", "calibration")
 
-    print("[1] capture BEFORE")
-    f0 = cap.get_frame()
-    cv2.imwrite(os.path.join(out_dir, "mouse_before.png"),
-                cv2.cvtColor(f0, cv2.COLOR_RGB2BGR))
+    # try/finally — without it a crash mid-script leaks the velocity
+    # worker thread, which can still emit motion until the daemon
+    # thread is killed at process exit. That's the "mouse moves a
+    # bit after the program says it's done" bug.
+    try:
+        print("[1] capture BEFORE")
+        f0 = cap.get_frame()
+        cv2.imwrite(os.path.join(out_dir, "mouse_before.png"),
+                    cv2.cvtColor(f0, cv2.COLOR_RGB2BGR))
 
-    print("[2] move mouse: yaw +400 px")
-    mouse.track_target(400, 0)
-    time.sleep(0.4)
+        print("[2] move mouse: yaw +400 px")
+        mouse.track_target(400, 0)
+        time.sleep(0.4)
 
-    f1 = cap.get_frame()
-    cv2.imwrite(os.path.join(out_dir, "mouse_after_yaw.png"),
-                cv2.cvtColor(f1, cv2.COLOR_RGB2BGR))
+        f1 = cap.get_frame()
+        cv2.imwrite(os.path.join(out_dir, "mouse_after_yaw.png"),
+                    cv2.cvtColor(f1, cv2.COLOR_RGB2BGR))
 
-    print("[3] move mouse: pitch +120 px (look down)")
-    mouse.track_target(0, 120)
-    time.sleep(0.4)
+        print("[3] move mouse: pitch +120 px (look down)")
+        mouse.track_target(0, 120)
+        time.sleep(0.4)
 
-    f2 = cap.get_frame()
-    cv2.imwrite(os.path.join(out_dir, "mouse_after_pitch.png"),
-                cv2.cvtColor(f2, cv2.COLOR_RGB2BGR))
+        f2 = cap.get_frame()
+        cv2.imwrite(os.path.join(out_dir, "mouse_after_pitch.png"),
+                    cv2.cvtColor(f2, cv2.COLOR_RGB2BGR))
 
-    # Reverse
-    print("[4] restoring (yaw -400, pitch -120)")
-    mouse.track_target(-400, -120)
-    time.sleep(0.5)
+        # Reverse
+        print("[4] restoring (yaw -400, pitch -120)")
+        mouse.track_target(-400, -120)
+        time.sleep(0.5)
 
-    # Quantitative measure: pixel difference between frames.
-    import numpy as np
-    def diff_pct(a, b):
-        d = np.abs(a.astype(int) - b.astype(int)).mean()
-        return d
-    print(f"diff before vs after_yaw   = {diff_pct(f0, f1):.2f}")
-    print(f"diff after_yaw vs after_p  = {diff_pct(f1, f2):.2f}")
-    print(f"diff before vs after_p     = {diff_pct(f0, f2):.2f}")
+        # Quantitative measure: pixel difference between frames.
+        import numpy as np
+        def diff_pct(a, b):
+            return np.abs(a.astype(int) - b.astype(int)).mean()
+        print(f"diff before vs after_yaw   = {diff_pct(f0, f1):.2f}")
+        print(f"diff after_yaw vs after_p  = {diff_pct(f1, f2):.2f}")
+        print(f"diff before vs after_p     = {diff_pct(f0, f2):.2f}")
 
-    print(f"images saved in {out_dir}/")
-    mouse.stop(); cap.stop()
+        print(f"images saved in {out_dir}/")
+    finally:
+        try:
+            mouse.stop()
+        finally:
+            cap.stop()
     return 0
 
 

@@ -95,6 +95,15 @@ class CaptureConfig:
     clamp_to_monitor: bool = True
     use_client_area: bool = True
     name: str = "minecraft_capture"
+    # When True, a background thread grabs frames continuously and
+    # ``get_frame()`` returns the most-recent one instantly instead of
+    # blocking on the ~16-30 ms screen grab. This takes capture latency
+    # off the agent loop's critical path so the control rate is bounded
+    # by decision/perception cost, not by the grab. Off by default so
+    # act-then-capture tools (inventory hover→read, calibration) keep
+    # their synchronous semantics; main.py enables it for the agent loop
+    # via ``capture.threaded`` in settings.yaml.
+    threaded: bool = False
 
 
 def _rect_to_region(rect: Tuple[int, int, int, int]) -> Dict[str, int]:
@@ -157,28 +166,168 @@ class _MSSBackend(ICaptureBackend):
 class Capture:
     def __init__(self, config: CaptureConfig, backend=None):
         self.cfg = config
-        self._backend = None
+        # An injected backend (used by tests / alternative grabbers) is
+        # honoured. ``None`` means we lazily construct the default
+        # ``_MSSBackend`` — in threaded mode that construction happens
+        # ON the grab thread, because mss binds GDI handles to the
+        # creating thread and is not safe to share across threads.
+        self._backend = backend
+        self._external_backend = backend is not None
         self._window_rect = None
         self._lock = threading.RLock()
         self._owner_thread = None
 
+        # ── Threaded-grabber state ───────────────────────────────────
+        self._threaded = bool(getattr(config, "threaded", False))
+        self._grab_thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+        # Permanent shutdown latch (distinct from the restartable _stop).
+        # Once ``stop()`` runs, a late ``get_frame()`` — e.g. from the OCR
+        # worker still mid-read while teardown proceeds — must NOT
+        # re-spawn the grab thread (which would leak a thread + a fresh
+        # mss/GDI backend). ``start()`` clears it for a deliberate restart.
+        self._shutdown = False
+        self._frame_lock = threading.Lock()
+        self._latest: Optional[np.ndarray] = None
+        self._latest_ts: float = 0.0
+        self._first_frame = threading.Event()
+        self._grab_err: Optional[BaseException] = None
+
+    # ── Synchronous helpers (also used by the grab thread) ───────────
+
+    def _grab_once(self) -> np.ndarray:
+        """Grab one RGB frame using the current backend. Assumes the
+        backend exists and is being used from its owning thread."""
+        rect = self._ensure_rect()
+        raw = self._backend.grab(_rect_to_region(rect))
+        rgb = _bgra_to_rgb(raw)
+        if self.cfg.downscale != 1.0:
+            rgb = _downscale(rgb, self.cfg.downscale)
+        return rgb
+
+    def _grab_loop(self) -> None:
+        """Background grabber: builds the backend on THIS thread (mss
+        affinity), then publishes the latest RGB frame continuously.
+        The backend's own FPS limiter paces the loop, so this costs no
+        more CPU than the configured ``max_fps``.
+
+        Resilient by design: a transient failure to resolve the window
+        rect or build the backend (common during the startup
+        maximize/focus race) is RETRIED inside the loop rather than
+        killing the thread. The previous version exited on the first
+        such failure, which — once ``get_frame`` restarted it and it
+        failed again — left the agent capturing nothing for a whole run
+        (observed as a 0-tick session, ~3 s wasted per ``get_frame``
+        first-frame wait)."""
+        try:
+            while not self._stop.is_set():
+                # (Re)acquire the backend if we don't have one yet.
+                if self._backend is None:
+                    try:
+                        rect = self._ensure_rect()
+                        self._backend = _MSSBackend(
+                            _rect_to_region(rect), self.cfg.max_fps)
+                    except Exception as e:
+                        self._grab_err = e
+                        self._stop.wait(0.1)   # window not ready — retry soon
+                        continue
+                try:
+                    rgb = self._grab_once()
+                except Exception as e:
+                    # Transient window-move / focus-change / mss hiccup.
+                    # Drop the backend so we rebuild it (handles a window
+                    # that closed + reopened with a new handle), back off,
+                    # retry — never kill the grabber permanently.
+                    self._grab_err = e
+                    if not self._external_backend:
+                        try:
+                            self._backend.stop()
+                        except Exception:
+                            pass
+                        self._backend = None
+                    self._stop.wait(0.1)
+                    continue
+                with self._frame_lock:
+                    self._latest = rgb
+                    self._latest_ts = time.perf_counter()
+                self._first_frame.set()
+        finally:
+            # Close the backend on the SAME thread that created it.
+            if self._backend is not None and not self._external_backend:
+                try:
+                    self._backend.stop()
+                except Exception:
+                    pass
+
     def start(self):
         with self._lock:
+            if self._threaded:
+                self._shutdown = False   # a deliberate (re)start
+                if self._grab_thread is not None and self._grab_thread.is_alive():
+                    return
+                self._stop.clear()
+                self._first_frame.clear()
+                self._grab_err = None
+                self._grab_thread = threading.Thread(
+                    target=self._grab_loop,
+                    name=f"{self.cfg.name}-grab",
+                    daemon=True,
+                )
+                self._grab_thread.start()
+                return
             if self._backend is not None:
                 return
             rect = self._ensure_rect()
             self._backend = _MSSBackend(_rect_to_region(rect), self.cfg.max_fps)
 
     def stop(self):
+        if self._threaded:
+            self._shutdown = True       # latch: no auto-restart after this
+            self._stop.set()
+            th = self._grab_thread
+            if th is not None:
+                th.join(timeout=1.0)
+            self._grab_thread = None
+            # The grab loop closes the backend on exit. We deliberately do
+            # NOT null ``_latest`` here: a concurrent get_frame() could
+            # then observe None and raise spuriously during shutdown.
+            # Keeping the last frame ref is harmless (callers are tearing
+            # down too); ``_shutdown`` is what prevents re-spawning.
+            return
         with self._lock:
-            if self._backend:
+            if self._backend and not self._external_backend:
                 try:
                     self._backend.stop()
                 finally:
                     self._backend = None
 
     def get_frame(self) -> np.ndarray:
-        # Lazy start + owner-thread registration, both under the lock
+        if self._threaded:
+            if self._shutdown:
+                # Teardown in progress — don't resurrect the grab thread.
+                with self._frame_lock:
+                    frame = self._latest
+                if frame is not None:
+                    return frame
+                raise RuntimeError("Capture: stopped")
+            if self._grab_thread is None or not self._grab_thread.is_alive():
+                self.start()
+            if self._latest is None:
+                # Block only until the very first frame is published.
+                if not self._first_frame.wait(timeout=3.0):
+                    raise RuntimeError("Capture: no frame within 3 s")
+                if self._latest is None:
+                    raise RuntimeError(
+                        f"Capture: grab thread produced no frame "
+                        f"({self._grab_err!r})")
+            with self._frame_lock:
+                frame = self._latest
+            if frame is None:
+                raise RuntimeError(f"Capture: no frame available ({self._grab_err!r})")
+            return frame
+
+        # Synchronous path — lazy start + single-owner-thread guard so a
+        # stray cross-thread call can't corrupt mss's GDI state.
         with self._lock:
             tid = threading.get_ident()
             if self._owner_thread is None:
@@ -187,13 +336,16 @@ class Capture:
                 raise RuntimeError("Capture.get_frame called from multiple threads")
             if self._backend is None:
                 self.start()
-            rect = self._ensure_rect()
-            raw = self._backend.grab(_rect_to_region(rect))
-        rgb = _bgra_to_rgb(raw)
-        if self.cfg.downscale != 1.0:
-            rgb = _downscale(rgb, self.cfg.downscale)
-        return rgb
-    
+            return self._grab_once()
+
+    def latest_frame_age(self) -> Optional[float]:
+        """Seconds since the most recent grabbed frame (threaded mode),
+        or ``None`` if no frame yet / not threaded. Lets latency-
+        sensitive callers detect a stalled grabber."""
+        if not self._threaded or self._latest_ts == 0.0:
+            return None
+        return time.perf_counter() - self._latest_ts
+
     def window_origin(self) -> Tuple[int, int]:
         """
         Return the (x, y) desktop coordinates of the top-left corner of

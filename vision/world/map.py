@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from vision.world.types import (
     BlockObservation,
@@ -260,15 +260,31 @@ class WorldMap:
 
     def _maybe_evict_blocks(self, store: _DimensionStore) -> None:
         """If a single dimension exceeds the size cap, drop the oldest
-        low-confidence entries until we're back under it."""
-        if len(store.blocks) <= self._max_blocks_per_dim:
+        low-confidence entries until we're back under it.
+
+        Eviction TARGET is 90% of the cap so we have headroom before
+        the next eviction. The previous behaviour dropped a fixed 10%
+        which could lag behind insertions during heavy F3-confirm
+        bursts — the store could grow past the cap unbounded over a
+        long session. Now we evict at least ``cap - target`` entries
+        (capped at half the store to bound CPU per call); over time
+        the per-tick eviction rate matches the per-tick insertion
+        rate by construction.
+        """
+        cap = self._max_blocks_per_dim
+        if len(store.blocks) <= cap:
             return
-        # Sort by (confidence asc, last_seen_tick asc) and drop bottom 10 %.
+        target = int(cap * 0.9)
+        # Sort by (confidence asc, last_seen_tick asc) once. We need
+        # to drop enough to hit ``target`` but never more than half
+        # the store in a single eviction so a temporary overshoot
+        # doesn't decimate good observations.
+        n_drop_target = len(store.blocks) - target
+        n_drop = max(1, min(n_drop_target, len(store.blocks) // 2))
         items = sorted(
             store.blocks.items(),
             key=lambda kv: (kv[1].confidence, kv[1].last_seen_tick),
         )
-        n_drop = max(1, len(items) // 10)
         for k, _ in items[:n_drop]:
             del store.blocks[k]
 

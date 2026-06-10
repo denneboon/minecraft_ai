@@ -26,7 +26,6 @@ import math
 import os
 import sys
 import time
-from typing import Optional
 
 import numpy as np
 
@@ -144,12 +143,58 @@ def test_screen_ray() -> bool:
         return False
     _ok(f"forward block projects to centre at depth={depth:.1f}")
 
+    # Orientation guard — the camera basis must NOT be horizontally
+    # mirrored or vertically flipped. A centred forward point can't
+    # detect that (it projects to the centre under either sign), so we
+    # check OFF-centre points against MC physical geometry. Facing
+    # south (yaw=0) with head up (+Y):
+    #   * a block ABOVE the eye must appear in the UPPER half (py < cy)
+    #   * east (+X) is on the player's LEFT, so it must appear LEFT
+    #     of centre (px < cx)
+    # Before the screen_ray right/up-vector fix both axes were inverted
+    # here, silently mirror-flipping every screen↔world mapping.
+    above = sr.project((0.0, 67.0, 4.0), yaw_deg=0.0, pitch_deg=0.0, eye_xyz=eye)
+    east  = sr.project((2.0, 65.0, 4.0), yaw_deg=0.0, pitch_deg=0.0, eye_xyz=eye)
+    if above is None or east is None:
+        _fail("Orientation guard: off-centre points failed to project")
+        return False
+    if not (above[1] < intr.cy - 1):
+        _fail(f"Orientation: block above eye projected to py={above[1]:.0f} "
+              f"(expected < cy={intr.cy:.0f}); vertical axis is flipped")
+        return False
+    if not (east[0] < intr.cx - 1):
+        _fail(f"Orientation: east (+X) block projected to px={east[0]:.0f} "
+              f"(expected < cx={intr.cx:.0f}); horizontal axis is mirrored")
+        return False
+    _ok("camera basis right-side-up and not mirrored (above->up, east->left)")
+
     # Voxel walk from the eye forward 5 blocks should yield ~5 voxels.
     voxels = list(sr.voxel_walk(eye, (0.0, 0.0, 1.0), max_distance=5.0))
     _ok(f"voxel walk forward 5 blocks ->{len(voxels)} voxels {voxels[:3]}…")
     if len(voxels) < 3:
         _fail("Voxel walk produced suspiciously few entries.")
         return False
+
+    # Edge-case guards: degenerate FOV must clamp, not crash, and the
+    # up-vector at pitch=±90 must not return NaN (cross product
+    # collapses near zero — the 1e-6 threshold catches accumulated
+    # rounding error that 1e-9 missed).
+    bad = CameraIntrinsics.from_frame(1920, 1080, h_fov_deg=0.0)
+    if bad.h_fov_deg <= 0 or bad.h_fov_deg >= 180:
+        _fail(f"degenerate FOV not clamped: got {bad.h_fov_deg}")
+        return False
+    if not math.isfinite(bad.fx):
+        _fail(f"FOV clamp didn't prevent non-finite fx: got {bad.fx}")
+        return False
+    _ok(f"degenerate FOV 0.0° clamped to {bad.h_fov_deg}°, fx={bad.fx:.1f}")
+
+    for p in (90.0, -90.0, 89.999):
+        ux, uy, uz = ScreenRay.up_vector(0.0, p)
+        if not (math.isfinite(ux) and math.isfinite(uy) and math.isfinite(uz)):
+            _fail(f"up_vector(yaw=0, pitch={p}) returned non-finite: "
+                  f"({ux},{uy},{uz})")
+            return False
+    _ok("up_vector at pitch=±90 stays finite")
     return True
 
 
@@ -185,6 +230,29 @@ def test_world_map() -> bool:
         _fail("looking_at observation should override vision_patch")
         return False
     _ok("looking_at observation overrides vision_patch at the same cell")
+
+    # Eviction regression: at the cap, eviction must bring the store
+    # back UNDER the cap (target ~90 %), not just drop a fixed 10 %.
+    # The old behaviour dropped 10 % of the CURRENT size, so heavy
+    # burst inserts could outpace eviction and grow past the cap
+    # forever.
+    wm2 = WorldMap()
+    wm2._max_blocks_per_dim = 100
+    for i in range(150):
+        wm2.update_block(BlockObservation(
+            pos=(i, 64, 0), block_id="minecraft:stone",
+            confidence=0.5, source="vision_patch", last_seen_tick=i,
+        ))
+    if wm2.block_count() > 100:
+        _fail(f"eviction did not bring store under cap: "
+              f"{wm2.block_count()} > 100")
+        return False
+    if wm2.block_count() < 50:
+        _fail(f"eviction overshot — store too small: "
+              f"{wm2.block_count()}")
+        return False
+    _ok(f"eviction held to cap=100, ended at {wm2.block_count()} "
+        f"after 150 inserts")
     return True
 
 
@@ -330,7 +398,6 @@ def test_3d_renderer_and_air_carving() -> bool:
         WorldMap, BlockObservation, PlayerPose,
         IsoWorldRenderer, IsoRenderConfig, WorldPerception,
     )
-    from vision.world.map import AIR_BLOCK
 
     # Build a small world: a 5×1×5 floor of stone with one diamond block.
     wm = WorldMap()
@@ -419,7 +486,9 @@ def test_air_carving_guards() -> bool:
         block_x=0, block_y=64, block_z=0,
         raw_text="XYZ: 0 / 64 / 0\nBlock: 0 64 0\nFacing: south",
     )
-    wf_a = wp.update(frame, f3_absent)
+    # Side-effect update — we measure its impact via world_map state
+    # below, not via the return value, so discard the WorldFrame.
+    wp.update(frame, f3_absent)
     n_a = sum(1 for o in wp.world_map.iter_blocks()
               if o.block_id == AIR_BLOCK)
     if n_a == 0:
@@ -454,6 +523,76 @@ def test_air_carving_guards() -> bool:
         _fail("expected looking_at_rejects diagnostic")
         return False
     _ok(f"rejection diagnostic recorded: {rejects[0]['reason']}")
+    return True
+
+
+def test_block_id_validator_gate() -> bool:
+    """Regression: an F3 ``looking_at`` read whose id is NOT a real block
+    (a tag whose ``#`` was OCR-eaten, a truncation, a mangled stem) must
+    be rejected — never committed to the WorldMap, never saved as a
+    training sample. This is the guard that stops the self-teaching loop
+    from poisoning its own dataset with garbage labels."""
+    print("\n[17] Block-id catalog gate rejects garbage F3 labels")
+    from vision.world.perception import (
+        WorldPerception, WorldPerceptionConfig,
+    )
+    from vision.world.map import WorldMap
+    from vision.ocr import F3Info
+    import numpy as _np
+
+    # Validator that knows only ONE real block. Anything else is garbage.
+    known = {"minecraft:stone"}
+    validator = lambda bid: bid in known
+
+    cfg = WorldPerceptionConfig()
+    cfg.commit_only_from_looking_at = True
+    frame = _np.zeros((540, 960, 3), dtype=_np.uint8)
+
+    def _looking_at_frame(block_id: str):
+        return F3Info(
+            x=0.0, y=64.0, z=2.0, yaw=0.0, pitch=0.0,
+            facing_name="south", dimension="minecraft:overworld",
+            block_x=0, block_y=64, block_z=3,
+            raw_text=("XYZ: 0 / 64 / 2\n"
+                      "Targeted Block: 0, 64, 3\n"
+                      f"{block_id}\n"
+                      "#minecraft:mineable/pickaxe\n"
+                      "Facing: south"),
+        )
+
+    # Path A: garbage id (a tag stem) → rejected, nothing committed.
+    wp = WorldPerception(config=cfg, world_map=WorldMap(),
+                         block_id_validator=validator)
+    wf_bad = wp.update(frame, _looking_at_frame("minecraft:goats_spawnable_on"))
+    if wf_bad.looking_at is not None:
+        _fail("garbage block id was accepted as looking_at")
+        return False
+    if wp.world_map.get_block((0, 64, 3),
+                              dimension="minecraft:overworld") is not None:
+        _fail("garbage block id leaked a commit into the WorldMap")
+        return False
+    rejects = wf_bad.diagnostics.get("looking_at_rejects", [])
+    if not any(r.get("reason") == "unknown_block_id" for r in rejects):
+        _fail("expected an unknown_block_id rejection diagnostic")
+        return False
+    _ok("garbage id rejected (no commit, diagnostic recorded)")
+
+    # Path B: a real block id sails through and commits.
+    wp = WorldPerception(config=cfg, world_map=WorldMap(),
+                         block_id_validator=validator)
+    wf_ok = wp.update(frame, _looking_at_frame("minecraft:stone"))
+    if wf_ok.looking_at is None or wf_ok.looking_at.block_id != "minecraft:stone":
+        _fail("a real block id was wrongly rejected by the gate")
+        return False
+    _ok("real id accepted (gate is not over-eager)")
+
+    # Path C: no validator supplied → back-compat, no gating applied.
+    wp = WorldPerception(config=cfg, world_map=WorldMap())
+    wf_nogate = wp.update(frame, _looking_at_frame("minecraft:stone"))
+    if wf_nogate.looking_at is None:
+        _fail("absent validator should not block any read")
+        return False
+    _ok("absent validator leaves reads untouched (back-compat)")
     return True
 
 
@@ -534,7 +673,6 @@ def test_strict_gate_crosshair_bypass() -> bool:
 
     # The map MUST contain only air carving (free space) — never a
     # stone voxel from the crosshair patch.
-    from vision.world.map import AIR_BLOCK
     solids = [o for o in wp.world_map.iter_solid_blocks()]
     if solids:
         _fail(f"strict gate leaked vision-patch solids: {solids[:3]}")
@@ -945,15 +1083,19 @@ def test_f3_target_multiline() -> bool:
         return False
     _ok(f"noisy-label: id={noisy.block_id}")
 
-    # No coords on the label line → confidence is reduced but id still returned.
+    # No coords on the label line → return None. Previously the parser
+    # returned a (0,0,0) sentinel with conf=0.5 here, but the
+    # perception layer ALWAYS rejected those on the confidence floor;
+    # the diagnostic dump just made it LOOK like phantom origin
+    # commits. Returning None is the honest API.
     id_only = parse_looking_at_block([
         "Looking at block",
         "minecraft:cobblestone",
     ])
-    if id_only is None or id_only.block_id != "minecraft:cobblestone" or id_only.confidence > 0.7:
-        _fail(f"id-only parse failed: {id_only}")
+    if id_only is not None:
+        _fail(f"id-only without coords should return None, got: {id_only}")
         return False
-    _ok(f"id-only: id={id_only.block_id} conf={id_only.confidence}")
+    _ok("id-only-without-coords returns None")
 
     # Garbage input returns None cleanly.
     if parse_looking_at_block(["XYZ: 0 / 64 / 0", "no target line here"]) is not None:
@@ -965,7 +1107,7 @@ def test_f3_target_multiline() -> bool:
 
 def test_f3_two_column_crops() -> bool:
     print("\n[8] F3Reader crops BOTH left and right columns")
-    from vision.ocr import OCRConfig, F3Reader, build_f3_reader
+    from vision.ocr import OCRConfig, F3Reader
     import numpy as np
     # Synthesise a frame with text-like ink on BOTH sides of the top
     # strip so we can assert both regions get cropped.
@@ -1023,6 +1165,7 @@ def main() -> int:
         ("inverse_renderer", test_inverse_renderer()),
         ("exporters",       test_exporters()),
         ("air_guard",       test_air_carving_guards()),
+        ("blockid_gate",    test_block_id_validator_gate()),
         ("sweep_cap",       test_sweep_delta_cap()),
         ("strict_xhair",    test_strict_gate_crosshair_bypass()),
         ("public_api",      test_perception_public_api()),

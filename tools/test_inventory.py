@@ -49,7 +49,7 @@ import numpy as np
 import yaml
 
 from vision.capture import Capture, CaptureConfig
-from vision.inventory import build_inventory_reader, SlotContent
+from vision.inventory import build_inventory_reader
 from vision.inventory_layout import slot_rects, available_layouts
 from vision.menu_detect import build_menu_detector
 from vision.mc_assets import MCAssets
@@ -57,6 +57,7 @@ from vision.mcfont import ensure_font_cache
 from vision.block_icons import ensure_block_icon_cache
 from vision.tooltip import build_tooltip_reader
 from agents.inventory_inspector import InventoryInspector, InspectorConfig
+from control.mouse import Mouse, MouseConfig
 from utils.focus import _find_minecraft_hwnd, activate_minecraft
 
 
@@ -240,39 +241,57 @@ def _run_pipeline(args, settings, ui_scale, frame, live_capture, live_hwnd):
 
     # ── Phase 2: hover over unknowns and OCR their tooltips ───────────
     inspection_results = {}
+    hover_mouse: Optional[Mouse] = None
     if args.hover_unknowns and live_capture is not None:
         print(f"[invtest] Phase 2: hovering {n_phase1_unknown} unknown slots…")
         tooltip_reader = build_tooltip_reader(settings, assets=assets)
-        # Share the InventoryReader's sample store so hovers feed the
-        # Phase-3 NN matcher for the next run.
-        inspector = InventoryInspector(
-            tooltip_reader=tooltip_reader,
-            capture=live_capture,
-            sample_store=reader.sample_store,
-            config=InspectorConfig(hover_settle_ms=220),
-        )
-        window_origin = live_capture.window_origin()
-        t0 = time.perf_counter()
-        inspection_results = inspector.resolve_unknowns(
-            snap,
-            window_origin=window_origin,
-            container=layout_name,
-            restore_cursor=True,
-            pre_hover_frame=frame,
-        )
-        dt = time.perf_counter() - t0
-        print(f"[invtest]   resolved {len(inspection_results)} slots "
-              f"via tooltip OCR in {dt:.2f}s")
-        for slot_name, result in inspection_results.items():
-            short = (result.item_id or "?").replace("minecraft:", "")
-            # Use the canonical display name from the lang cache —
-            # the OCR'd display-name from the tooltip is often garbled
-            # because MC colour-codes it (italics for renamed items,
-            # rarity colours for special ones). The minecraft:<id> line
-            # is the reliable source of truth.
-            canonical = assets.display_name(result.item_id) if result.item_id else None
-            dn = f" ({canonical})" if canonical else ""
-            print(f"             {slot_name:<14} → {short}{dn}")
+        # Spin up a Mouse instance just for the hover phase so reaches
+        # use the eased minimum-jerk path instead of teleporting. No
+        # gate is wired in here — this is a standalone tool, not the
+        # agent loop — and the easing curve is the same one the live
+        # agent uses.
+        hover_mouse = Mouse(config=MouseConfig())
+        hover_mouse.start()
+        try:
+            # Share the InventoryReader's sample store so hovers feed
+            # the Phase-3 NN matcher for the next run.
+            inspector = InventoryInspector(
+                tooltip_reader=tooltip_reader,
+                capture=live_capture,
+                mouse=hover_mouse,
+                sample_store=reader.sample_store,
+                config=InspectorConfig(hover_settle_ms=220),
+            )
+            window_origin = live_capture.window_origin()
+            t0 = time.perf_counter()
+            inspection_results = inspector.resolve_unknowns(
+                snap,
+                window_origin=window_origin,
+                container=layout_name,
+                restore_cursor=True,
+                pre_hover_frame=frame,
+            )
+            dt = time.perf_counter() - t0
+            print(f"[invtest]   resolved {len(inspection_results)} slots "
+                  f"via tooltip OCR in {dt:.2f}s")
+            for slot_name, result in inspection_results.items():
+                short = (result.item_id or "?").replace("minecraft:", "")
+                # Use the canonical display name from the lang cache —
+                # the OCR'd display-name from the tooltip is often
+                # garbled because MC colour-codes it (italics for
+                # renamed items, rarity colours for special ones). The
+                # minecraft:<id> line is the reliable source of truth.
+                canonical = (assets.display_name(result.item_id)
+                             if result.item_id else None)
+                dn = f" ({canonical})" if canonical else ""
+                print(f"             {slot_name:<14} → {short}{dn}")
+        finally:
+            # Always tear the hover mouse down so the velocity worker
+            # thread exits even if the inspection raises mid-loop.
+            try:
+                hover_mouse.stop()
+            except Exception:
+                pass
 
     # ── Pretty print ──────────────────────────────────────────────────
     # SRC column shows which stage identified the slot:

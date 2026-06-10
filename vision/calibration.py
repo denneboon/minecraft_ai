@@ -5,8 +5,8 @@ from typing import Any, Dict, Optional
 
 
 
-VISION_DIR = os.path.dirname(os.path.abspath(__file__))             
-PROJECT_ROOT = os.path.abspath(os.path.join(VISION_DIR, ".."))      
+VISION_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(VISION_DIR, ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
@@ -16,12 +16,12 @@ import cv2
 try:
     import yaml
 except Exception:
-    yaml = None  
+    yaml = None
 
 
 from vision.capture import Capture, CaptureConfig
 from vision.hud import HUDReader, HUDReaderConfig
-from utils.focus import _find_minecraft_hwnd, activate_minecraft
+from utils.focus import _find_minecraft_hwnd
 from control.keyboard import Keyboard, KeyboardConfig
 
 
@@ -73,7 +73,7 @@ def _hud_layout_by_formula(width: int, height: int, ui_scale: int) -> Dict[str, 
 
     ICON_W, ICON_H = 8, 9
     ICONS = 10
-    
+
     BAR_W=1+ICON_W*ICONS
 
     Y_OFF_HEALTH_HUNGER = 39
@@ -81,7 +81,9 @@ def _hud_layout_by_formula(width: int, height: int, ui_scale: int) -> Dict[str, 
     Y_OFF_XP            = 29
 
     SLOT_W = 20
-    SLOT_H = 20
+    # SLOT_H == SLOT_W for vanilla hotbar slots; only width is read
+    # below so we don't declare the height constant. Add it back if
+    # a non-square hotbar texture (resource pack) ever needs it.
     NUM_SLOTS = 9
 
     centerX = sW // 2
@@ -134,7 +136,7 @@ def _hud_layout_by_formula(width: int, height: int, ui_scale: int) -> Dict[str, 
     slot_rects_scaled = []
     slot_centers_scaled = []
     x = slots_left_x
-    for i in range(NUM_SLOTS):
+    for _ in range(NUM_SLOTS):
         slot_rects_scaled.append([x, slots_y, SLOT_W, slot_h_inner])
         slot_centers_scaled.append([x + SLOT_W // 2, slots_y + slot_h_inner // 2])
         x += SLOT_W  # no gap — slots are packed edge-to-edge
@@ -242,7 +244,7 @@ def calibrate(ui_scale: Optional[int] = None,
     print(f"[CALIB] Settings path: {SETTINGS_PATH}")
     settings = _load_yaml(SETTINGS_PATH)
 
-    
+
     # --- Correct UI scale loading ---
     ui_settings = _deep_get(settings, "capture.ui_scale", None)
 
@@ -348,10 +350,10 @@ def calibrate(ui_scale: Optional[int] = None,
     H, W = frame_rgb.shape[:2]
     print(f"[CALIB] Captured frame: {W}x{H}")
 
-    
+
     regions = _hud_layout_by_formula(W, H, ui)
 
-    
+
     if preview:
         out_path = os.path.join(CALIB_DIR, f"hud_preview_{W}x{H}.png")
         bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
@@ -359,7 +361,7 @@ def calibrate(ui_scale: Optional[int] = None,
         cv2.imwrite(out_path, overlay)
         print(f"[CALIB] Wrote preview: {out_path}")
 
-    
+
     # --- SAVE TO YAML ---
     if save and yaml is not None:
         settings = _load_yaml(SETTINGS_PATH)

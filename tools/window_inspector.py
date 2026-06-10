@@ -18,7 +18,7 @@ def enum_handler(hwnd, data):
     try:
         _, pid = win32process.GetWindowThreadProcessId(hwnd)
         pname = psutil.Process(pid).name().lower()
-    except:
+    except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
         pname = "?"
 
     rect = win32gui.GetWindowRect(hwnd)

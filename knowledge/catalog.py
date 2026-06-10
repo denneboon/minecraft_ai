@@ -53,7 +53,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 
 # ---------------------------------------------------------------------------
@@ -425,10 +425,22 @@ class Catalog:
         if not kinds_dir.is_dir():
             return {}
         index: Dict[str, Set[str]] = {}
+        first_fail_logged = False
         for p in kinds_dir.rglob("*.json"):
             try:
                 data = json.loads(p.read_text(encoding="utf-8"))
-            except Exception:
+            except Exception as e:
+                # Silently dropping tag files masks asset-cache
+                # corruption — downstream code that asks "is this
+                # block in #minecraft:logs?" gets the wrong answer
+                # without explanation. First-failure WARN; further
+                # corrupt files cached silently to avoid spam.
+                if not first_fail_logged:
+                    first_fail_logged = True
+                    print(f"[catalog][WARN] tag file {p.name!r} "
+                          f"failed to parse: {e!r}. Further parse "
+                          f"failures silenced; tag index will be "
+                          f"incomplete.")
                 continue
             rel = p.relative_to(kinds_dir).with_suffix("")
             tag_name = str(rel).replace("\\", "/")

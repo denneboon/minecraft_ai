@@ -30,8 +30,7 @@ Usage (from an agent tick):
 
 from __future__ import annotations
 
-import time
-from typing import Any, Optional
+from typing import Any
 
 from control.keyboard import Keyboard
 from control.mouse import Mouse
@@ -119,12 +118,12 @@ class ActionWrapper:
 
         # --- Combat ---
         if action == "attack":
-            dur = kwargs.get("duration", None)
+            dur = kwargs.get("duration")
             self._ms.left_click(duration=dur)
             return True
 
         if action == "use_item":
-            dur = kwargs.get("duration", None)
+            dur = kwargs.get("duration")
             self._ms.right_click(duration=dur)
             return True
 

@@ -34,9 +34,8 @@ that single method.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Protocol, Tuple
 
 import cv2
 import numpy as np
@@ -150,81 +149,18 @@ class _BlockSignature:
 # classifier then accepts whichever variant happens to match the
 # current view.
 #
-# Tint values are the wiki's GAME-CANONICAL colours for each biome:
-# https://minecraft.wiki/w/Color#Biome_colors
-#
-# When a CNN classifier ships this whole table becomes dead weight and
-# can be deleted — but until then it bridges the gap between "the
-# pipeline runs" and "blocks actually get recognised in-world".
-
-_GRASS_TINTED_BLOCKS: List[str] = [
-    "grass_block",
-    "short_grass",
-    "tall_grass",
-    "fern",
-    "large_fern",
-    "potted_fern",
-    "sugar_cane",
-]
-
-_FOLIAGE_TINTED_BLOCKS: List[str] = [
-    "oak_leaves",
-    "jungle_leaves",
-    "acacia_leaves",
-    "dark_oak_leaves",
-    "mangrove_leaves",
-    "vine",
-    "lily_pad",
-]
-
-# Birch + spruce use FIXED tints, not biome colours.
-_FIXED_TINT_BLOCKS: List[Tuple[str, Tuple[int, int, int]]] = [
-    ("birch_leaves",  (128, 167, 85)),
-    ("spruce_leaves", ( 97, 153, 97)),
-]
-
-# Representative biome tints — covers the most common overworld biomes
-# the AI is likely to play in. Each entry yields one signature per
-# tintable block.
-_BIOME_GRASS_TINTS: List[Tuple[str, Tuple[int, int, int]]] = [
-    ("plains",         (145, 189, 89)),
-    ("forest",         ( 89, 168, 67)),
-    ("birch_forest",   (107, 165, 86)),
-    ("taiga",          (134, 184, 127)),
-    ("savanna",        (191, 183, 85)),
-    ("jungle",         ( 89, 197, 30)),
-    ("desert",         (191, 183, 85)),
-    ("swamp",          (106, 112, 57)),
-    ("dark_forest",    ( 80, 122, 50)),   # dimmer woods
-]
-
-_BIOME_FOLIAGE_TINTS: List[Tuple[str, Tuple[int, int, int]]] = [
-    ("plains",         (119, 171, 47)),
-    ("forest",         ( 89, 174, 50)),
-    ("taiga",          ( 104, 158, 78)),
-    ("jungle",         ( 48, 187, 10)),
-    ("savanna",        (174, 164, 42)),
-    ("swamp",          (106, 112, 57)),
-    ("dark_forest",    ( 76, 142, 38)),
-]
-
-
-def _apply_tint(rgba: np.ndarray, tint: Tuple[int, int, int]) -> np.ndarray:
-    """
-    Multiply ``rgba``'s RGB channels by ``tint / 255`` (Mojang's
-    in-shader tint formula). Alpha is preserved.
-    """
-    if rgba is None:
-        return rgba
-    arr = rgba.astype(np.float32)
-    if arr.ndim != 3:
-        return rgba
-    tint_arr = np.array(tint, dtype=np.float32) / 255.0
-    arr[..., 0] *= tint_arr[0]
-    arr[..., 1] *= tint_arr[1]
-    arr[..., 2] *= tint_arr[2]
-    arr = np.clip(arr, 0, 255).astype(np.uint8)
-    return arr
+# The tint tables + formula live in :mod:`vision.world.biome_tint` so the
+# CNN texture pre-training shares the exact same render knowledge (they
+# must not drift). Aliased here under the historic private names to keep
+# the rest of this module unchanged.
+from vision.world.biome_tint import (
+    GRASS_TINTED_BLOCKS as _GRASS_TINTED_BLOCKS,
+    FOLIAGE_TINTED_BLOCKS as _FOLIAGE_TINTED_BLOCKS,
+    FIXED_TINT_BLOCKS as _FIXED_TINT_BLOCKS,
+    BIOME_GRASS_TINTS as _BIOME_GRASS_TINTS,
+    BIOME_FOLIAGE_TINTS as _BIOME_FOLIAGE_TINTS,
+    apply_tint as _apply_tint,
+)
 
 
 class ColourSignatureBlockClassifier:
@@ -250,6 +186,54 @@ class ColourSignatureBlockClassifier:
         self._signatures: List[_BlockSignature] = []
 
         # ── 1. Raw atlas signatures (untinted, all blocks) ────────────
+        # Face-stem suffixes the asset jar uses for multi-face blocks
+        # (top / side / bottom / front / back / inner). Each face has
+        # its own texture file (e.g. ``dirt_path_top.png``,
+        # ``stripped_oak_log_side.png``), so the classifier needs ALL
+        # faces for matching. But the COMMITTED block_id must be the
+        # canonical block name (``dirt_path``), not the face stem
+        # (``dirt_path_top``) — otherwise the WorldMap fills with
+        # bogus ids like ``minecraft:dirt_path_top`` that no agent /
+        # exporter / pathfinder will recognise.
+        # MC's asset jar names multi-face textures with a few
+        # canonical suffixes. We strip them to the base block name
+        # so the classifier reports e.g. ``minecraft:hopper`` instead
+        # of ``minecraft:hopper_outside``. The list grew in waves as
+        # live tests surfaced new leaks:
+        #   * ``_outside`` / ``_inside``: hopper + mushroom_block.
+        #   * ``_pivot`` / ``_round``: grindstone parts.
+        # Texture stems that don't follow the convention (e.g.
+        # ``<wood>_shelf`` for the chiseled bookshelf) fall through
+        # unchanged — they'd need a hand-curated alias which is
+        # tracked separately.
+        _FACE_SUFFIXES = (
+            "_top", "_side", "_bottom", "_front", "_back",
+            "_inner", "_inner_top", "_inner_bottom",
+            "_side_overlay", "_top_overlay",
+            "_outside", "_inside",
+            "_pivot", "_round",
+        )
+        all_stems = set(assets.list_block_textures())
+        # Build a base-stem index: a stem `X_top` and `X_side` BOTH
+        # collapse to block `X` even when bare `X.png` doesn't exist
+        # (true for dirt_path, mangrove_roots, brown_stained_glass_pane,
+        # etc. — multi-face blocks that have no single canonical face).
+        # Detection rule: ``X`` is a real block iff at least one of
+        # ``X``, ``X_top``, ``X_side``, ``X_bottom`` exists AND ``X``
+        # isn't itself a face stem (doesn't end in a face suffix).
+        bases_set = set()
+        for stem in all_stems:
+            if any(stem.endswith(suf) for suf in _FACE_SUFFIXES):
+                continue
+            bases_set.add(stem)
+        for stem in all_stems:
+            for suf in sorted(_FACE_SUFFIXES, key=len, reverse=True):
+                if stem.endswith(suf):
+                    base = stem[: -len(suf)]
+                    if base:
+                        bases_set.add(base)
+                    break
+
         for stem in assets.list_block_textures():
             tex = assets.block_texture(stem)
             sig = _signature_from_rgb(tex) if tex is not None else None
@@ -260,8 +244,20 @@ class ColourSignatureBlockClassifier:
             # foliage_overlay) that aren't surfaces on their own.
             if float(sig[3:6].sum()) < 4.0:
                 continue
+            # Normalise face-stems to the base block name. Try the
+            # longest matching suffix first so ``_inner_top`` is
+            # stripped before ``_top``. We accept any base in
+            # ``bases_set`` — that includes bases that only exist
+            # as face textures (no bare PNG).
+            canonical = stem
+            for suf in sorted(_FACE_SUFFIXES, key=len, reverse=True):
+                if stem.endswith(suf):
+                    candidate = stem[: -len(suf)]
+                    if candidate and candidate in bases_set:
+                        canonical = candidate
+                        break
             self._signatures.append(_BlockSignature(
-                block_id=f"minecraft:{stem}",
+                block_id=f"minecraft:{canonical}",
                 signature=sig,
             ))
 

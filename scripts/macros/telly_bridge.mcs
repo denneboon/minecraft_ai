@@ -1,0 +1,56 @@
+# Telly (tele) bridge — fast backward sneak-bridge.
+#
+# Mechanics this reproduces:
+#   * look down toward the block edge behind you
+#   * hold SNEAK so you don't walk off the edge
+#   * hold BACKWARD to shuffle toward the gap
+#   * rapid-fire right-click to place a block each shuffle
+#
+# Setup: face AWAY from the direction you want the bridge to go, stand
+# at the edge with blocks in the selected hotbar slot, then run it.
+# Timings are latency-sensitive — tune sleep/loop count for your setup.
+#
+# NOTE: input macros violate the rules of competitive servers (Hypixel
+# etc.). Use this in singleplayer / your own world.
+name telly_bridge
+# Self-levelling pitch setup (independent of starting view):
+#   push UP past the -90 clamp, then DOWN to the telly angle (~45°).
+# Single large vertical SendInput deltas get dropped, so all in chunks.
+move 0 -100
+sleep 20
+move 0 -100
+sleep 20
+move 0 -100
+sleep 20
+move 0 -100
+sleep 20
+move 0 -100      # ≈ -75° accumulated → pitch hits -90° clamp
+sleep 80
+move 0 90
+sleep 20
+move 0 90
+sleep 20
+move 0 90
+sleep 20
+move 0 90
+sleep 20
+move 0 90
+sleep 20
+move 0 90
+sleep 20
+move 0 90
+sleep 20
+move 0 90
+sleep 20
+move 0 90
+sleep 20
+move 0 90        # 10 × 90 ≈ 135° down → final pitch ≈ +45° (telly)
+sleep 150
+down shift        # sneak — stay on the edge
+down s            # walk backward toward the gap
+loop 30           # 30 placements (use 0 to run until Ctrl+Shift+F12)
+  click right     # place a block
+  sleep 90        # fast "telly" cadence
+endloop
+up s
+up shift

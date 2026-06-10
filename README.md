@@ -61,6 +61,74 @@ tick. The world-perception module builds a sparse voxel map from the
 crosshair raycast, the F3 "Looking at block" line, and an inverse-
 renderer cross-check.
 
+## Commands
+
+Every runnable entry point in the project, grouped by what it needs.
+Live tools require Minecraft to be **running and focused**; offline tools
+run anywhere. All paths are from the repo root.
+
+### Run the agent / play macros (live MC)
+
+| Command | What it does |
+| --- | --- |
+| `python main.py --agent world_explorer --duration 60` | Run the agent loop for an agent (`--agent <name>`); `--duration` caps wall-clock seconds. |
+| `python main.py --test` | Legacy mouse / hotbar hardware smoke test (no agent). |
+| `python main.py --script scripts/macros/bridge.ahk --duration 60` | Play a recorded macro (`.ahk` / `.txt` / `.json` / `.mcs`) instead of an agent. |
+| `python tools/run_god_bridge.py` | Adaptive god-bridge runner (pillar-up, auto-align yaw/pitch, diagonal back-strafe). Many flags — `--places`, `--strafe {left,right}`, `--target-pitch`, `--max-seconds`, `--keep-sneak`, `--countdown`. |
+| `python tools/run_script.py <file>` | Run (or `--inspect`) a single macro/script file. |
+| `python tools/learn_world_live.py` | Autonomous self-teaching live test for the world block recogniser. |
+
+### Live diagnostics & calibration (live MC)
+
+| Command | What it does |
+| --- | --- |
+| `python tools/pipeline_test.py` | End-to-end pipeline smoke test on live frames. |
+| `python tools/test_world_perception_live.py` | Live world-perception smoke test (real frames). |
+| `python tools/test_mouse_camera.py` | Verify the mouse → camera pipeline against F3. |
+| `python tools/test_mouse_visual.py` | Mouse-camera test with before/after screenshots. |
+| `python tools/test_px_per_deg.py` | Measure mouse px-per-degree against F3 ground truth. |
+| `python tools/test_inventory.py` | Run the full inventory pipeline on a captured/loaded frame. |
+| `python tools/window_inspector.py` | Inspect the detected Minecraft window geometry. |
+| `python tools/world_map_view.py` | Live top-down view of the AI's world map. |
+
+### Offline tests (no MC needed)
+
+| Command | What it does |
+| --- | --- |
+| `python tools/run_tests.py` | Run **all** offline self-test suites; `-k <substr>` filters. Exit code non-zero on failure (CI-friendly). |
+| `pytest` | Run the pytest unit suite in `tests/`. |
+| `python tools/test_world_perception.py` | `vision/world/` smoke test (16 sub-tests). |
+| `python tools/test_world_explorer_offline.py` | World-explorer + perception pipeline. |
+| `python tools/test_cnn_recognizer.py` | Accuracy test for the self-teaching CNN recogniser. |
+| `python tools/test_ocr_f3.py` | F3 overlay OCR on hard backgrounds. |
+| `python tools/test_pathfind.py` | WorldMap A* pathfinder. |
+| `python tools/test_walker.py` | Voxel-path walker. |
+| `python tools/test_weather.py` | `vision.weather`. |
+| `python tools/test_script_runner.py` | `control.script_runner`. |
+| `python tools/test_inventory_synthetic.py` | Inventory pipeline on synthetic frames. |
+
+### Training & data collection
+
+| Command | What it does |
+| --- | --- |
+| `python tools/pretrain_block_cnn.py` | Pre-train the block-recognition CNN from game textures (warm-start). |
+| `python scripts/collect_demo.py` | Record human demonstrations as (frame, input-state) pairs. |
+| `python tools/collect_weather.py` | Collect command-labelled weather training samples. |
+| `python tools/record_macro.py` | Record live keyboard/mouse input into a replayable macro. |
+| `python tools/record_script_run.py` | Run a macro/script while recording gameplay. |
+
+### Viewers, export & profiling
+
+| Command | What it does |
+| --- | --- |
+| `python tools/replay_demo.py <session_dir>` | Replay a recorded demo with an input overlay. |
+| `python tools/world_view_3d.py <map>` | Interactive 3D viewer for a saved WorldMap. |
+| `python tools/export_world.py` | Export a WorldMap snapshot (JSON / schematic). |
+| `python tools/profile_loop.py` | Profile the live agent loop stage by stage. |
+| `python tools/profile_perception.py` | cProfile the perception + OCR path on live frames. |
+
+`Ctrl+Shift+F12` is the global emergency stop for any live command.
+
 ## Configuration
 
 * `config/settings.yaml` — runtime config (FPS limit, tick rate, safety
