@@ -389,6 +389,19 @@ class TreeChopAgent(BaseAgent):
     def attach_perception(self, wp) -> None:
         self._wp = wp
 
+    def telemetry(self) -> dict:
+        """Labels each logged episode tick with the behaviour's state +
+        progress (for analytics + future learning)."""
+        if self._fsm is None:
+            return {"state": "init"}
+        t = {"state": self._fsm._state, "logs": self._fsm.logs,
+             "trunks": self._fsm.chopped}
+        if self._eat is not None:
+            t["eating"] = True
+        if getattr(self._fsm, "_target", None) is not None:
+            t["target"] = list(self._fsm._target)
+        return t
+
     def reset(self) -> None:
         self._fsm = None
 

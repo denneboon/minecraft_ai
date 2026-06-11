@@ -40,6 +40,7 @@ OFFLINE_TESTS = [
     "test_hotbar",
     "test_skills",
     "test_treechop",
+    "test_episode_logger",
 ]
 
 

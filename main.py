@@ -34,6 +34,7 @@ from control.safety import Safety, SafetyConfig
 from control.keyboard import Keyboard, KeyboardConfig
 from control.mouse import Mouse, MouseConfig
 from control.action_wrapper import ActionWrapper
+from brain.episode_logger import build_episode_logger
 from vision.capture import Capture, CaptureConfig
 from vision.processing import build_processor, FrameProcessor, ScreenState
 from vision.ocr import build_f3_reader, F3Reader, F3ReaderWorker
@@ -606,6 +607,11 @@ def _run_agent_loop(
     # (teleporting hundreds of blocks per frame, pitch > 90°, etc.)
     # so a single garbled tick can't poison the perception layer.
     pose_filter = PoseFilter()
+    # Episode logging: record (perception, action, outcome) every tick for
+    # analytics + future learning. Best-effort; never disturbs the loop.
+    episode = build_episode_logger(settings, agent.name, ROOT)
+    if episode.enabled and episode.path:
+        print(f"[AGENT] Episode log → {episode.path}")
 
     start_ts       = time.perf_counter()
     last_tick      = start_ts
@@ -771,6 +777,10 @@ def _run_agent_loop(
                 except Exception:
                     pass
 
+            # --- Episode logging (best-effort) ---
+            episode.record(total_ticks, time.perf_counter() - start_ts,
+                           state, decision, agent=agent, dispatched=dispatch_ok)
+
             # --- Tick pacing + rate log ---
             now = time.perf_counter()
             elapsed = now - last_tick
@@ -828,6 +838,14 @@ def _run_agent_loop(
         print(f"[AGENT] Loop ended after {wall:.1f}s "
               f"({total_ticks} ticks, {actual_rate:.1f} Hz actual / "
               f"{tick_rate:.0f} Hz target).")
+        try:
+            summ = {"wall_s": round(wall, 1), "hz": round(actual_rate, 1)}
+            if hasattr(agent, "telemetry"):
+                try: summ["final"] = agent.telemetry()
+                except Exception: pass
+            episode.close(summ)
+        except Exception:
+            pass
         # OCR throughput — the high-value perception (pose / looking-at).
         if f3_worker is not None:
             try:
