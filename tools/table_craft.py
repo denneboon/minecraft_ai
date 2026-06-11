@@ -165,8 +165,22 @@ def main(argv=None) -> int:
                                   ui_scale=ui_scale, window_origin=origin,
                                   inspector=inspector)
         ctl.open_inventory()
-        snap = ctl.read(stop_when=lambda s: find_item_slot(s, TABLE) is not None)
+        _has_table = lambda s: find_item_slot(s, TABLE) is not None
+        snap = ctl.read(stop_when=_has_table)
         tname = find_item_slot(snap, TABLE)
+        if tname is None:
+            # The static recogniser can mislabel a freshly-crafted table with
+            # high confidence, so the surgical hover (which skips confident
+            # slots) never checks it. Fallback: re-read hovering EVERY non-empty
+            # slot until the table surfaces (stops as soon as it's found).
+            print("[table] table not found on the quick read — hover-scanning")
+            prev_gate = inspector.cfg.skip_above_confidence
+            inspector.cfg.skip_above_confidence = 1.01     # hover everything
+            try:
+                snap = ctl.read(stop_when=_has_table)
+            finally:
+                inspector.cfg.skip_above_confidence = prev_gate
+            tname = find_item_slot(snap, TABLE)
         if tname is None:
             ctl.close()
             print("[table] no crafting_table in inventory — craft one first "
