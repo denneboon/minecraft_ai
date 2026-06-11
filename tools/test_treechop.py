@@ -310,6 +310,11 @@ def main() -> int:
     (ok if pl._task_i == 2 else bad)(f"plan complete + bounded ({pl._task_i})")
     t = pl.telemetry()
     (ok if t.get("of") == 2 else bad)(f"telemetry reports plan size ({t})")
+    # repeat: a repeating plan loops back to task 0 when complete.
+    rp = build_agent("planner", {"agent": {"planner": {"repeat": True, "tasks": [
+        {"kind": "logs", "count": 2}]}}})
+    rp._build(); rp._on_fsm_done()
+    (ok if rp._task_i == 0 else bad)(f"repeat plan loops to task 0 ({rp._task_i})")
 
     # 13. parse_plan: CLI plan string -> planner tasks.
     print("\n[13] parse_plan (CLI plan -> tasks)")

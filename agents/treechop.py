@@ -680,6 +680,7 @@ class PlannerAgent(TreeChopAgent):
         super().__init__(settings)
         cfg = ((self._settings.get("agent", {}) or {}).get(self.cfg_key, {}) or {})
         self._tasks = list(cfg.get("tasks") or [{"kind": "logs", "count": 9999}])
+        self._repeat = bool(cfg.get("repeat", False))   # loop the plan forever?
         self._task_i = 0
 
     def reset(self) -> None:
@@ -714,6 +715,10 @@ class PlannerAgent(TreeChopAgent):
         self._task_i += 1
         if self._task_i < len(self._tasks):
             self._build()                                 # next task -> fresh FSM
+        elif self._repeat:
+            print(f"[planner] plan complete — repeating ({len(self._tasks)} tasks)")
+            self._task_i = 0
+            self._build()                                 # loop for unattended runs
         else:
             print(f"[planner] plan complete ({len(self._tasks)} tasks)")
 
