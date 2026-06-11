@@ -234,6 +234,43 @@ def test_sequence_and_query(cat):
     (ok if res2 is None else bad)("no match -> None")
 
 
+def test_walk_toward():
+    print("\n[10] WalkToward (reactive approach)")
+    from agents.skills import WalkToward, norm_angle
+    tgt = (5, 64, 0)
+    # Facing +X means yaw = atan2(-(5),0) = -90.
+    pose = _pose(x=0.0, z=0.0, yaw=-90.0)
+    sk = WalkToward(tgt, arrive_dist=1.6)
+    status = None
+    for _ in range(60):
+        r = sk.tick(SkillContext(pose=pose, px_per_deg=6.5))
+        status = r.status
+        if status in (SkillStatus.DONE, SkillStatus.FAILED):
+            break
+        # Simulate the camera turning from look_dx (like the live game).
+        pose.yaw = norm_angle(pose.yaw + r.action.look_dx / 6.5)
+        if r.action.movement.get("forward"):
+            pose.x += 0.6              # advanced toward target
+    (ok if status == SkillStatus.DONE else bad)(f"faces + walks to arrive -> {status}")
+
+    # Stuck: facing but never advances -> FAILED.
+    pose2 = _pose(x=0.0, z=0.0, yaw=-90.0)
+    sk2 = WalkToward(tgt, stuck_window=8)
+    st = None
+    for _ in range(40):
+        st = sk2.tick(SkillContext(pose=pose2)).status
+        if st in (SkillStatus.DONE, SkillStatus.FAILED):
+            break
+    (ok if st == SkillStatus.FAILED else bad)(f"no progress -> {st}")
+
+    # Edge ahead: known air below the next step -> FAILED.
+    wm = _FakeMap(); wm.set((1, 63, 0), "minecraft:air")
+    pose3 = _pose(x=0.0, z=0.0, yaw=-90.0)
+    r = WalkToward(tgt).tick(SkillContext(pose=pose3, world_map=wm))
+    (ok if r.status == SkillStatus.FAILED and "edge" in r.info else bad)(
+        f"known drop ahead -> {r.status} ({r.info})")
+
+
 def test_chop_trunk():
     print("\n[9] ChopTrunk chains up a multi-log trunk")
     from agents.skills import ChopTrunk, aim_angles
@@ -284,6 +321,7 @@ def main() -> int:
     test_pillar_up(cat)
     test_bridge(cat)
     test_sequence_and_query(cat)
+    test_walk_toward()
     test_chop_trunk()
     print("\n" + ("ALL SKILL TESTS PASSED" if not _fails
                   else f"{_fails} CHECK(S) FAILED"))

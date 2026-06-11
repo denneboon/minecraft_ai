@@ -421,6 +421,87 @@ class Bridge(Skill):
             f"{'safe-' if self.keep_sneak else 'god-'}bridge {self._placed+1}/{self.length}")
 
 
+class WalkToward(Skill):
+    """Reactive 'approach a target voxel' locomotion: face the target
+    (yaw), then hold forward until within ``arrive_dist`` horizontally.
+    DONE on arrival; FAILED if no forward progress for a while (stuck), or
+    if the next step would walk off a KNOWN edge (the block it would step
+    onto is air in the WorldMap — basic fall avoidance).
+
+    Robust for short approaches on roughly-flat ground without needing a
+    pre-built A* path (the A* WalkerController is for complex routing).
+    The locomotion-planner layer adds jump-over / pillar-out / mine-through
+    on top of this primitive."""
+    name = "walk_toward"
+
+    def __init__(self, target: Voxel, arrive_dist: float = 1.6,
+                 face_tol_deg: float = 14.0, stuck_window: int = 18,
+                 min_progress: float = 0.12, avoid_fall: bool = True):
+        self.target = tuple(target)
+        self.arrive_dist = arrive_dist
+        self.face_tol = face_tol_deg
+        self.stuck_window = stuck_window
+        self.min_progress = min_progress
+        self.avoid_fall = avoid_fall
+        self.aim = _Aimer(tol_deg=face_tol_deg)
+        self.reset()
+
+    def reset(self):
+        self._best_d = None
+        self._stuck = 0
+
+    def _edge_ahead(self, ctx: SkillContext, px, py, pz, tx, tz) -> bool:
+        """True if the block we'd step onto next (toward the target) is a
+        KNOWN air block (a drop). Unknown ground -> not an edge (proceed)."""
+        wm = ctx.world_map
+        if wm is None or not self.avoid_fall:
+            return False
+        sx = (1 if tx > px else -1) if abs(tx - px) >= abs(tz - pz) else 0
+        sz = 0 if sx != 0 else (1 if tz > pz else -1)
+        foot = int(math.floor(py))
+        ground = (int(math.floor(px)) + sx, foot - 1, int(math.floor(pz)) + sz)
+        try:
+            obs = wm.get_block(ground, dimension=ctx.dimension)
+        except TypeError:
+            obs = wm.get_block(ground)
+        return obs is not None and obs.block_id == AIR_BLOCK
+
+    def tick(self, ctx: SkillContext) -> SkillResult:
+        p = ctx.pose
+        if p is None:
+            return SkillResult(AgentAction(), SkillStatus.BLOCKED, "no pose")
+        px, pz = float(p.x), float(p.z)
+        tx, tz = self.target[0] + 0.5, self.target[2] + 0.5
+        dx, dz = tx - px, tz - pz
+        dist = math.hypot(dx, dz)
+        if dist <= self.arrive_dist:
+            return SkillResult(AgentAction(movement={"forward": False}),
+                               SkillStatus.DONE, f"arrived (d={dist:.1f})")
+        # Progress / stuck tracking.
+        if self._best_d is None or dist < self._best_d - self.min_progress:
+            self._best_d = dist
+            self._stuck = 0
+        else:
+            self._stuck += 1
+        if self._stuck > self.stuck_window:
+            return SkillResult(AgentAction(movement={"forward": False}),
+                               SkillStatus.FAILED, f"stuck (d={dist:.1f})")
+        if self._edge_ahead(ctx, px, float(p.y), pz, tx, tz):
+            return SkillResult(AgentAction(movement={"forward": False}),
+                               SkillStatus.FAILED, "edge ahead (would fall)")
+        # Face the target (yaw); keep pitch ~level for walking.
+        want_yaw = math.degrees(math.atan2(-(tx - px), (tz - pz)))
+        ddx, ddy, facing = self.aim.step(ctx, want_yaw, 0.0)
+        if not facing:
+            # Turn in place first; don't walk off-course.
+            return SkillResult(AgentAction(look_dx=ddx, look_dy=ddy,
+                                           movement={"forward": False}),
+                               SkillStatus.RUNNING, f"facing (d={dist:.1f})")
+        # Facing -> walk forward, nudging yaw to stay on course.
+        return SkillResult(AgentAction(movement={"forward": True}, look_dx=ddx),
+                           SkillStatus.RUNNING, f"walking (d={dist:.1f})")
+
+
 class ChopTrunk(Skill):
     """Chop a vertical run of logs IN PLACE (no walking): mine the start
     voxel, look up to the block above, and if it's still a log, mine that
@@ -554,12 +635,12 @@ def find_nearest_block(world_map, origin, match, *, max_radius: int = 48,
 # Registry of the currently-implemented skills (name -> class). The task
 # layer / a future planner can look skills up by name.
 SKILLS = {s.name: s for s in (SelectRole, LookAtVoxel, Eat, MineBlock,
-                              PillarUp, Bridge, ChopTrunk, SkillSequence)}
+                              PillarUp, Bridge, WalkToward, ChopTrunk, SkillSequence)}
 
 
 __all__ = [
     "SkillStatus", "SkillResult", "SkillContext", "Skill",
     "SelectRole", "LookAtVoxel", "Eat", "MineBlock", "PillarUp", "Bridge",
-    "ChopTrunk", "SkillSequence", "find_nearest_block",
+    "WalkToward", "ChopTrunk", "SkillSequence", "find_nearest_block",
     "aim_angles", "norm_angle", "SKILLS",
 ]
