@@ -71,16 +71,17 @@ def main() -> int:
     _cat = Catalog.load(MCAssets.load())
     log_ids = {b.id for b in _cat.blocks_in_tag("logs")}
     leaf_ids = {b.id for b in _cat.blocks_in_tag("leaves")}
+    _LOGSUF = ("_log", "_wood", "_stem", "_hyphae")
+    def is_log(bid):         # species-agnostic: birch == oak == spruce …
+        return bool(bid) and (bid in log_ids or str(bid).endswith(_LOGSUF))
     def is_breakable(bid):   # tree-chopping breaks ONLY logs + leaves
-        return bool(bid) and (bid in log_ids or bid in leaf_ids
-                              or str(bid).endswith("_log") or str(bid).endswith("_leaves"))
+        return bool(bid) and (is_log(bid) or bid in leaf_ids
+                              or str(bid).endswith("_leaves"))
     # Config-trusting hotbar (no inventory read needed): mining selects the
     # reserved axe slot from settings.yaml (hotbar.slot_roles).
     hotbar = build_hotbar_manager(settings, catalog=_cat)
     print(f"[chop] hotbar: axe slot {hotbar.assigned_slot('axe')}, "
           f"blocks slot {hotbar.assigned_slot('blocks')}")
-    def is_log(bid):
-        return bool(bid) and (bid in log_ids or str(bid).endswith("_log"))
     time.sleep(0.3)
 
     attack = [False]; use_held = [False]

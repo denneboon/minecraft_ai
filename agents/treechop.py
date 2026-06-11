@@ -35,8 +35,15 @@ from agents.skills import (
 from vision.world.map import AIR_BLOCK
 
 
+# Every wood/log variant across all species — bark logs (_log), 6-sided
+# wood (_wood), nether stems (_stem) and hyphae (_hyphae), plus their
+# stripped forms (which still end in those). Species-agnostic on purpose:
+# birch_log, oak_log, spruce_log, … all match identically.
+_LOG_SUFFIXES = ("_log", "_wood", "_stem", "_hyphae")
+
+
 def _is_log_default(bid: str) -> bool:
-    return bool(bid) and (str(bid).endswith("_log") or str(bid).endswith("_stem"))
+    return bool(bid) and str(bid).endswith(_LOG_SUFFIXES)
 
 
 _MOVE_KEYS = ("forward", "backward", "left", "right", "jump", "sprint", "sneak")
@@ -392,10 +399,11 @@ class TreeChopAgent(BaseAgent):
         cat = Catalog.load(MCAssets.load())
         log_ids = {b.id for b in cat.blocks_in_tag("logs")}
         leaf_ids = {b.id for b in cat.blocks_in_tag("leaves")}
-        is_log = lambda b: bool(b) and (b in log_ids or str(b).endswith("_log"))
+        # Species-agnostic: any log/wood variant (tag OR suffix) — so birch,
+        # oak, spruce, … are all treated identically.
+        is_log = lambda b: bool(b) and (b in log_ids or str(b).endswith(_LOG_SUFFIXES))
         is_breakable = lambda b: bool(b) and (
-            b in log_ids or b in leaf_ids
-            or str(b).endswith("_log") or str(b).endswith("_leaves"))
+            is_log(b) or b in leaf_ids or str(b).endswith("_leaves"))
         self._hotbar = build_hotbar_manager(self._settings, catalog=cat)
         self._fsm = FindAndChopLogs(is_log=is_log, is_breakable=is_breakable,
                                     tool_role="axe", max_logs=self._max_logs)
