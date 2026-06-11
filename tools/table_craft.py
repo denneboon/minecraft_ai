@@ -36,7 +36,7 @@ from control.hotbar import build_hotbar_manager
 from control.inventory_control import InventoryController
 from agents.crafting import Crafter, find_item_slot
 from agents.skills import (PlaceBlock, BreakLookedAt, LookAtVoxel,
-                           SkillContext, SkillStatus)
+                           SkillContext, SkillStatus, norm_angle)
 from vision.world.f3_target import targeted_block_pos
 from agents.treechop import _full_movement
 from knowledge.catalog import Catalog
@@ -139,12 +139,17 @@ def main(argv=None) -> int:
             r = skill.tick(ctx)
             _dispatch(r.action)
             n += 1
-            if debug and n % 8 == 0:
+            if debug and n % 5 == 0:
                 la = wf.looking_at
-                print(f"[table]  .{label} t={n} pitch={getattr(pose,'pitch',None)} "
+                try:
+                    menu = menu_detector.detect(frame)
+                except Exception as e:
+                    menu = f"<{e}>"
+                print(f"[table]  .{label} t={n} "
+                      f"yaw={getattr(pose,'yaw',None)} pitch={getattr(pose,'pitch',None)} "
                       f"look=({r.action.look_dx},{r.action.look_dy}) "
-                      f"at={getattr(la,'block_id',None)} face={getattr(la,'face',None)} "
-                      f"| {r.status.value}: {r.info}")
+                      f"at={getattr(la,'block_id',None)} tpos={tpos} "
+                      f"menu={menu} | {r.status.value}: {r.info}")
             if r.status in (SkillStatus.DONE, SkillStatus.FAILED, SkillStatus.BLOCKED):
                 _stop()
                 print(f"[table] {label}: {r.status.value} ({r.info})")
@@ -195,9 +200,34 @@ def main(argv=None) -> int:
             print(f"[table] crafting_table in hotbar slot {table_slot}")
         ctl.close(); time.sleep(0.3)
 
+        def _pose_now():
+            fr = capture.get_frame()
+            return wp.update(fr, f3.read(fr)).pose
+
         def _looking():
             fr = capture.get_frame()
             return wp.update(fr, f3.read(fr)).looking_at
+
+        def _ensure_camera_live(tries=4):
+            """After an inventory screen, MC sometimes hasn't re-grabbed the
+            mouse (or the close didn't register), so the view is FROZEN and
+            track_target can't aim. Nudge the camera and confirm the pose
+            actually moves; if it's stuck, tap escape (close a lingering GUI)
+            and retry. Returns True once the camera responds."""
+            for _ in range(tries):
+                p0 = _pose_now(); y0 = getattr(p0, "yaw", None)
+                mouse.track_target(90, 0); time.sleep(0.30)
+                p1 = _pose_now(); y1 = getattr(p1, "yaw", None)
+                if y0 is not None and y1 is not None \
+                        and abs(norm_angle(float(y1) - float(y0))) > 1.0:
+                    mouse.track_target(-90, 0); time.sleep(0.15)   # undo nudge
+                    return True
+                kb.tap("escape"); time.sleep(0.35)                 # close stuck GUI
+            return False
+
+        if not _ensure_camera_live():
+            print("[table] camera won't respond — a menu may be stuck open; "
+                  "click into Minecraft"); return 1
 
         # 2. Place the table. PlaceBlock now SCANS look directions for a
         # placeable surface, places, and self-VERIFIES the block appeared under
