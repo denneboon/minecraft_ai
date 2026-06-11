@@ -58,7 +58,7 @@ class InventoryController:
         self._rects = None                 # slot_name -> SlotRect (last read)
 
     # ── perception ───────────────────────────────────────────────────
-    def read(self, *, stop_when=None):
+    def read(self, *, stop_when=None, include_empty=False):
         """Capture a frame, parse the open container -> InventorySnapshot,
         cache the slot rects, and (if an inspector is wired) hover-resolve
         items the recogniser couldn't confidently identify.
@@ -82,7 +82,7 @@ class InventoryController:
             try:
                 res = self._inspector.resolve_unknowns(
                     snap, window_origin=self._origin, pre_hover_frame=frame,
-                    stop_when=stop_when)
+                    stop_when=stop_when, include_empty=include_empty)
                 if res:
                     print(f"[inv] hovered {len(res)} slot(s) to identify "
                           + ", ".join(sorted(v.item_id.split(':')[-1]

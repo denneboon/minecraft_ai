@@ -181,7 +181,11 @@ def main(argv=None) -> int:
             prev_gate = inspector.cfg.skip_above_confidence
             inspector.cfg.skip_above_confidence = 1.01     # hover everything
             try:
-                snap = ctl.read(stop_when=_has_table)
+                # include_empty: the EmptySlotDetector false-empties the iso
+                # crafting-table icon, so the table's slot is skipped by the
+                # normal resolver — hover even "empty" slots to rescue it (the
+                # hover also TEACHES the recogniser so next run reads it static).
+                snap = ctl.read(stop_when=_has_table, include_empty=True)
             finally:
                 inspector.cfg.skip_above_confidence = prev_gate
             tname = find_item_slot(snap, TABLE)

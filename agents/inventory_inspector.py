@@ -219,6 +219,7 @@ class InventoryInspector:
                          restore_cursor: bool = True,
                          pre_hover_frame: Optional[np.ndarray] = None,
                          stop_when=None,
+                         include_empty: bool = False,
                          ) -> Dict[str, InspectionResult]:
         """
         Hover over every slot the recogniser is unsure about and update
@@ -263,10 +264,13 @@ class InventoryInspector:
                     break
                 content = snap.slots.get(name)
                 # Skip truly empty slots and slots already identified
-                # confidently.
+                # confidently. ``include_empty`` overrides the empty skip: the
+                # EmptySlotDetector occasionally false-empties a real icon (the
+                # iso crafting-table reads as empty), so a targeted search can
+                # ask to hover even "empty" slots to rescue/learn them.
                 if content is None:
                     continue
-                if content.is_empty:
+                if content.is_empty and not include_empty:
                     continue
                 if (content.item is not None
                         and content.confidence >= self.cfg.skip_above_confidence):
