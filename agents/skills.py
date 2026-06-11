@@ -224,11 +224,13 @@ class _Aimer:
     Returns (look_dx, look_dy, aimed?) for a target angle pair."""
 
     def __init__(self, tol_deg: float = 2.0, gain: float = 0.6,
-                 max_px: int = 140):
+                 max_px: int = 140, stuck_limit: int = 6):
         self.tol = tol_deg
         self.gain = gain
         self.max_px = max_px
+        self.stuck_limit = stuck_limit  # waits before forcing a re-issue
         self._last_pose = None        # (yaw,pitch) we last issued a move at
+        self._stuck = 0               # consecutive ticks the pose hasn't moved
 
     def step(self, ctx: SkillContext, want_yaw: float, want_pitch: float
              ) -> Tuple[int, int, bool]:
@@ -239,6 +241,7 @@ class _Aimer:
         aimed = abs(yaw_err) <= self.tol and abs(pitch_err) <= self.tol
         if aimed:
             self._last_pose = None        # no correction pending
+            self._stuck = 0
             return 0, 0, True
         # Stale-pose guard. Pose feedback (F3 OCR, a few Hz) lags the
         # control tick (~12-20 Hz). After we ISSUE a camera correction, the
@@ -248,8 +251,20 @@ class _Aimer:
         # issued a move, wait until the pose actually changes before issuing
         # the next. (Only set when we issue a non-zero look — a stationary
         # pose while merely walking must NOT block the next turn.)
+        #
+        # ESCAPE HATCH: if the pose hasn't budged after ``stuck_limit`` waits,
+        # the camera input isn't landing (a transient raw-input desync — seen
+        # after a use_item right-click freezes the view) or the frame is stale.
+        # Re-ISSUE the correction instead of waiting forever; a fresh
+        # track_target re-engages MC's raw-input listener and unsticks the aim.
         if self._last_pose is not None and cur == self._last_pose:
-            return 0, 0, False
+            self._stuck += 1
+            if self._stuck < self.stuck_limit:
+                return 0, 0, False
+            # fall through to re-issue the move (don't reset _last_pose: we're
+            # still at the same pose, so the next no-change tick keeps counting)
+        else:
+            self._stuck = 0
         self._last_pose = cur
         ppd = max(0.5, float(ctx.px_per_deg))
         dx = int(max(-self.max_px, min(self.max_px, yaw_err * ppd * self.gain)))
