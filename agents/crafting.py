@@ -79,10 +79,12 @@ class Crafter:
         step = plan_step(target_id, avail, self.assets, self.cat)
         if step is None:
             return False, f"can't craft {target_id.split(':')[-1]} from inventory"
-        if step.needs_table:
+        # 3x3 grid when operating an open crafting table; 2x2 in the
+        # inventory. A table recipe in the inventory grid is refused.
+        width = 3 if getattr(self.ctl, "container", "") == "crafting_table" else 2
+        if step.needs_table and width < 3:
             return False, f"{target_id.split(':')[-1]} needs a 3x3 crafting table"
 
-        width = 2
         # Group the grid cells by the concrete item each needs.
         by_item: Dict[str, List[str]] = {}
         for (rc, item) in step.cell_items.items():

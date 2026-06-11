@@ -73,7 +73,7 @@ def main() -> int:
     print("\n[3] PlaceBlock skill")
     (ok if "place_block" in SKILLS and "break_looked_at" in SKILLS else bad)(
         "skills registered")
-    pb = PlaceBlock("blocks")
+    pb = PlaceBlock("blocks", target_pitch=56.0)     # match the test pose pitch
     ctx = SkillContext(pose=_pose(), looking_at=_la((0, 63, 1), "up"),
                        world_map=_wm(), hotbar=_hotbar({"blocks": 5}), px_per_deg=6.5)
     r = pb.tick(ctx)

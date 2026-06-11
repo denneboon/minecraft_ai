@@ -155,24 +155,39 @@ def placement_voxel(looking_at) -> Optional[Voxel]:
 
 
 def can_place_block(pose, looking_at, world_map=None, dimension=None,
-                    max_reach: float = PLAYER_REACH) -> Optional[Voxel]:
+                    max_reach: float = PLAYER_REACH,
+                    assume_face: Optional[str] = None) -> Optional[Voxel]:
     """Decide whether placing a block is possible RIGHT NOW, returning the
     voxel it would occupy, or None. A placement is valid when the targeted
     block AND the resulting voxel are within reach, the voxel isn't inside the
     player's own body (MC forbids it), and the voxel isn't already a known
     solid block. This is the "is placing possible" check the placer scans
-    around to satisfy."""
-    place = placement_voxel(looking_at)
-    if place is None:
+    around to satisfy.
+
+    ``assume_face`` is used when F3 doesn't report the targeted face (it
+    often doesn't): a downward-looking placer can assume "up" (placing on a
+    block's top), which is correct for putting something on the ground."""
+    if pose is None or looking_at is None:
         return None
-    if pose is None:
+    tgt = getattr(looking_at, "pos", None)
+    if tgt is None:
         return None
-    tgt = looking_at.pos
+    face = getattr(looking_at, "face", None) or assume_face
+    if face not in _FACE_NORMAL:
+        return None
+    n = _FACE_NORMAL[face]
+    place = (tgt[0] + n[0], tgt[1] + n[1], tgt[2] + n[2])
     if not block_in_reach(pose, tgt, max_reach):     # block too far
         return None
     if not block_in_reach(pose, place, max_reach):   # resulting voxel too far
         return None
     if place in _player_voxels(pose):                # would be inside us
+        return None
+    # Must be clearly IN FRONT, not hugging the player — MC rejects a
+    # placement whose box intersects the player hitbox, so a spot < ~1 block
+    # away horizontally tends to silently fail.
+    hd = math.hypot((place[0] + 0.5) - pose.x, (place[2] + 0.5) - pose.z)
+    if hd < 1.0:
         return None
     if world_map is not None:                        # already occupied?
         try:
@@ -982,12 +997,13 @@ class PlaceBlock(Skill):
     name = "place_block"
 
     def __init__(self, tool_role: str = "blocks", *, slot: Optional[int] = None,
-                 target_pitch: float = 56.0,
+                 target_pitch: float = 42.0, yaw_off0: float = 0.0,
                  max_ticks: int = 90, max_scans: int = 9,
                  max_reach: float = PLAYER_REACH, tol_deg: float = 5.0):
         self.tool_role = tool_role
         self.slot = slot                 # explicit hotbar slot 1-9, overrides role
         self.target_pitch = target_pitch
+        self.yaw_off0 = yaw_off0         # initial yaw offset (vary across retries)
         self.max_ticks = max_ticks
         self.max_scans = max_scans
         self.max_reach = max_reach
@@ -997,7 +1013,8 @@ class PlaceBlock(Skill):
     def reset(self):
         self._t = 0
         self._scan = 0
-        self._yaw_off = 0.0
+        self._yaw_off = float(self.yaw_off0)
+        self._base_yaw = None        # fixed reference so scans don't chase
         self._selected = False
         self._aimed_count = 0
         self._aimer = _Aimer(tol_deg=self._tol)
@@ -1021,8 +1038,12 @@ class PlaceBlock(Skill):
             self._selected = True
             return SkillResult(AgentAction(hotbar=int(slot)), SkillStatus.RUNNING,
                                f"place: select slot {slot}")
-        # 2. aim down at the ground (plus the current scan yaw offset)
-        want_yaw = float(pose.yaw) + self._yaw_off
+        # 2. aim down at the ground. Anchor the yaw to the STARTING yaw so a
+        # scan offset is a fixed target (recomputing from the live yaw each
+        # tick makes the target run away as we turn).
+        if self._base_yaw is None:
+            self._base_yaw = float(pose.yaw)
+        want_yaw = self._base_yaw + self._yaw_off
         dx, dy, aimed = self._aimer.step(ctx, want_yaw, self.target_pitch)
         if not aimed:
             self._aimed_count = 0
@@ -1032,9 +1053,10 @@ class PlaceBlock(Skill):
         self._aimed_count += 1
         if self._aimed_count < 3:
             return SkillResult(AgentAction(), SkillStatus.RUNNING, "place: settling")
-        # 3. is placing possible from here?
+        # 3. is placing possible from here? (looking down -> top-face place)
         place = can_place_block(pose, ctx.looking_at, ctx.world_map,
-                                getattr(pose, "dimension", None), self.max_reach)
+                                getattr(pose, "dimension", None), self.max_reach,
+                                assume_face="up")
         if place is not None:
             self.placed_at = place
             return SkillResult(AgentAction(interact="use_item"),
