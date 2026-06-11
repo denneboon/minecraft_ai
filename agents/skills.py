@@ -259,11 +259,13 @@ class MineBlock(Skill):
         self._tool_ok = tool_role is None
         self._mining_ticks = 0
         self._saw_target = False       # has the crosshair confirmed THIS voxel?
+        self._await_ticks = 0          # consecutive aimed-but-F3-silent ticks
 
     def reset(self):
         self._tool_ok = self.tool_role is None
         self._mining_ticks = 0
         self._saw_target = False
+        self._await_ticks = 0
 
     def _is_gone(self, ctx: SkillContext) -> bool:
         wm = ctx.world_map
@@ -315,7 +317,9 @@ class MineBlock(Skill):
             return SkillResult(AgentAction(interact="attack"), SkillStatus.RUNNING, info)
 
         # F3 has a definite block under the crosshair.
+        safe = None
         if la_id is not None:
+            self._await_ticks = 0
             safe = (self.is_safe is None or self.is_safe(la_id))
             if safe:
                 # Target log, or a leaf on the line to it -> mine NOW, holding
@@ -325,8 +329,9 @@ class MineBlock(Skill):
                 # Our chosen target is NOT breakable (mislabelled) -> abandon.
                 return SkillResult(AgentAction(), SkillStatus.FAILED,
                                    f"target is {la_id}, not breakable — abandon")
-            # else: pointed at a non-breakable block that isn't the target ->
-            # fall through and re-aim toward the target voxel.
+            # Non-breakable but not the exact target voxel — keep aiming (the
+            # crosshair may just be sweeping over it en route); but if we're
+            # already settled on it, we bail below.
 
         # Acquire: aim the crosshair toward the target voxel.
         eye = _eye(ctx.pose)
@@ -336,13 +341,18 @@ class MineBlock(Skill):
         if not aimed:
             return SkillResult(AgentAction(look_dx=dx, look_dy=dy),
                                SkillStatus.RUNNING, "aiming at block")
-        # Geometrically aimed but F3 hasn't confirmed a block yet — hold still
-        # and let the (few-Hz) targeted-block read catch up rather than
-        # swinging blind. Counts toward the timeout so it can't hang.
-        self._mining_ticks += 1
-        if self._mining_ticks > self.max_ticks:
+        # Crosshair has SETTLED. If F3 says it's on a non-breakable block
+        # (e.g. dirt the map mislabelled as a log), the target log isn't
+        # actually there — abandon instead of staring at it.
+        if safe is False:
             return SkillResult(AgentAction(), SkillStatus.FAILED,
-                               "timed out (no target confirmed)")
+                               f"aimed at {la_id}, not a log — abandon")
+        # Aimed, F3 silent (sky / unreadable) — wait briefly (bounded) for the
+        # few-Hz targeted-block read; give up fast rather than hanging.
+        self._await_ticks += 1
+        if self._await_ticks > 12:
+            return SkillResult(AgentAction(), SkillStatus.FAILED,
+                               "aimed but F3 never confirmed a block — abandon")
         return SkillResult(AgentAction(), SkillStatus.RUNNING, "aimed; awaiting F3 confirm")
 
 

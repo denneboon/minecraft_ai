@@ -213,6 +213,27 @@ def test_mine_block(cat):
     saw = any(sks2.tick(ctxs).action.interact == "attack" for _ in range(4))
     (ok if saw else bad)("attacks when the confirmed block IS breakable")
 
+    # Settled (aimed) but F3 says DIRT (mislabelled target) -> abandon, don't
+    # stare at it. (dirt voxel differs from the target voxel.)
+    wmd = _FakeMap(); wmd.set(vox, "minecraft:oak_log")
+    skd = MineBlock(vox, tool_role=None,
+                    is_safe=lambda b: bool(b) and str(b).endswith("_log"))
+    ctxd = SkillContext(pose=_pose(yaw=yaw, pitch=pitch), world_map=wmd,
+                        looking_at=SimpleNamespace(pos=(vox[0], vox[1] - 1, vox[2]),
+                                                   block_id="minecraft:dirt"))
+    rd = skd.tick(ctxd)
+    (ok if rd.status == SkillStatus.FAILED and "not a log" in rd.info else bad)(
+        f"aimed but F3 says dirt -> abandon ({rd.info})")
+
+    # Aimed but F3 silent (no targeted block) -> bounded wait, then abandon.
+    sk5 = MineBlock(vox, tool_role=None, max_ticks=500)
+    ctx5 = SkillContext(pose=_pose(yaw=yaw, pitch=pitch), world_map=_FakeMap())
+    st = SkillStatus.RUNNING
+    for _ in range(20):
+        st = sk5.tick(ctx5).status
+        if st in (SkillStatus.DONE, SkillStatus.FAILED): break
+    (ok if st == SkillStatus.FAILED else bad)(f"aimed + F3 silent -> bounded abandon ({st})")
+
 
 def test_pillar_up(cat):
     print("\n[6] PillarUp")
