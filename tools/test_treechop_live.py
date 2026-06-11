@@ -70,6 +70,10 @@ def main() -> int:
     from control.hotbar import build_hotbar_manager
     _cat = Catalog.load(MCAssets.load())
     log_ids = {b.id for b in _cat.blocks_in_tag("logs")}
+    leaf_ids = {b.id for b in _cat.blocks_in_tag("leaves")}
+    def is_breakable(bid):   # tree-chopping breaks ONLY logs + leaves
+        return bool(bid) and (bid in log_ids or bid in leaf_ids
+                              or str(bid).endswith("_log") or str(bid).endswith("_leaves"))
     # Config-trusting hotbar (no inventory read needed): mining selects the
     # reserved axe slot from settings.yaml (hotbar.slot_roles).
     hotbar = build_hotbar_manager(settings, catalog=_cat)
@@ -106,7 +110,7 @@ def main() -> int:
             mouse.left_release(); attack[0] = False
 
     fsm = FindAndChopLogs(is_log=is_log, reach=3.5, max_logs=args.logs,
-                          tool_role="axe")
+                          tool_role="axe", is_breakable=is_breakable)
     print(f"[chop] FindAndChopLogs — target {args.logs} log(s). Walks + mines "
           f"logs only. Panic: Ctrl+Shift+X.")
     status = SkillStatus.RUNNING

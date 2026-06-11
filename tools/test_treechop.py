@@ -110,16 +110,27 @@ def main() -> int:
     (ok if fsm._state == "find" and (5, 64, 0) in fsm._blacklist else bad)(
         f"2nd stuck -> give up + blacklist (state={fsm._state})")
 
-    # Wall ahead -> mine-through (not pillar-out).
+    # LEAVES ahead -> mine-through (tree material is OK to break).
     wm = _map_with_log((5, 64, 0))
-    wm.update_block(BlockObservation(pos=(1, 64, 0), block_id="minecraft:stone",
+    wm.update_block(BlockObservation(pos=(1, 64, 0), block_id="minecraft:oak_leaves",
                                      confidence=1.0, source="looking_at", last_seen_tick=0))
     fsm = FindAndChopLogs(reach=3.5)
     fsm._state = "approach"; fsm._target = (5, 64, 0); fsm._recovered = False
     fsm._sub = _Stuck()
     fsm.tick(SkillContext(pose=_pose(), world_map=wm))
     (ok if fsm._state == "recover" and isinstance(fsm._sub, MineBlock) else bad)(
-        f"stuck + wall ahead -> mine-through recover ({type(fsm._sub).__name__})")
+        f"stuck + leaves ahead -> mine-through ({type(fsm._sub).__name__})")
+
+    # STONE/terrain ahead -> NOT mined; pillar OVER it instead.
+    wm2 = _map_with_log((5, 64, 0))
+    wm2.update_block(BlockObservation(pos=(1, 64, 0), block_id="minecraft:stone",
+                                      confidence=1.0, source="looking_at", last_seen_tick=0))
+    fsm = FindAndChopLogs(reach=3.5)
+    fsm._state = "approach"; fsm._target = (5, 64, 0); fsm._recovered = False
+    fsm._sub = _Stuck()
+    fsm.tick(SkillContext(pose=_pose(), world_map=wm2))
+    (ok if fsm._state == "recover" and isinstance(fsm._sub, PillarUp) else bad)(
+        f"stuck + STONE ahead -> pillar OVER, never mined ({type(fsm._sub).__name__})")
 
     # 7. Exploration: no nearby log -> walk to a new area; log appearing
     #    mid-explore -> find; bounded by max_explore.

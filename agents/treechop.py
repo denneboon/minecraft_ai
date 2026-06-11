@@ -45,8 +45,13 @@ class FindAndChopLogs:
                  scan_budget: int = 60, max_logs: int = 9999,
                  tool_role: Optional[str] = "axe",
                  explore_dist: float = 8.0, max_explore: int = 10,
-                 explore_turn: float = 65.0):
+                 explore_turn: float = 65.0, is_breakable=None):
         self.is_log = is_log or _is_log_default
+        # The ONLY blocks tree-chopping may ever break: logs + leaves. The
+        # path-clearing recovery (mine-through) is restricted to these, so
+        # the bot never mines terrain or a player's build to reach a tree.
+        self.is_breakable = is_breakable or (
+            lambda b: self.is_log(b) or (bool(b) and str(b).endswith("_leaves")))
         self.reach = reach
         self.max_radius = max_radius
         self.scan_budget = scan_budget
@@ -74,9 +79,11 @@ class FindAndChopLogs:
                 int(math.floor(pose.z)))
 
     def _obstacle_ahead(self, ctx):
-        """The voxel of a KNOWN solid block directly ahead (foot or head
-        level, toward the target) that's blocking the path, or None. Lets
-        the recover logic MINE THROUGH a wall instead of pillaring."""
+        """The voxel of a KNOWN, BREAKABLE (leaf/log) block directly ahead
+        (foot or head level, toward the target) that's blocking the path,
+        or None. Only leaves/logs qualify — the bot mines THROUGH tree
+        material to reach a trunk, but never through terrain or builds (it
+        pillars over those instead)."""
         p, wm = ctx.pose, ctx.world_map
         if wm is None or self._target is None:
             return None
@@ -92,7 +99,8 @@ class FindAndChopLogs:
                 obs = wm.get_block(v, dimension=ctx.dimension)
             except TypeError:
                 obs = wm.get_block(v)
-            if obs is not None and obs.block_id not in (AIR_BLOCK, None):
+            bid = getattr(obs, "block_id", None)
+            if bid not in (AIR_BLOCK, None) and self.is_breakable(bid):
                 return v
         return None
 
