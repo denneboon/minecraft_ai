@@ -177,8 +177,8 @@ def main(argv=None) -> int:
         # different direction each time.
         table_pos = None
         for attempt in range(4):
-            pb = PlaceBlock(slot=table_slot, target_pitch=42.0,
-                            yaw_off0=attempt * 45.0)
+            pb = PlaceBlock(slot=table_slot, target_pitch=52.0,
+                            yaw_off0=attempt * 50.0)
             if drive(pb, f"place#{attempt}") != SkillStatus.DONE or pb.placed_at is None:
                 continue
             time.sleep(0.45)
