@@ -141,15 +141,11 @@ def main(argv=None) -> int:
             n += 1
             if debug and n % 5 == 0:
                 la = wf.looking_at
-                try:
-                    menu = menu_detector.detect(frame)
-                except Exception as e:
-                    menu = f"<{e}>"
                 print(f"[table]  .{label} t={n} "
                       f"yaw={getattr(pose,'yaw',None)} pitch={getattr(pose,'pitch',None)} "
                       f"look=({r.action.look_dx},{r.action.look_dy}) "
                       f"at={getattr(la,'block_id',None)} tpos={tpos} "
-                      f"menu={menu} | {r.status.value}: {r.info}")
+                      f"| {r.status.value}: {r.info}")
             if r.status in (SkillStatus.DONE, SkillStatus.FAILED, SkillStatus.BLOCKED):
                 _stop()
                 print(f"[table] {label}: {r.status.value} ({r.info})")
@@ -171,14 +167,17 @@ def main(argv=None) -> int:
                                   inspector=inspector)
         ctl.open_inventory()
         _has_table = lambda s: find_item_slot(s, TABLE) is not None
-        snap = ctl.read(stop_when=_has_table)
-        tname = find_item_slot(snap, TABLE)
-        if tname is None:
-            # The static recogniser can mislabel a freshly-crafted table with
-            # high confidence, so the surgical hover (which skips confident
-            # slots) never checks it. Fallback: re-read hovering EVERY non-empty
-            # slot until the table surfaces (stops as soon as it's found).
-            print("[table] table not found on the quick read — hover-scanning")
+        # The static read of the hotbar is flaky (recognises the table icon
+        # only intermittently), so retry — each attempt does a quick static
+        # read, then a hover-scan that lifts the confidence gate so even a
+        # confidently-MISLABELLED slot gets checked by tooltip OCR.
+        snap = None; tname = None
+        for attempt in range(3):
+            snap = ctl.read(stop_when=_has_table)
+            tname = find_item_slot(snap, TABLE)
+            if tname is not None:
+                break
+            print(f"[table] table not found (attempt {attempt+1}/3) — hover-scanning")
             prev_gate = inspector.cfg.skip_above_confidence
             inspector.cfg.skip_above_confidence = 1.01     # hover everything
             try:
@@ -186,6 +185,9 @@ def main(argv=None) -> int:
             finally:
                 inspector.cfg.skip_above_confidence = prev_gate
             tname = find_item_slot(snap, TABLE)
+            if tname is not None:
+                break
+            time.sleep(0.4)
         if tname is None:
             ctl.close()
             print("[table] no crafting_table in inventory — craft one first "
