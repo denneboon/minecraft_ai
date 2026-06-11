@@ -2,14 +2,20 @@
 """
 Overnight self-teaching trainer for the world block recogniser.
 
-Runs the self-teaching loop CONTINUOUSLY for hours, camera-only (relative
-mouse look — never moves, never clicks, so the world is never modified).
-It sweeps the view across everything visible from the player's spot and,
-because a peaceful world with daylight + weather cycles keeps changing the
-lighting, it gathers the SAME blocks under many real conditions
-(day / night / dusk / rain / snow / fog). That real-condition diversity is
-exactly what makes the recogniser robust — better than synthetic
-augmentation. The CNN retrains itself in the background as samples land.
+Runs the self-teaching loop CONTINUOUSLY for hours. It sweeps the view and
+the CNN retrains itself in the background as samples land.
+
+Two collection modes:
+  * default (camera-only): relative mouse look, never moves/clicks, world
+    untouched. Day/weather cycles vary the lighting on the SAME blocks.
+  * ``--walk`` (recommended): between sweeps it WALKS to a new spot
+    (edge-safe WalkToward, never clicks → world still untouched) so it
+    gathers blocks from MANY positions / distances / angles, not just one
+    standing point. POSITION diversity is what fixes per-block confusion
+    (e.g. oak_log vs birch_log/dirt) that lighting-only sweeps can't —
+    a stationary spin sees the same few trees forever.
+
+The CNN retrains itself in the background as samples land.
 
 Resilience (it runs unattended):
   * Focus loss  → pauses and waits (safety gate closed); resumes when MC
@@ -28,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -95,6 +102,16 @@ def main(argv=None) -> int:
                          "retained for training)")
     ap.add_argument("--save-patches-per-checkpoint", type=int, default=6,
                     help="annotated screenshots to save each checkpoint (audit)")
+    ap.add_argument("--walk", action="store_true",
+                    help="WALK between sweeps to collect from many positions "
+                         "(edge-safe, never clicks). The fix for per-block "
+                         "confusion a stationary spin can't break.")
+    ap.add_argument("--relocate-every", type=int, default=24,
+                    help="[--walk] camera-sweep steps between relocations")
+    ap.add_argument("--walk-ticks", type=int, default=40,
+                    help="[--walk] control ticks to walk per relocation")
+    ap.add_argument("--walk-dist", type=float, default=10.0,
+                    help="[--walk] waypoint distance per relocation (blocks)")
     args = ap.parse_args(argv)
 
     wins = _find_minecraft_hwnd()
@@ -126,6 +143,19 @@ def main(argv=None) -> int:
         cnn._store = big_store
     if sample_nn is not None:
         sample_nn._store = big_store
+
+    # ── WALK mode: edge-safe relocation between sweeps (position diversity) ──
+    keyboard = actions = None
+    px_per_deg = float(M._get(settings, "agent.mouse_per_degree", 6.5) or 6.5)
+    if args.walk:
+        from control.action_wrapper import ActionWrapper
+        keymap_flat = M._flatten_keymap_for_keyboard(M._load_json(M.KEYMAP_PATH))
+        keyboard = M.build_keyboard(settings, keymap_flat, gate=gate)
+        try:
+            keyboard.start()
+        except Exception:
+            pass
+        actions = ActionWrapper(keyboard, mouse, gate=gate)
 
     metrics_root = default_metrics_root()
     metrics_root.mkdir(parents=True, exist_ok=True)
@@ -162,6 +192,59 @@ def main(argv=None) -> int:
     focus_paused = False
     errors = 0
     patch_dir = None
+    steps_since_relocate = 0
+    relocate_idx = 0
+
+    def _relocate():
+        """Walk (edge-safe, never clicks → world untouched) to a fanned-out
+        new spot, sampling the whole way, so the recogniser sees blocks from
+        many positions/distances/angles — the diversity an in-place spin
+        can't get."""
+        from agents.skills import WalkToward, SkillContext, SkillStatus
+        from agents.treechop import _full_movement
+        nonlocal relocate_idx
+        relocate_idx += 1
+        frame = capture.get_frame(); f3 = f3_reader.read(frame)
+        wf = wp.update(frame, f3)
+        if wf.pose is None:
+            return 0
+        p = wf.pose
+        hdg = math.radians(float(p.yaw) + relocate_idx * 73.0)   # fan headings
+        goal = (int(math.floor(p.x + args.walk_dist * (-math.sin(hdg)))),
+                int(math.floor(p.y)),
+                int(math.floor(p.z + args.walk_dist * math.cos(hdg))))
+        walk = WalkToward(goal, arrive_dist=1.5)
+        moved = 0
+        reason = "ran out of ticks"
+        for _ in range(args.walk_ticks):
+            if _panic() or not safety.allow_input():
+                reason = "panic/focus"; break
+            frame = capture.get_frame(); f3 = f3_reader.read(frame)
+            wf = wp.update(frame, f3)                # SAMPLE while moving
+            if wf.pose is None:
+                time.sleep(0.05); continue
+            ctx = SkillContext(pose=wf.pose, world_map=wp.world_map,
+                               looking_at=wf.looking_at, px_per_deg=px_per_deg,
+                               dimension=getattr(wf.pose, "dimension", None))
+            r = walk.tick(ctx)
+            try:
+                actions.set_movement_state(**_full_movement(r.action.movement))
+            except Exception:
+                pass
+            if r.action.look_dx or r.action.look_dy:
+                try:
+                    mouse.move(int(r.action.look_dx), int(r.action.look_dy))
+                except Exception:
+                    pass
+            moved += 1
+            if r.status in (SkillStatus.DONE, SkillStatus.FAILED, SkillStatus.BLOCKED):
+                reason = r.info; break
+            time.sleep(0.05)
+        try:
+            actions.release_all_movement()
+        except Exception:
+            pass
+        return moved, reason
 
     def write_status(extra=None):
         try:
@@ -224,6 +307,17 @@ def main(argv=None) -> int:
                 f3 = f3_reader.read(frame)
                 wf = wp.update(frame, f3)     # collects samples + retrains
                 step += 1
+                steps_since_relocate += 1
+
+                # WALK mode: every N sweeps, relocate to a fresh spot so the
+                # next sweep sees DIFFERENT blocks/distances (position
+                # diversity is what an in-place spin can't get).
+                if (args.walk and actions is not None
+                        and steps_since_relocate >= args.relocate_every):
+                    steps_since_relocate = 0
+                    n, why = _relocate()
+                    log(f"relocated: walked {n}/{args.walk_ticks} ticks "
+                        f"(heading #{relocate_idx}, stop: {why})")
 
                 if wf.pose is not None and wf.looking_at is not None:
                     truth = wf.looking_at.block_id
@@ -311,7 +405,17 @@ def main(argv=None) -> int:
         except Exception:
             pass
         try:
+            if actions is not None:
+                actions.release_all_movement()
+        except Exception:
+            pass
+        try:
             mouse.release_all() if hasattr(mouse, "release_all") else None
+        except Exception:
+            pass
+        try:
+            if keyboard is not None:
+                keyboard.stop()
         except Exception:
             pass
         capture.stop()
