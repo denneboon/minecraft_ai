@@ -46,6 +46,7 @@ OFFLINE_TESTS = [
     "test_recipes",
     "test_inventory_control",
     "test_crafting",
+    "test_stack_count",
 ]
 
 

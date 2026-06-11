@@ -731,43 +731,99 @@ class StackCountReader:
         )
         self._ui_scale = max(1, int(ui_scale))
 
+        # Pre-normalise the digit glyph templates to a common ink-trimmed size
+        # for direct per-digit matching (see read()). The F3 GlyphOCR's
+        # band-finding is tuned for text-on-terrain lines and is unreliable on
+        # the tiny, bevel-bordered count box, so counts are matched directly.
+        self._DIGIT_STD = (18, 12)              # (h, w) the matcher works at
+        self._digit_norm = {}
+        try:
+            for ch, tb in zip(self._ocr._chars, self._ocr._tpl_bin):
+                if ch in "0123456789":
+                    self._digit_norm[ch] = self._norm_glyph(np.asarray(tb, bool))
+        except Exception:
+            self._digit_norm = {}
+
+    @staticmethod
+    def _ink_bbox(b: np.ndarray) -> np.ndarray:
+        ys, xs = np.where(b)
+        if len(xs) == 0:
+            return b
+        return b[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+
+    def _norm_glyph(self, b: np.ndarray) -> np.ndarray:
+        """Ink-trim a binary glyph and resize to the common matcher size, so a
+        14-px slot digit and a 16-px font template align regardless of scale."""
+        b = self._ink_bbox(b)
+        if b.size == 0:
+            return np.zeros(self._DIGIT_STD, bool)
+        h, w = self._DIGIT_STD
+        return cv2.resize(b.astype(np.uint8), (w, h),
+                          interpolation=cv2.INTER_NEAREST).astype(bool)
+
+    def _match_digit(self, seg: np.ndarray):
+        """Best-matching digit char + score for a binary segment."""
+        s = self._norm_glyph(seg)
+        best, bch = -9.0, "?"
+        for ch, t in self._digit_norm.items():
+            agree = float((s == t).mean()) * 2.0 - 1.0          # [-1, 1]
+            fg = float(np.logical_and(s, t).sum()) / max(
+                1, int(np.logical_or(s, t).sum()))              # ink IoU
+            sc = 0.5 * agree + 0.5 * fg
+            if sc > best:
+                best, bch = sc, ch
+        return bch, best
+
     def read(self, slot_crop_rgb: np.ndarray) -> int:
         """
-        Return the stack count in ``slot_crop_rgb``. Returns 0 if no
-        number is visible (which conventionally means "1 item" for items
-        that stack and "1 item" for non-stackables too).
+        Return the stack count in ``slot_crop_rgb``. Returns 0 if no number
+        is visible (conventionally "1 item").
+
+        White-masks the bottom-right of the slot (count digits are pure white;
+        item pixels are tinted and the grey bevel is below threshold),
+        segments the mask into digit columns, and matches each against the
+        ink-normalised font glyphs. Robust to light items where the F3-style
+        OCR's band-finder fails.
         """
-        if slot_crop_rgb is None or slot_crop_rgb.size == 0:
+        if slot_crop_rgb is None or slot_crop_rgb.size == 0 or not self._digit_norm:
+            return 0
+        if slot_crop_rgb.ndim != 3 or slot_crop_rgb.shape[2] < 3:
             return 0
         h, w = slot_crop_rgb.shape[:2]
-        box_w = self.COUNT_BOX_W_GUI * self._ui_scale
-        box_h = self.COUNT_BOX_H_GUI * self._ui_scale
-        x0 = max(0, w - box_w)
-        y0 = max(0, h - box_h)
-        crop = slot_crop_rgb[y0:, x0:]
-
-        # Pre-mask: keep only pixels where every channel is > the white
-        # threshold (count digits are pure white; item icon pixels are
-        # tinted, so they get zeroed). Pass the masked greyscale image
-        # to the OCR, which will then binarize at its much lower
-        # text_threshold and pick up exactly the digit shapes.
-        if crop.ndim == 3 and crop.shape[2] >= 3:
-            r, g, b = crop[..., 0], crop[..., 1], crop[..., 2]
-            white_mask = ((r >= self._WHITE_CHANNEL_MIN)
-                          & (g >= self._WHITE_CHANNEL_MIN)
-                          & (b >= self._WHITE_CHANNEL_MIN)).astype(np.uint8)
-            masked = white_mask * 255          # 0 / 255 single-channel
-        else:
-            masked = crop
-
-        text = self._ocr.recognize_line(masked)
-        if not text:
+        # Bottom-right where the count sits, trimming the slot's raised
+        # BEVEL: its bottom + right highlight edge is light enough to pass
+        # the white threshold and would corrupt the digit segmentation.
+        y0, y1 = int(h * 0.47), max(int(h * 0.47) + 1, int(h * 0.97))
+        x0, x1 = int(w * 0.09), max(int(w * 0.09) + 1, int(w * 0.97))
+        region = slot_crop_rgb[y0:y1, x0:x1]
+        r, g, b = (region[..., 0].astype(np.int32),
+                   region[..., 1].astype(np.int32),
+                   region[..., 2].astype(np.int32))
+        mask = ((r >= self._WHITE_CHANNEL_MIN - 5)
+                & (g >= self._WHITE_CHANNEL_MIN - 5)
+                & (b >= self._WHITE_CHANNEL_MIN - 5))
+        if int(mask.sum()) < 6:
             return 0
-        digits = "".join(ch for ch in text if ch.isdigit())
-        if not digits:
-            return 0
+        # Segment into digit runs by columns of ink (gaps split digits).
+        cols = mask.sum(axis=0)
+        runs, start = [], None
+        for x, v in enumerate(list(cols) + [0]):
+            if v > 0 and start is None:
+                start = x
+            elif v == 0 and start is not None:
+                if x - start >= 2:
+                    runs.append((start, x))
+                start = None
+        out = ""
+        for a, bx in runs[-3:]:                 # at most 3 digits (max 64)
+            seg = mask[:, a:bx]
+            if int(seg.sum()) < 6:
+                continue
+            ch, score = self._match_digit(seg)
+            if score > 0.45:
+                out += ch
         try:
-            return int(digits)
+            return int(out) if out else 0
         except ValueError:
             return 0
 
