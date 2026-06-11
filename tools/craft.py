@@ -84,8 +84,13 @@ def main(argv=None) -> int:
                               ui_scale=ui_scale, window_origin=origin,
                               inspector=inspector)
     crafter = Crafter(ctl, a, cat)
+    menu_detector = M.build_menu_detector_default(settings)
 
     try:
+        # Resume if the game is paused (singleplayer pauses on focus loss);
+        # otherwise every inventory read/action would hit a frozen frame.
+        if not M.ensure_playing(capture, menu_detector, kb):
+            print("[craft] game is paused and won't resume — click into MC"); return 1
         print(f"[craft] opening inventory (gui_scale={ui_scale}) — target {target}")
         ctl.open_inventory()
         if "--debug" in argv:

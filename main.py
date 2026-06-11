@@ -346,6 +346,47 @@ def _maybe_focus_and_unpause(
               "Click into Minecraft and verify gameplay state.")
 
 
+def build_menu_detector_default(settings: Dict[str, Any]):
+    """Build a MenuDetector with the cached MC font templates (or None if the
+    font cache can't be built). Convenience for standalone tools."""
+    try:
+        from vision.mcfont import ensure_font_cache
+        ft = ensure_font_cache(os.path.join(ROOT, "data", "calibration", "mc_font.npz"))
+        return build_menu_detector(settings, ft)
+    except Exception as e:
+        print(f"[pause] could not build MenuDetector: {e}")
+        return None
+
+
+def ensure_playing(capture, menu_detector, keyboard, *,
+                   attempts: int = 4, delay: float = 0.3) -> bool:
+    """If the game is PAUSED (the Esc 'Game Menu' is up), tap Escape to resume
+    gameplay. Singleplayer auto-pauses on focus loss, and a paused frame is
+    frozen — acting on it does nothing useful — so callers should check this
+    before/while driving the game. Only the PAUSE menu is dismissed; a
+    deliberately-open inventory/container is left alone. Returns True if the
+    game is not paused."""
+    if menu_detector is None:
+        return True
+    for _ in range(max(1, attempts)):
+        try:
+            frame = capture.get_frame()
+        except Exception:
+            return True
+        try:
+            if not menu_detector.is_pause_menu(frame):
+                return True
+        except Exception:
+            return True
+        print("[pause] game is PAUSED — sending Escape to resume")
+        keyboard.tap("escape", 0.05)
+        time.sleep(delay)
+    try:
+        return not menu_detector.is_pause_menu(capture.get_frame())
+    except Exception:
+        return True
+
+
 # ---------------------------------------------------------------------------
 # Test sequence (smoke-test every subsystem before the real agent runs)
 # ---------------------------------------------------------------------------

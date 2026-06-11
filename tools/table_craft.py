@@ -69,6 +69,7 @@ def main(argv=None) -> int:
 
     f3 = build_f3_reader(settings)
     wp = build_world_perception(settings)
+    menu_detector = M.build_menu_detector_default(settings)
     a = MCAssets.load(); cat = Catalog.load(a)
     reader = build_inventory_reader(settings, assets=a)
     hotbar = build_hotbar_manager(settings, catalog=cat)
@@ -115,6 +116,10 @@ def main(argv=None) -> int:
         t0 = time.time(); n = 0
         while time.time() - t0 < max_secs:
             frame = capture.get_frame()
+            # Don't act on a frozen, paused frame — resume first.
+            if menu_detector is not None and menu_detector.is_pause_menu(frame):
+                M.ensure_playing(capture, menu_detector, kb)
+                time.sleep(0.2); continue
             wf = wp.update(frame, f3.read(frame))
             pose = wf.pose
             ctx = SkillContext(pose=pose, world_map=wp.world_map,
@@ -140,6 +145,11 @@ def main(argv=None) -> int:
         return SkillStatus.FAILED
 
     try:
+        # 0. Make sure the game isn't paused (singleplayer pauses on focus
+        # loss; a paused frame is frozen and every read/action fails).
+        if not M.ensure_playing(capture, menu_detector, kb):
+            print("[table] game is paused and won't resume — click into MC"); return 1
+
         # 1. Find the crafting table in the hotbar (must be there to place it).
         ctl = InventoryController(mouse, kb, reader, hotbar, capture,
                                   ui_scale=ui_scale, window_origin=origin,
