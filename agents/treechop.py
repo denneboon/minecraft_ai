@@ -270,6 +270,7 @@ class TreeChopAgent(BaseAgent):
         self._hotbar = None
         self._fsm = None
         self._warned_no_world = False
+        self._last_state = None
 
     def attach_perception(self, wp) -> None:
         self._wp = wp
@@ -320,7 +321,12 @@ class TreeChopAgent(BaseAgent):
                            looking_at=looking_at, hotbar=self._hotbar,
                            px_per_deg=self._px_per_deg,
                            dimension=getattr(pose, "dimension", None))
-        return self._fsm.tick(ctx).action
+        res = self._fsm.tick(ctx)
+        if self._fsm._state != self._last_state:    # observability
+            self._last_state = self._fsm._state
+            print(f"[treechop] {self._fsm._state} | chopped={self._fsm.chopped} "
+                  f"| {res.info}")
+        return res.action
 
 
 def build_treechop_agent(settings: dict) -> TreeChopAgent:
