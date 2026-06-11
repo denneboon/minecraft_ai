@@ -17,7 +17,9 @@ from brain.interfaces import BaseAgent
 from agents.navigation import build_navigation_agent
 from agents.walker import build_pathwalker_agent
 from agents.world_explorer import build_world_explorer_agent
-from agents.treechop import build_treechop_agent, build_harvest_agent
+from agents.treechop import (
+    build_treechop_agent, build_harvest_agent, build_planner_agent,
+)
 
 
 _REGISTRY: Dict[str, Callable[[Dict[str, Any]], BaseAgent]] = {
@@ -26,6 +28,7 @@ _REGISTRY: Dict[str, Callable[[Dict[str, Any]], BaseAgent]] = {
     "world_explorer":  build_world_explorer_agent,
     "treechop":        build_treechop_agent,
     "harvest":         build_harvest_agent,
+    "planner":         build_planner_agent,
 }
 
 

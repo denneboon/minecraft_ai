@@ -277,6 +277,30 @@ def main() -> int:
     (ok if isinstance(FindAndChopLogs()._make_mine((0, 0, 0)), _CT) else bad)(
         "tree-chopper still fells trunks with ChopTrunk (unchanged)")
 
+    # 12. PlannerAgent — sequences tasks, advancing on FSM DONE (T3 layer).
+    print("\n[12] PlannerAgent (goal/planner sequencing)")
+    from agents import build_agent, available_agents
+    from agents.skills import MineBlock as _MB, ChopTrunk as _CT
+    (ok if "planner" in available_agents() else bad)("planner agent registered")
+    pl = build_agent("planner", {"agent": {"planner": {"tasks": [
+        {"kind": "logs", "count": 3},
+        {"kind": "block", "match": ["stone"], "tool": "pickaxe", "count": 5},
+    ]}}})
+    pl._build()
+    # task 1 = logs (ChopTrunk feller), max 3
+    (ok if pl._task_i == 0 and isinstance(pl._fsm._make_mine((0, 0, 0)), _CT)
+        and pl._fsm.max_logs == 3 else bad)("task 1 = logs (ChopTrunk, count 3)")
+    # simulate task-1 FSM done -> advance to task 2
+    pl._on_fsm_done()
+    (ok if pl._task_i == 1 and isinstance(pl._fsm._make_mine((0, 0, 0)), _MB)
+        and pl._fsm.is_log("minecraft:stone") and pl._fsm.max_logs == 5 else bad)(
+        "advances to task 2 = harvest stone (MineBlock, count 5)")
+    # task-2 done -> plan complete, stays idle, no crash on extra fires
+    pl._on_fsm_done(); pl._on_fsm_done()
+    (ok if pl._task_i == 2 else bad)(f"plan complete + bounded ({pl._task_i})")
+    t = pl.telemetry()
+    (ok if t.get("of") == 2 else bad)(f"telemetry reports plan size ({t})")
+
     print("\n" + ("ALL TREECHOP TESTS PASSED" if not _fails
                   else f"{_fails} CHECK(S) FAILED"))
     return 0 if not _fails else 1

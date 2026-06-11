@@ -555,11 +555,18 @@ class TreeChopAgent(BaseAgent):
             return _emit(eat_action)
 
         res = self._fsm.tick(ctx)
-        if self._fsm._state != self._last_state:    # observability
+        if res.status == SkillStatus.DONE:
+            self._on_fsm_done()                      # planner hook (default: no-op)
+        if self._fsm._state != self._last_state:     # observability
             self._last_state = self._fsm._state
             print(f"[{self.name}] {self._fsm._state} | got={self._fsm.logs} "
                   f"runs={self._fsm.chopped} | {res.info}")
         return _emit(res.action)
+
+    def _on_fsm_done(self) -> None:
+        """Hook fired when the active behaviour FSM reports DONE. Default
+        no-op (treechop/harvest just sit DONE). The planner advances tasks."""
+        return
 
 
 class HarvestAgent(TreeChopAgent):
@@ -598,13 +605,95 @@ class HarvestAgent(TreeChopAgent):
                                     mine_action=mine_action)
 
 
+def _fsm_for_task(task: dict, cat) -> "FindAndChopLogs":
+    """Build the gather FSM for one plan task. kind 'logs' fells trunks;
+    anything else gathers blocks whose id contains any of `match`."""
+    count = int(task.get("count", 9999))
+    kind = str(task.get("kind", "logs")).lower()
+    if kind in ("logs", "log", "wood", "tree", "trees"):
+        log_ids = {b.id for b in cat.blocks_in_tag("logs")}
+        leaf_ids = {b.id for b in cat.blocks_in_tag("leaves")}
+        is_log = lambda b: bool(b) and (b in log_ids or str(b).endswith(_LOG_SUFFIXES))
+        is_brk = lambda b: bool(b) and (
+            is_log(b) or b in leaf_ids or str(b).endswith("_leaves"))
+        return FindAndChopLogs(is_log=is_log, is_breakable=is_brk,
+                               tool_role=task.get("tool", "axe"), max_logs=count)
+    match = [str(m).lower() for m in (task.get("match") or [kind])]
+    tool = task.get("tool", "pickaxe")
+    pred = lambda b: bool(b) and any(m in str(b).lower() for m in match)
+    mine = (lambda v: MineBlock(v, tool_role=tool, is_target=pred, is_passthrough=pred))
+    return FindAndChopLogs(is_log=pred, is_breakable=pred, tool_role=tool,
+                           max_logs=count, mine_action=mine)
+
+
+class PlannerAgent(TreeChopAgent):
+    """Goal/planner layer — runs an ORDERED plan of gather tasks, advancing
+    to the next when the current behaviour reports DONE (count reached, or
+    the area is exhausted). The T3 step: an agent that executes a multi-step
+    plan by sequencing behaviours, reusing the whole gather stack
+    (navigation, reach, recovery, eat, episode-logging) per task.
+
+    Configure under settings.agent.planner.tasks, e.g.:
+        - {kind: logs, count: 8}
+        - {kind: block, match: ["stone","cobblestone"], tool: pickaxe, count: 16}
+    Run: ``python main.py --agent planner``."""
+
+    name = "planner"
+    cfg_key = "planner"
+
+    def __init__(self, settings: dict):
+        super().__init__(settings)
+        cfg = ((self._settings.get("agent", {}) or {}).get(self.cfg_key, {}) or {})
+        self._tasks = list(cfg.get("tasks") or [{"kind": "logs", "count": 9999}])
+        self._task_i = 0
+
+    def reset(self) -> None:
+        super().reset()
+        self._task_i = 0
+
+    def telemetry(self) -> dict:
+        t = super().telemetry()
+        t["task"] = min(self._task_i + 1, len(self._tasks))
+        t["of"] = len(self._tasks)
+        if self._task_i < len(self._tasks):
+            t["doing"] = self._tasks[self._task_i].get("kind", "?")
+        return t
+
+    def _build(self) -> None:
+        from knowledge.catalog import Catalog
+        from vision.mc_assets import MCAssets
+        from control.hotbar import build_hotbar_manager
+        cat = Catalog.load(MCAssets.load())
+        self._hotbar = build_hotbar_manager(self._settings, catalog=cat)
+        if self._task_i >= len(self._tasks):
+            self._fsm = FindAndChopLogs(max_logs=0)      # nothing left -> idle (DONE)
+            return
+        task = self._tasks[self._task_i]
+        print(f"[planner] task {self._task_i + 1}/{len(self._tasks)}: {task}")
+        self._fsm = _fsm_for_task(task, cat)
+        self._last_state = None
+
+    def _on_fsm_done(self) -> None:
+        if self._task_i >= len(self._tasks):
+            return                                        # plan already finished
+        self._task_i += 1
+        if self._task_i < len(self._tasks):
+            self._build()                                 # next task -> fresh FSM
+        else:
+            print(f"[planner] plan complete ({len(self._tasks)} tasks)")
+
+
 def build_treechop_agent(settings: dict) -> TreeChopAgent:
     return TreeChopAgent(settings)
+
+
+def build_planner_agent(settings: dict) -> PlannerAgent:
+    return PlannerAgent(settings)
 
 
 def build_harvest_agent(settings: dict) -> HarvestAgent:
     return HarvestAgent(settings)
 
 
-__all__ = ["FindAndChopLogs", "TreeChopAgent", "HarvestAgent",
-           "build_treechop_agent", "build_harvest_agent"]
+__all__ = ["FindAndChopLogs", "TreeChopAgent", "HarvestAgent", "PlannerAgent",
+           "build_treechop_agent", "build_harvest_agent", "build_planner_agent"]

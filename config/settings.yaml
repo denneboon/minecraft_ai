@@ -401,6 +401,13 @@ agent:
     tool: pickaxe                    # hotbar role to select for mining them
     max_blocks: 9999
     eat_below: 0.45
+  # Goal/planner (python main.py --agent planner): run an ordered plan,
+  # advancing when each behaviour reports DONE (count reached / area cleared).
+  planner:
+    eat_below: 0.45
+    tasks:
+      - {kind: logs, count: 8}
+      - {kind: block, match: ["stone", "cobblestone"], tool: pickaxe, count: 16}
   prefer_hotkeys_for_hotbar: true
   humanlike_reaction_time_ms: 60
   jitter_ms: 20
