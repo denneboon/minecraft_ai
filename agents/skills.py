@@ -264,7 +264,9 @@ class MineBlock(Skill):
         self.aim = _Aimer(tol_deg=tol_deg)
         self._tool_ok = tool_role is None
         self._mining_ticks = 0
-        self._saw_target = False       # has the crosshair confirmed THIS voxel?
+        self._hit_pos = None           # F3 pos of the block we're swinging at
+        self._hit_was_log = False      # ...and whether it was a log (countable)
+        self.broke = False             # did a LOG we were hitting actually break?
         self._await_ticks = 0          # aimed-but-F3-silent ticks (acquisition)
         self._silent = 0               # consecutive F3-silent ticks while mining
         self._started = False          # have we begun swinging?
@@ -272,7 +274,9 @@ class MineBlock(Skill):
     def reset(self):
         self._tool_ok = self.tool_role is None
         self._mining_ticks = 0
-        self._saw_target = False
+        self._hit_pos = None
+        self._hit_was_log = False
+        self.broke = False
         self._await_ticks = 0
         self._silent = 0
         self._started = False
@@ -295,16 +299,17 @@ class MineBlock(Skill):
         la_id = getattr(la, "block_id", None) if la is not None else None
         la_pos = tuple(la.pos) if (la is not None and getattr(la, "pos", None) is not None) else None
         on_target = (la_pos == tuple(self.voxel))
-        if on_target:
-            self._saw_target = True
-            self._silent = 0
-        # Break signal: saw the target, then the crosshair landed on a
-        # DIFFERENT real block (we're looking past where the target was).
-        if self._saw_target and self._started and \
-                la_pos is not None and not on_target:
-            return SkillResult(AgentAction(), SkillStatus.DONE, "mined (target moved off)")
+        # The block we were swinging at is GONE (crosshair now on a different
+        # real block). If it was a LOG -> it broke (done + counted). If it was
+        # a leaf we were breaking through -> cleared; keep going to the log.
+        if self._hit_pos is not None and la_pos is not None and la_pos != self._hit_pos:
+            if self._hit_was_log:
+                self.broke = True
+                return SkillResult(AgentAction(), SkillStatus.DONE, "mined log")
+            self._hit_pos = None
         if self._is_gone(ctx):
-            return SkillResult(AgentAction(), SkillStatus.DONE, "mined")
+            self.broke = True
+            return SkillResult(AgentAction(), SkillStatus.DONE, "mined (air)")
         if _eye(ctx.pose) is None:
             return SkillResult(AgentAction(), SkillStatus.BLOCKED, "no pose")
         if not self._tool_ok:
@@ -315,52 +320,59 @@ class MineBlock(Skill):
                 return SkillResult(AgentAction(hotbar=slot), SkillStatus.RUNNING,
                                    f"select {self.tool_role} slot {slot}")
 
-        def _swing(info):
+        def _swing(info, hit=None, was_log=False):
             self._started = True
+            if hit is not None:
+                self._hit_pos = hit
+                self._hit_was_log = was_log
+                self._silent = 0
             self._mining_ticks += 1
             if self._mining_ticks > self.max_ticks:
                 return SkillResult(AgentAction(), SkillStatus.FAILED, "timed out mining")
             return SkillResult(AgentAction(interact="attack"), SkillStatus.RUNNING, info)
+
+        # PRIORITY: F3 says a LOG is under the crosshair -> mine it RIGHT NOW.
+        # Never keep looking around when we're already on a log.
+        if la_id is not None and (self.is_target is None or self.is_target(la_id)):
+            return _swing(f"mining {la_id}", hit=la_pos, was_log=True)
 
         # Aim the crosshair at the target voxel.
         eye = _eye(ctx.pose)
         tgt = (self.voxel[0] + 0.5, self.voxel[1] + 0.5, self.voxel[2] + 0.5)
         yaw, pitch = aim_angles(eye, tgt)
         dx, dy, aimed = self.aim.step(ctx, yaw, pitch)
+        locked = on_target or aimed
 
-        # LOCKED = F3 confirms we're on the target voxel, OR the geometry has
-        # converged on it. Until then we only turn — never break.
-        if not (on_target or aimed):
+        if la_id is not None:
+            # F3 shows a NON-log block (leaf / dirt / …).
+            if not locked:
+                # still turning toward the target -> break NOTHING (so we
+                # never break leaves the crosshair merely sweeps over).
+                return SkillResult(AgentAction(look_dx=dx, look_dy=dy),
+                                   SkillStatus.RUNNING, "aiming at target")
+            if on_target and self.is_target is not None and not self.is_target(la_id):
+                return SkillResult(AgentAction(), SkillStatus.FAILED,
+                                   f"target is {la_id}, not a log — abandon")
+            if self.is_passthrough is None or self.is_passthrough(la_id):
+                # A leaf occluding the target log we're locked on -> break
+                # through it (only because a known log is behind it).
+                return _swing(f"breaking {la_id} (occludes target)", hit=la_pos, was_log=False)
+            return SkillResult(AgentAction(), SkillStatus.FAILED,
+                               f"{la_id} blocks the target — abandon")
+
+        # F3 SILENT (no targeted block — e.g. aimed past the log into sky).
+        if not locked:
             return SkillResult(AgentAction(look_dx=dx, look_dy=dy),
                                SkillStatus.RUNNING, "aiming at target")
-
-        if on_target:
-            # Crosshair exactly on the target voxel. It must be a valid target
-            # (a log); a mislabelled leaf/dirt target is abandoned.
-            if la_id is not None and self.is_target is not None and not self.is_target(la_id):
-                return SkillResult(AgentAction(), SkillStatus.FAILED,
-                                   f"target is {la_id}, not minable — abandon")
-            return _swing(f"mining target {la_id or '?'}")
-
-        # Geometrically locked but F3 shows a block OTHER than the target.
-        if la_id is not None:
-            self._silent = 0
-            if self.is_passthrough is None or self.is_passthrough(la_id):
-                # A leaf/log occluding the target we're locked on -> break
-                # through it (a log is behind it: our target).
-                return _swing(f"breaking {la_id} (occludes target)")
-            return SkillResult(AgentAction(), SkillStatus.FAILED,
-                               f"{la_id} blocks the target, not breakable — abandon")
-
-        # Locked but F3 SILENT (e.g. aimed just past the log into sky).
         if self._started:
             # Was mining; brief OCR gap -> keep holding the click (no spam),
             # but bail soon rather than swinging at air for seconds.
             self._silent += 1
             if self._silent > 6:
                 return SkillResult(AgentAction(), SkillStatus.DONE,
-                                   "target cleared (lost after mining)")
-            return _swing("mining (brief F3 gap)")
+                                   "lost target after mining")
+            return SkillResult(AgentAction(interact="attack"), SkillStatus.RUNNING,
+                               "mining (brief F3 gap)")
         self._await_ticks += 1
         if self._await_ticks > 10:
             return SkillResult(AgentAction(), SkillStatus.FAILED,
@@ -654,6 +666,12 @@ class ChopTrunk(Skill):
         if self._phase == "mine":
             r = self._mine.tick(ctx)
             if r.status == SkillStatus.DONE:
+                # Only advance up the trunk + count when a LOG actually broke.
+                # A DONE without a confirmed break (brief F3 loss, etc.) ends
+                # the trunk without inflating the count.
+                if not getattr(self._mine, "broke", False):
+                    return SkillResult(r.action, SkillStatus.DONE,
+                                       f"trunk done ({self._mined} logs)")
                 self._mined += 1
                 self._target = (self._target[0], self._target[1] + 1, self._target[2])
                 self._aim = LookAtVoxel(self._target, tol_deg=3.0)

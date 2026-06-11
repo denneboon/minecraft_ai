@@ -179,8 +179,10 @@ class FindAndChopLogs:
             if tgt is None:
                 self._state = "scan"; self._scan_ticks = 0
                 return SkillResult(AgentAction(), SkillStatus.RUNNING, "no log mapped; scanning")
-            self._found_raw = tgt                   # remember what find returned
-            tgt = self._descend_to_base(tgt, ctx)   # chop whole trunks, base-up
+            self._found_raw = tgt
+            # Mine the log we actually found (ChopTrunk then works UP the
+            # trunk). We do NOT descend to a hidden base — that made the bot
+            # look down / walk past the log it could already see.
             self._target = tgt
             self._recover_count = 0
             self._cleared = set()

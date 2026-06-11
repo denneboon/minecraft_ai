@@ -204,7 +204,7 @@ def test_mine_block(cat):
     ctxs = SkillContext(pose=_pose(yaw=yaw, pitch=pitch), world_map=wms,
                         looking_at=SimpleNamespace(pos=vox, block_id="minecraft:stone"))
     rs = sks.tick(ctxs)
-    (ok if rs.status == SkillStatus.FAILED and "not minable" in rs.info
+    (ok if rs.status == SkillStatus.FAILED and "not a log" in rs.info
      else bad)(f"abandons a target F3 says isn't a log -> {rs.status} ({rs.info})")
     # And it DOES attack when the confirmed block is breakable.
     ctxs.looking_at = SimpleNamespace(pos=vox, block_id="minecraft:oak_log")
