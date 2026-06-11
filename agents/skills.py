@@ -259,11 +259,14 @@ class Eat(Skill):
 
 class MineBlock(Skill):
     """Mine the block at ``voxel``: select the right tool (``tool_role``,
-    e.g. 'axe' for logs), aim at it, then hold attack until the voxel
-    becomes AIR in the WorldMap (or vanishes) — FAILED on timeout.
-
-    The mined-check is WorldMap-driven so it's verifiable offline; live,
-    the world recogniser / F3 carve the voxel to air once it breaks."""
+    e.g. 'axe' for logs), aim at it, then a hard aim->freeze+mine LATCH —
+    the instant F3's targeted block is a log it FREEZES the camera and holds
+    attack (no drift/circling) until that block is gone. The break signal is
+    F3-driven: the log disappears from the crosshair for a few ticks (the
+    lagging WorldMap-air check proved unreliable, so F3 'looking at' is the
+    sole authority). Out-of-reach / mislabelled / sky targets abandon fast;
+    occluding leaves are cleared (frozen) only with a log behind them.
+    FAILED on timeout."""
     name = "mine_block"
 
     def __init__(self, voxel: Voxel, tool_role: Optional[str] = "axe",
@@ -751,6 +754,7 @@ class NavigateTo(Skill):
         r = self._sub.tick(ctx)
         if r.status == SkillStatus.DONE:
             self._sub = None
+            self._replans = 0                        # progress -> refresh replan budget
             if self._wp >= len(self._path) - 1:
                 self._path = []                      # reached path end -> re-eval/replan
                 return SkillResult(r.action, SkillStatus.RUNNING, "reached path end")

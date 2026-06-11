@@ -54,7 +54,10 @@ def _block_cat(bid):
 
 def _row(rec):
     """One (obs, act) row from a tick record, or None if not usable."""
-    if rec.get("scr") not in (None, "playing") or rec.get("gated"):
+    scr = rec.get("scr")
+    if scr is not None and str(scr).lower() != "playing":
+        return None
+    if rec.get("gated"):
         return None
     p = rec.get("p")              # [x,y,z,yaw,pitch]
     look = rec.get("look")        # [block_id, [x,y,z]] | None
@@ -155,6 +158,8 @@ def main(argv=None) -> int:
     out_name = "dataset"
     if "--out" in argv:
         i = argv.index("--out")
+        if i + 1 >= len(argv):
+            print("error: --out needs a name"); return 2
         out_name = argv[i + 1]
         del argv[i:i + 2]
     if argv:

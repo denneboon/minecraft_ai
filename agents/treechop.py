@@ -361,6 +361,12 @@ class FindAndChopLogs:
                 # exact column.
                 base = self._target
                 self._drop_target()
+                # Blacklist the WHOLE column we just chopped (base..base+mined)
+                # so the opportunistic check doesn't re-target now-broken upper
+                # voxels the map still shows as logs (lag) and thrash.
+                if base is not None:
+                    for dy in range(0, mined + 2):
+                        self._blacklist.add((base[0], base[1] + dy, base[2]))
                 self._sub = WalkToward(base, arrive_dist=1.4, stuck_window=8,
                                        jump_after=10 ** 9)
                 self._state = "collect"
