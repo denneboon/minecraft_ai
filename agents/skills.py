@@ -990,35 +990,56 @@ def find_nearest_block(world_map, origin, match, *, max_radius: int = 48,
 
 class PlaceBlock(Skill):
     """Place the block from ``tool_role``'s hotbar slot on a valid nearby
-    surface. Pitches DOWN to look at the ground ahead and, if the current
-    view can't take a placement (too far / inside the player / occupied),
-    SCANS yaw to find one. Emits use_item to place; DONE with the placement
-    voxel in ``placed_at``. Useful for putting down a crafting table."""
+    surface, robustly across uneven ground.
+
+    Rather than guess one pitch (too shallow -> F3 sees no block; too steep ->
+    placement is too close and MC silently rejects it), it SCANS a set of look
+    directions (each ``pitch`` x ``yaw_off``). For each it aims, lets F3 catch
+    up, and asks ``can_place_block`` whether a top-face placement is possible.
+    On the first placeable view it emits use_item, then VERIFIES the block
+    actually appeared under the still-aimed crosshair (F3 ``pos`` == the
+    placement voxel, non-air). If MC rejected it, it moves on to the next view.
+    DONE only once placement is confirmed, with the voxel in ``placed_at``.
+
+    The forward views (yaw_off 0) are tried first across all pitches, then it
+    turns. Defaults cover ~steep-to-shallow on flat-ish ground; tune via
+    ``pitches`` / ``yaw_offs``."""
     name = "place_block"
 
     def __init__(self, tool_role: str = "blocks", *, slot: Optional[int] = None,
-                 target_pitch: float = 42.0, yaw_off0: float = 0.0,
-                 max_ticks: int = 90, max_scans: int = 9,
-                 max_reach: float = PLAYER_REACH, tol_deg: float = 5.0):
+                 pitches=(53.0, 47.0, 60.0, 41.0),
+                 yaw_offs=(0.0, 45.0, -45.0, 90.0, -90.0, 135.0, -135.0, 180.0),
+                 max_ticks: int = 320, max_reach: float = PLAYER_REACH,
+                 tol_deg: float = 5.0, verify_ticks: int = 7):
         self.tool_role = tool_role
         self.slot = slot                 # explicit hotbar slot 1-9, overrides role
-        self.target_pitch = target_pitch
-        self.yaw_off0 = yaw_off0         # initial yaw offset (vary across retries)
+        # forward (yaw_off 0) views first, sweeping pitch; then turn outward
+        self._cands = [(float(p), float(y)) for y in yaw_offs for p in pitches]
         self.max_ticks = max_ticks
-        self.max_scans = max_scans
         self.max_reach = max_reach
         self._tol = tol_deg
+        self.verify_ticks = verify_ticks
         self.reset()
 
     def reset(self):
         self._t = 0
-        self._scan = 0
-        self._yaw_off = float(self.yaw_off0)
-        self._base_yaw = None        # fixed reference so scans don't chase
+        self._idx = 0               # which candidate view we're on
+        self._base_yaw = None       # fixed reference so scans don't chase
         self._selected = False
         self._aimed_count = 0
+        self._mode = "aim"          # "aim" -> "verify"
+        self._verify = 0
         self._aimer = _Aimer(tol_deg=self._tol)
         self.placed_at = None
+
+    def _next_view(self) -> bool:
+        """Advance to the next candidate; return False if exhausted."""
+        self._idx += 1
+        self._aimed_count = 0
+        self._verify = 0
+        self._mode = "aim"
+        self._aimer = _Aimer(tol_deg=self._tol)
+        return self._idx < len(self._cands)
 
     def tick(self, ctx: SkillContext) -> SkillResult:
         self._t += 1
@@ -1038,17 +1059,43 @@ class PlaceBlock(Skill):
             self._selected = True
             return SkillResult(AgentAction(hotbar=int(slot)), SkillStatus.RUNNING,
                                f"place: select slot {slot}")
-        # 2. aim down at the ground. Anchor the yaw to the STARTING yaw so a
-        # scan offset is a fixed target (recomputing from the live yaw each
-        # tick makes the target run away as we turn).
+        # Anchor the yaw to the STARTING yaw so each view offset is a fixed
+        # target (recomputing from the live yaw each tick makes it run away).
         if self._base_yaw is None:
             self._base_yaw = float(pose.yaw)
-        want_yaw = self._base_yaw + self._yaw_off
-        dx, dy, aimed = self._aimer.step(ctx, want_yaw, self.target_pitch)
+
+        # 2b. VERIFY a placement we just attempted: did the block appear under
+        # the (still-aimed) crosshair? If so we're done; if MC rejected it
+        # (nothing there after a few ticks), try the next view.
+        if self._mode == "verify":
+            self._verify += 1
+            la = ctx.looking_at
+            lpos = getattr(la, "pos", None)
+            lbid = getattr(la, "block_id", None)
+            if lpos == self.placed_at and lbid not in (None, AIR_BLOCK):
+                return SkillResult(AgentAction(), SkillStatus.DONE,
+                                   f"placed + confirmed at {self.placed_at}")
+            if self._verify > self.verify_ticks:
+                self.placed_at = None
+                if not self._next_view():
+                    return SkillResult(AgentAction(), SkillStatus.FAILED,
+                                       "place: every view rejected the placement")
+                return SkillResult(AgentAction(), SkillStatus.RUNNING,
+                                   f"place: rejected, trying view {self._idx}")
+            return SkillResult(AgentAction(), SkillStatus.RUNNING, "place: verifying")
+
+        # 2a. AIM at the current candidate view.
+        if self._idx >= len(self._cands):
+            return SkillResult(AgentAction(), SkillStatus.FAILED,
+                               "place: no valid surface in any view")
+        pitch, yaw_off = self._cands[self._idx]
+        want_yaw = self._base_yaw + yaw_off
+        dx, dy, aimed = self._aimer.step(ctx, want_yaw, pitch)
         if not aimed:
             self._aimed_count = 0
             return SkillResult(AgentAction(look_dx=dx, look_dy=dy),
-                               SkillStatus.RUNNING, "place: aiming at ground")
+                               SkillStatus.RUNNING,
+                               f"place: aiming view {self._idx}")
         # let F3 'looking at' catch up to the new view before judging
         self._aimed_count += 1
         if self._aimed_count < 3:
@@ -1059,18 +1106,16 @@ class PlaceBlock(Skill):
                                 assume_face="up")
         if place is not None:
             self.placed_at = place
+            self._mode = "verify"
+            self._verify = 0
             return SkillResult(AgentAction(interact="use_item"),
-                               SkillStatus.DONE, f"placed at {place}")
-        # 4. nothing placeable here -> scan to a new heading
-        self._aimed_count = 0
-        self._scan += 1
-        if self._scan > self.max_scans:
+                               SkillStatus.RUNNING, f"place: placing at {place}")
+        # 4. nothing placeable from this view -> next candidate
+        if not self._next_view():
             return SkillResult(AgentAction(), SkillStatus.FAILED,
-                               "place: no valid surface found")
-        self._yaw_off += 30.0
-        self._aimer = _Aimer(tol_deg=self._tol)
+                               "place: no valid surface in any view")
         return SkillResult(AgentAction(), SkillStatus.RUNNING,
-                           f"place: scanning for ground ({self._scan})")
+                           f"place: scanning view {self._idx}")
 
 
 class BreakLookedAt(Skill):

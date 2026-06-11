@@ -46,9 +46,10 @@ TABLE = "minecraft:crafting_table"
 
 def main(argv=None) -> int:
     argv = argv if argv is not None else sys.argv[1:]
-    target = (argv[0] if argv else "wooden_pickaxe")
+    target = (argv[0] if argv and not argv[0].startswith("-") else "wooden_pickaxe")
     if ":" not in target:
         target = "minecraft:" + target
+    debug = "--debug" in argv
 
     wins = _find_minecraft_hwnd()
     if not wins:
@@ -171,27 +172,16 @@ def main(argv=None) -> int:
             fr = capture.get_frame()
             return wp.update(fr, f3.read(fr)).looking_at
 
-        # 2. Place the table; after placing, the crosshair is still on the
-        # spot, so the CURRENT looking-at confirms it (no re-aim needed).
-        # MC silently rejects placements too close / mid-move, so retry in a
-        # different direction each time.
-        table_pos = None
-        for attempt in range(4):
-            pb = PlaceBlock(slot=table_slot, target_pitch=52.0,
-                            yaw_off0=attempt * 50.0)
-            if drive(pb, f"place#{attempt}") != SkillStatus.DONE or pb.placed_at is None:
-                continue
-            time.sleep(0.45)
-            la = _looking()
-            lid = str(getattr(la, "block_id", "") or "")
-            if "crafting_table" in lid:
-                table_pos = getattr(la, "pos", None) or pb.placed_at
-                print(f"[table] table placed + confirmed at {table_pos}")
-                break
-            print(f"[table]  attempt {attempt}: aimed-place at {pb.placed_at} but "
-                  f"see {lid or 'nothing'} — retrying a different way")
-        if table_pos is None:
+        # 2. Place the table. PlaceBlock now SCANS look directions for a
+        # placeable surface, places, and self-VERIFIES the block appeared under
+        # the crosshair (retrying other views if MC rejected it), so one drive
+        # call is enough — DONE means it's confirmed on the ground.
+        pb = PlaceBlock(slot=table_slot)
+        if drive(pb, "place", max_secs=30.0, debug=debug) != SkillStatus.DONE \
+                or pb.placed_at is None:
             print("[table] couldn't place the table"); return 1
+        table_pos = pb.placed_at
+        print(f"[table] table placed + confirmed at {table_pos}")
 
         # 3. Open it (crosshair is on it).
         print("[table] opening the table")

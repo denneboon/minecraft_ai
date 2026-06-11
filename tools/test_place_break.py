@@ -69,23 +69,46 @@ def main() -> int:
     (ok if can_place_block(p, _la((0, 63, 1), "up"), _wm(solid=[(0, 64, 1)])) is None
      else bad)("placement voxel occupied -> None")
 
-    # 3. PlaceBlock: select slot, then place when possible.
+    # 3. PlaceBlock: select slot, aim, place via use_item, then VERIFY the
+    # block appeared under the crosshair before declaring DONE.
     print("\n[3] PlaceBlock skill")
     (ok if "place_block" in SKILLS and "break_looked_at" in SKILLS else bad)(
         "skills registered")
-    pb = PlaceBlock("blocks", target_pitch=56.0)     # match the test pose pitch
+    # single forward view at the test pose pitch so it aims immediately
+    pb = PlaceBlock("blocks", pitches=(56.0,), yaw_offs=(0.0,))
     ctx = SkillContext(pose=_pose(), looking_at=_la((0, 63, 1), "up"),
                        world_map=_wm(), hotbar=_hotbar({"blocks": 5}), px_per_deg=6.5)
     r = pb.tick(ctx)
     (ok if r.action.hotbar == 5 else bad)(f"first selects the blocks slot ({r.action.hotbar})")
-    last = None
-    for _ in range(8):                       # aim (pitch already at target) -> place
-        last = pb.tick(ctx)
-        if last.status == SkillStatus.DONE:
+    placing = None
+    for _ in range(8):                       # aim -> can_place -> use_item (now verifying)
+        placing = pb.tick(ctx)
+        if placing.action.interact == "use_item":
             break
-    (ok if last.status == SkillStatus.DONE and last.action.interact == "use_item"
+    (ok if placing.action.interact == "use_item"
+        and placing.status == SkillStatus.RUNNING
         and pb.placed_at == (0, 64, 1) else bad)(
-        f"places via use_item at the placement voxel ({last.status}, {pb.placed_at})")
+        f"places via use_item at the placement voxel, then verifies "
+        f"({placing.status}, {pb.placed_at})")
+    # the table now shows under the crosshair (F3 pos == placed_at) -> DONE
+    ctx_done = SkillContext(pose=_pose(),
+                            looking_at=_la((0, 64, 1), block_id="minecraft:crafting_table"),
+                            world_map=_wm(), hotbar=_hotbar({"blocks": 5}), px_per_deg=6.5)
+    done = None
+    for _ in range(3):
+        done = pb.tick(ctx_done)
+        if done.status == SkillStatus.DONE:
+            break
+    (ok if done.status == SkillStatus.DONE else bad)(
+        f"confirms placement once the block appears ({done.status})")
+    # if the block never appears (MC rejected) and there are no other views,
+    # it FAILS rather than hanging.
+    pbr = PlaceBlock("blocks", pitches=(56.0,), yaw_offs=(0.0,), verify_ticks=2)
+    cair = SkillContext(pose=_pose(), looking_at=_la((0, 63, 1), "up"),
+                        world_map=_wm(), hotbar=_hotbar({"blocks": 5}), px_per_deg=6.5)
+    statuses = [pbr.tick(cair).status for _ in range(20)]
+    (ok if SkillStatus.FAILED in statuses else bad)(
+        "rejected placement with no other view -> FAILED")
     # no blocks in hotbar -> FAILED
     pb2 = PlaceBlock("blocks")
     r2 = pb2.tick(SkillContext(pose=_pose(), hotbar=_hotbar({}), px_per_deg=6.5))
