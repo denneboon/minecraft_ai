@@ -175,7 +175,8 @@ def main(argv=None) -> int:
         return 1
     path = args.dataset
     if not path:
-        cands = sorted(glob.glob(os.path.join(DS_DIR, "*.csv")))
+        cands = sorted(glob.glob(os.path.join(DS_DIR, "*.csv")),
+                       key=os.path.getmtime)           # newest by mtime, not name
         if not cands:
             print(f"No dataset in {DS_DIR}. Run tools/export_dataset.py first.")
             return 1

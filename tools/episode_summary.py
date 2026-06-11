@@ -77,7 +77,7 @@ def summarise(path):
 def main(argv=None) -> int:
     argv = argv if argv is not None else sys.argv[1:]
     if argv and argv[0] == "--all":
-        files = sorted(glob.glob(os.path.join(EP_DIR, "*.jsonl")))
+        files = sorted(glob.glob(os.path.join(EP_DIR, "*.jsonl")), key=os.path.getmtime)
         if not files:
             print(f"No episodes in {EP_DIR}"); return 1
         agents = Counter(); ticks = 0
@@ -91,7 +91,7 @@ def main(argv=None) -> int:
     if argv:
         path = argv[0]
     else:
-        files = sorted(glob.glob(os.path.join(EP_DIR, "*.jsonl")))
+        files = sorted(glob.glob(os.path.join(EP_DIR, "*.jsonl")), key=os.path.getmtime)
         if not files:
             print(f"No episodes in {EP_DIR}. Run an agent first."); return 1
         path = files[-1]
