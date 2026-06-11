@@ -73,7 +73,12 @@ class FindAndChopLogs:
                  tool_role: Optional[str] = "axe",
                  explore_dist: float = 8.0, max_explore: int = 10,
                  explore_turn: float = 65.0, is_breakable=None,
-                 max_recover: int = 5):
+                 max_recover: int = 5, mine_action=None):
+        # mine_action(voxel) -> Skill: what to do once IN REACH of a target.
+        # Default fells the trunk (ChopTrunk); a flat block-gatherer passes a
+        # plain MineBlock factory. This is the one knob that turns the
+        # tree-chopper into a generic "find -> go -> mine -> collect" gatherer.
+        self._mine_action = mine_action
         self.is_log = is_log or _is_log_default
         # The ONLY blocks tree-chopping may ever break: logs + leaves. The
         # path-clearing recovery (mine-through) is restricted to these, so
@@ -112,6 +117,14 @@ class FindAndChopLogs:
     def _eye_vox(self, pose):
         return (int(math.floor(pose.x)), int(math.floor(pose.y)),
                 int(math.floor(pose.z)))
+
+    def _make_mine(self, voxel):
+        """The reach-action for a target: configured mine_action, else the
+        default trunk-feller."""
+        if self._mine_action is not None:
+            return self._mine_action(voxel)
+        return ChopTrunk(voxel, is_log=self.is_log, tool_role=self.tool_role,
+                         is_safe=self.is_breakable)
 
     def _obstacle_ahead(self, ctx):
         """The voxel of a KNOWN, BREAKABLE (leaf/log) block directly ahead
@@ -207,8 +220,7 @@ class FindAndChopLogs:
                 self._found_raw = la_pos
                 self._recover_count = 0
                 self._cleared = set()
-                self._sub = ChopTrunk(la_pos, is_log=self.is_log,
-                                      tool_role=self.tool_role, is_safe=self.is_breakable)
+                self._sub = self._make_mine(la_pos)
                 self._state = "chop"
 
         st = self._state
@@ -230,8 +242,7 @@ class FindAndChopLogs:
             # just because it's horizontally close, so we don't get stuck
             # clicking at something we can't touch.
             if block_in_reach(pose, tgt, PLAYER_REACH):
-                self._sub = ChopTrunk(tgt, is_log=self.is_log,
-                                      tool_role=self.tool_role, is_safe=self.is_breakable)
+                self._sub = self._make_mine(tgt)
                 self._state = "chop"
                 return SkillResult(AgentAction(), SkillStatus.RUNNING, f"log {tgt} in reach; chopping")
             # A* route AROUND known gaps/obstacles to within reach of the log,
@@ -303,8 +314,7 @@ class FindAndChopLogs:
                     self._drop_target(); self._state = "find"
                     return SkillResult(r.action, SkillStatus.RUNNING,
                                        "arrived but log still out of reach; refind")
-                self._sub = ChopTrunk(self._target, is_log=self.is_log,
-                                      tool_role=self.tool_role, is_safe=self.is_breakable)
+                self._sub = self._make_mine(self._target)
                 self._state = "chop"
                 return SkillResult(r.action, SkillStatus.RUNNING, "arrived; chopping")
             if r.status in (SkillStatus.FAILED, SkillStatus.BLOCKED):
@@ -401,11 +411,12 @@ class TreeChopAgent(BaseAgent):
     the axe/blocks slots are right; the bot only ever breaks logs+leaves)."""
 
     name = "treechop"
+    cfg_key = "treechop"            # settings.agent.<cfg_key> section
 
     def __init__(self, settings: dict):
         self._settings = settings or {}
-        cfg = ((self._settings.get("agent", {}) or {}).get("treechop", {}) or {})
-        self._max_logs = int(cfg.get("max_logs", 9999))
+        cfg = ((self._settings.get("agent", {}) or {}).get(self.cfg_key, {}) or {})
+        self._max_logs = int(cfg.get("max_logs", cfg.get("max_blocks", 9999)))
         # Eat when hunger drops below this (0-1; 0.45 ≈ 9/20 food — above
         # the 6/20 sprint cutoff so the bot keeps sprinting). 0 disables.
         self._eat_below = float(cfg.get("eat_below", 0.45))
@@ -489,7 +500,7 @@ class TreeChopAgent(BaseAgent):
             self._hungry_ticks = 0
         if self._hungry_ticks >= 6:                     # sustained low -> eat
             self._eat = Eat()
-            print(f"[treechop] hungry ({h:.2f}) -> eating")
+            print(f"[{self.name}] hungry ({h:.2f}) -> eating")
             a = self._eat.tick(ctx).action; a.movement = dict(STOP)
             return a
         return None
@@ -512,8 +523,8 @@ class TreeChopAgent(BaseAgent):
         if self._wp is None:
             if not self._warned_no_world:
                 self._warned_no_world = True
-                print("[treechop] needs vision.world.enabled: true — no "
-                      "WorldMap to find logs. Idling.")
+                print(f"[{self.name}] needs vision.world.enabled: true — no "
+                      "WorldMap to find targets. Idling.")
             return _emit(_AA())
         if self._fsm is None:
             self._build()
@@ -538,13 +549,54 @@ class TreeChopAgent(BaseAgent):
         res = self._fsm.tick(ctx)
         if self._fsm._state != self._last_state:    # observability
             self._last_state = self._fsm._state
-            print(f"[treechop] {self._fsm._state} | logs={self._fsm.logs} "
-                  f"trunks={self._fsm.chopped} | {res.info}")
+            print(f"[{self.name}] {self._fsm._state} | got={self._fsm.logs} "
+                  f"runs={self._fsm.chopped} | {res.info}")
         return _emit(res.action)
+
+
+class HarvestAgent(TreeChopAgent):
+    """Generic block gatherer — the SAME find -> navigate -> mine -> collect
+    -> explore behaviour as the tree-chopper, but for ANY block type (no
+    trunk-climb): a plain MineBlock once in reach. Proves the framework
+    yields a new behaviour from a thin config, and gives a future goal/
+    planner a second behaviour to sequence.
+
+    Configure under settings.agent.harvest:
+        match: ["stone", "cobblestone"]   # substrings of block ids to gather
+        tool:  pickaxe                     # hotbar role to select for it
+        max_blocks: 9999
+    Run: ``python main.py --agent harvest``."""
+
+    name = "harvest"
+    cfg_key = "harvest"
+
+    def _build(self) -> None:
+        from knowledge.catalog import Catalog
+        from vision.mc_assets import MCAssets
+        from control.hotbar import build_hotbar_manager
+        cat = Catalog.load(MCAssets.load())
+        cfg = ((self._settings.get("agent", {}) or {}).get(self.cfg_key, {}) or {})
+        match = [str(m).lower() for m in (cfg.get("match") or ["stone"])]
+        tool = cfg.get("tool", "pickaxe")
+        is_target = lambda b: bool(b) and any(m in str(b).lower() for m in match)
+        mine_action = (lambda v: MineBlock(v, tool_role=tool,
+                                           is_target=is_target,
+                                           is_passthrough=is_target))
+        self._hotbar = build_hotbar_manager(self._settings, catalog=cat)
+        # is_breakable == the target predicate: only ever break what we're
+        # gathering (no incidental block-breaking).
+        self._fsm = FindAndChopLogs(is_log=is_target, is_breakable=is_target,
+                                    tool_role=tool, max_logs=self._max_logs,
+                                    mine_action=mine_action)
 
 
 def build_treechop_agent(settings: dict) -> TreeChopAgent:
     return TreeChopAgent(settings)
 
 
-__all__ = ["FindAndChopLogs", "TreeChopAgent", "build_treechop_agent"]
+def build_harvest_agent(settings: dict) -> HarvestAgent:
+    return HarvestAgent(settings)
+
+
+__all__ = ["FindAndChopLogs", "TreeChopAgent", "HarvestAgent",
+           "build_treechop_agent", "build_harvest_agent"]

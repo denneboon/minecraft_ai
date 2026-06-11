@@ -394,6 +394,13 @@ agent:
   treechop:
     max_logs: 9999                 # stop after chopping this many trunks
     eat_below: 0.45                # eat from the food slot below this hunger (0-1; 0 disables)
+  # Generic block gatherer (python main.py --agent harvest) — same find ->
+  # navigate -> mine -> collect FSM as treechop, for any block type.
+  harvest:
+    match: ["stone", "cobblestone"]  # gather blocks whose id contains any of these
+    tool: pickaxe                    # hotbar role to select for mining them
+    max_blocks: 9999
+    eat_below: 0.45
   prefer_hotkeys_for_hotbar: true
   humanlike_reaction_time_ms: 60
   jitter_ms: 20

@@ -259,6 +259,24 @@ def main() -> int:
     (ok if again is None else bad)(
         f"found voxel excluded from find after give-up -> {again}")
 
+    # 11. HarvestAgent — the SAME gather FSM generalised to any block via a
+    #     thin config (proves the framework yields new behaviours cheaply).
+    print("\n[11] HarvestAgent (framework generalises)")
+    from agents import build_agent, available_agents
+    from agents.skills import MineBlock as _MB, ChopTrunk as _CT
+    (ok if "harvest" in available_agents() else bad)("harvest agent registered")
+    hv = build_agent("harvest", {"agent": {"harvest": {"match": ["stone"],
+                                                        "tool": "pickaxe"}}})
+    hv._build()
+    m = hv._fsm._make_mine((3, 64, 0))
+    (ok if isinstance(m, _MB) and not isinstance(m, _CT) else bad)(
+        f"harvest reach-action is a plain MineBlock ({type(m).__name__})")
+    (ok if hv._fsm.is_log("minecraft:stone")
+        and not hv._fsm.is_log("minecraft:oak_log") else bad)(
+        "harvest targets the configured block (stone), not logs")
+    (ok if isinstance(FindAndChopLogs()._make_mine((0, 0, 0)), _CT) else bad)(
+        "tree-chopper still fells trunks with ChopTrunk (unchanged)")
+
     print("\n" + ("ALL TREECHOP TESTS PASSED" if not _fails
                   else f"{_fails} CHECK(S) FAILED"))
     return 0 if not _fails else 1
