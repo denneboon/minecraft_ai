@@ -47,6 +47,7 @@ OFFLINE_TESTS = [
     "test_inventory_control",
     "test_crafting",
     "test_stack_count",
+    "test_place_break",
 ]
 
 

@@ -125,6 +125,66 @@ def block_in_reach(pose, voxel, max_reach: float = PLAYER_REACH) -> bool:
     return eye is not None and block_reach_distance(eye, voxel) <= max_reach
 
 
+# Unit normal of each block face the player can target (F3 "axis"/face line).
+_FACE_NORMAL = {
+    "up": (0, 1, 0), "down": (0, -1, 0),
+    "north": (0, 0, -1), "south": (0, 0, 1),
+    "east": (1, 0, 0), "west": (-1, 0, 0),
+}
+
+
+def _player_voxels(pose) -> Tuple[Voxel, Voxel]:
+    """The two voxels the player body occupies: feet + head."""
+    fx, fy, fz = (int(math.floor(pose.x)), int(math.floor(pose.y)),
+                  int(math.floor(pose.z)))
+    return (fx, fy, fz), (fx, fy + 1, fz)
+
+
+def placement_voxel(looking_at) -> Optional[Voxel]:
+    """The voxel a block would be PLACED INTO if the player right-clicked the
+    block they're looking at now: the targeted block's position offset by its
+    targeted FACE normal. None if there's no valid target/face."""
+    if looking_at is None:
+        return None
+    pos = getattr(looking_at, "pos", None)
+    face = getattr(looking_at, "face", None)
+    if pos is None or face not in _FACE_NORMAL:
+        return None
+    n = _FACE_NORMAL[face]
+    return (pos[0] + n[0], pos[1] + n[1], pos[2] + n[2])
+
+
+def can_place_block(pose, looking_at, world_map=None, dimension=None,
+                    max_reach: float = PLAYER_REACH) -> Optional[Voxel]:
+    """Decide whether placing a block is possible RIGHT NOW, returning the
+    voxel it would occupy, or None. A placement is valid when the targeted
+    block AND the resulting voxel are within reach, the voxel isn't inside the
+    player's own body (MC forbids it), and the voxel isn't already a known
+    solid block. This is the "is placing possible" check the placer scans
+    around to satisfy."""
+    place = placement_voxel(looking_at)
+    if place is None:
+        return None
+    if pose is None:
+        return None
+    tgt = looking_at.pos
+    if not block_in_reach(pose, tgt, max_reach):     # block too far
+        return None
+    if not block_in_reach(pose, place, max_reach):   # resulting voxel too far
+        return None
+    if place in _player_voxels(pose):                # would be inside us
+        return None
+    if world_map is not None:                        # already occupied?
+        try:
+            obs = world_map.get_block(place, dimension=dimension)
+        except TypeError:
+            obs = world_map.get_block(place)
+        bid = getattr(obs, "block_id", None)
+        if bid not in (AIR_BLOCK, None):
+            return None
+    return place
+
+
 # ── Skill base ─────────────────────────────────────────────────────────
 
 class Skill:
@@ -913,16 +973,148 @@ def find_nearest_block(world_map, origin, match, *, max_radius: int = 48,
     return best
 
 
+class PlaceBlock(Skill):
+    """Place the block from ``tool_role``'s hotbar slot on a valid nearby
+    surface. Pitches DOWN to look at the ground ahead and, if the current
+    view can't take a placement (too far / inside the player / occupied),
+    SCANS yaw to find one. Emits use_item to place; DONE with the placement
+    voxel in ``placed_at``. Useful for putting down a crafting table."""
+    name = "place_block"
+
+    def __init__(self, tool_role: str = "blocks", *, slot: Optional[int] = None,
+                 target_pitch: float = 56.0,
+                 max_ticks: int = 90, max_scans: int = 9,
+                 max_reach: float = PLAYER_REACH, tol_deg: float = 5.0):
+        self.tool_role = tool_role
+        self.slot = slot                 # explicit hotbar slot 1-9, overrides role
+        self.target_pitch = target_pitch
+        self.max_ticks = max_ticks
+        self.max_scans = max_scans
+        self.max_reach = max_reach
+        self._tol = tol_deg
+        self.reset()
+
+    def reset(self):
+        self._t = 0
+        self._scan = 0
+        self._yaw_off = 0.0
+        self._selected = False
+        self._aimed_count = 0
+        self._aimer = _Aimer(tol_deg=self._tol)
+        self.placed_at = None
+
+    def tick(self, ctx: SkillContext) -> SkillResult:
+        self._t += 1
+        if self._t > self.max_ticks:
+            return SkillResult(AgentAction(), SkillStatus.FAILED, "place: timed out")
+        pose = ctx.pose
+        if pose is None:
+            return SkillResult(AgentAction(), SkillStatus.BLOCKED, "place: no pose")
+        # 1. hold the block in hand (explicit slot wins over the role lookup)
+        if not self._selected:
+            slot = self.slot
+            if slot is None:
+                slot = ctx.hotbar.best_slot_for(self.tool_role) if ctx.hotbar else None
+            if slot is None:
+                return SkillResult(AgentAction(), SkillStatus.FAILED,
+                                   f"place: no '{self.tool_role}' in hotbar")
+            self._selected = True
+            return SkillResult(AgentAction(hotbar=int(slot)), SkillStatus.RUNNING,
+                               f"place: select slot {slot}")
+        # 2. aim down at the ground (plus the current scan yaw offset)
+        want_yaw = float(pose.yaw) + self._yaw_off
+        dx, dy, aimed = self._aimer.step(ctx, want_yaw, self.target_pitch)
+        if not aimed:
+            self._aimed_count = 0
+            return SkillResult(AgentAction(look_dx=dx, look_dy=dy),
+                               SkillStatus.RUNNING, "place: aiming at ground")
+        # let F3 'looking at' catch up to the new view before judging
+        self._aimed_count += 1
+        if self._aimed_count < 3:
+            return SkillResult(AgentAction(), SkillStatus.RUNNING, "place: settling")
+        # 3. is placing possible from here?
+        place = can_place_block(pose, ctx.looking_at, ctx.world_map,
+                                getattr(pose, "dimension", None), self.max_reach)
+        if place is not None:
+            self.placed_at = place
+            return SkillResult(AgentAction(interact="use_item"),
+                               SkillStatus.DONE, f"placed at {place}")
+        # 4. nothing placeable here -> scan to a new heading
+        self._aimed_count = 0
+        self._scan += 1
+        if self._scan > self.max_scans:
+            return SkillResult(AgentAction(), SkillStatus.FAILED,
+                               "place: no valid surface found")
+        self._yaw_off += 30.0
+        self._aimer = _Aimer(tol_deg=self._tol)
+        return SkillResult(AgentAction(), SkillStatus.RUNNING,
+                           f"place: scanning for ground ({self._scan})")
+
+
+class BreakLookedAt(Skill):
+    """Break whatever block is under the crosshair (hold attack until F3 no
+    longer reports a block there). Used to reclaim a just-placed block — e.g.
+    the bot breaks its OWN crafting table after using it, before moving the
+    crosshair. ``avoid(block_id)->bool`` refuses to break protected blocks."""
+    name = "break_looked_at"
+
+    def __init__(self, *, tool_role=None, max_ticks: int = 160,
+                 gone_ticks: int = 3, avoid=None):
+        self.tool_role = tool_role
+        self.max_ticks = max_ticks
+        self.gone_ticks = gone_ticks
+        self.avoid = avoid
+        self.reset()
+
+    def reset(self):
+        self._t = 0
+        self._silent = 0
+        self._attacked = False
+        self._selected = False
+        self.broke = False
+
+    def tick(self, ctx: SkillContext) -> SkillResult:
+        self._t += 1
+        la = ctx.looking_at
+        bid = getattr(la, "block_id", None) if la is not None else None
+        # nothing under the crosshair -> it's gone (or never was)
+        if bid in (None, AIR_BLOCK):
+            self._silent += 1
+            if self._silent >= self.gone_ticks:
+                self.broke = self._attacked
+                return SkillResult(AgentAction(), SkillStatus.DONE,
+                                   "broke it" if self._attacked else "nothing to break")
+            return SkillResult(AgentAction(interact="attack"),
+                               SkillStatus.RUNNING, "break: confirming gone")
+        self._silent = 0
+        if self.avoid is not None and self.avoid(bid):
+            return SkillResult(AgentAction(), SkillStatus.FAILED,
+                               f"break: refusing {bid}")
+        if self._t > self.max_ticks:
+            return SkillResult(AgentAction(), SkillStatus.FAILED, "break: timed out")
+        if self.tool_role and not self._selected and ctx.hotbar is not None:
+            self._selected = True
+            slot = ctx.hotbar.best_slot_for(self.tool_role)
+            if slot is not None:
+                return SkillResult(AgentAction(hotbar=slot), SkillStatus.RUNNING,
+                                   f"break: select {self.tool_role}")
+        self._attacked = True
+        return SkillResult(AgentAction(interact="attack"),
+                           SkillStatus.RUNNING, f"breaking {str(bid).split(':')[-1]}")
+
+
 # Registry of the currently-implemented skills (name -> class). The task
 # layer / a future planner can look skills up by name.
 SKILLS = {s.name: s for s in (SelectRole, LookAtVoxel, Eat, MineBlock,
-                              PillarUp, Bridge, WalkToward, NavigateTo, ChopTrunk, SkillSequence)}
+                              PillarUp, Bridge, WalkToward, NavigateTo, ChopTrunk,
+                              PlaceBlock, BreakLookedAt, SkillSequence)}
 
 
 __all__ = [
     "SkillStatus", "SkillResult", "SkillContext", "Skill",
     "SelectRole", "LookAtVoxel", "Eat", "MineBlock", "PillarUp", "Bridge",
     "WalkToward", "NavigateTo", "ChopTrunk", "SkillSequence", "find_nearest_block",
+    "PlaceBlock", "BreakLookedAt", "can_place_block", "placement_voxel",
     "block_in_reach", "block_reach_distance", "PLAYER_REACH",
     "aim_angles", "norm_angle", "SKILLS",
 ]
