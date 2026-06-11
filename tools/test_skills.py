@@ -153,6 +153,23 @@ def test_mine_block(cat):
         if st in (SkillStatus.DONE, SkillStatus.FAILED): break
     (ok if st == SkillStatus.FAILED else bad)(f"never breaks -> {st}")
 
+    # SAFETY gate: refuse to strike a block confirmed NON-breakable (aim
+    # drifted onto terrain) -> FAILED, never attacks it.
+    wms = _FakeMap(); wms.set(vox, "minecraft:oak_log")
+    sks = MineBlock(vox, tool_role=None,
+                    is_safe=lambda b: bool(b) and str(b).endswith("_log"))
+    ctxs = SkillContext(pose=_pose(yaw=yaw, pitch=pitch), world_map=wms,
+                        looking_at=SimpleNamespace(pos=vox, block_id="minecraft:stone"))
+    rs = sks.tick(ctxs)
+    (ok if rs.status == SkillStatus.FAILED and "non-breakable" in rs.info
+     else bad)(f"refuses to mine confirmed non-breakable block -> {rs.status} ({rs.info})")
+    # And it DOES attack when the confirmed block is breakable.
+    ctxs.looking_at = SimpleNamespace(pos=vox, block_id="minecraft:oak_log")
+    sks2 = MineBlock(vox, tool_role=None,
+                     is_safe=lambda b: bool(b) and str(b).endswith("_log"))
+    saw = any(sks2.tick(ctxs).action.interact == "attack" for _ in range(4))
+    (ok if saw else bad)("attacks when the confirmed block IS breakable")
+
 
 def test_pillar_up(cat):
     print("\n[6] PillarUp")

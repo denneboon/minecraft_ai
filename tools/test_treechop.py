@@ -94,7 +94,7 @@ def main() -> int:
     class _Done:
         def tick(self, ctx): return SkillResult(AgentAction(), SkillStatus.DONE, "pillared")
     fsm = FindAndChopLogs(reach=3.5)
-    fsm._state = "approach"; fsm._target = (5, 64, 0); fsm._recovered = False
+    fsm._state = "approach"; fsm._target = (5, 64, 0); fsm._recover_count = 0; fsm._cleared = set()
     fsm._sub = _Stuck()
     ctx = SkillContext(pose=_pose(), world_map=_map_with_log((5, 64, 0)))
     fsm.tick(ctx)
@@ -104,18 +104,31 @@ def main() -> int:
     fsm._sub = _Done()
     fsm.tick(ctx)
     (ok if fsm._state == "approach" else bad)(f"recovered -> re-approach (state={fsm._state})")
-    # A 2nd stuck (already recovered) blacklists + refinds.
-    fsm._sub = _Stuck()
-    fsm.tick(ctx)
-    (ok if fsm._state == "find" and (5, 64, 0) in fsm._blacklist else bad)(
-        f"2nd stuck -> give up + blacklist (state={fsm._state})")
+
+    # Bounded multi-recovery: recovers up to max_recover times, THEN gives up.
+    fsm = FindAndChopLogs(reach=3.5, max_recover=2)
+    fsm._state = "approach"; fsm._target = (5, 64, 0)
+    fsm._recover_count = 0; fsm._cleared = set()
+    ctx = SkillContext(pose=_pose(), world_map=_map_with_log((5, 64, 0)))
+    recoveries = 0
+    for _ in range(8):
+        fsm._sub = _Stuck()
+        fsm.tick(ctx)                           # approach stuck -> recover or give up
+        if fsm._state == "recover":
+            recoveries += 1
+            fsm._sub = _Done(); fsm.tick(ctx)   # finish recovery -> re-approach
+        elif fsm._state == "find":
+            break
+    (ok if recoveries == 2 and fsm._state == "find" and (5, 64, 0) in fsm._blacklist
+     else bad)(f"recovers max_recover=2 then gives up (did {recoveries}, "
+               f"state={fsm._state})")
 
     # LEAVES ahead -> mine-through (tree material is OK to break).
     wm = _map_with_log((5, 64, 0))
     wm.update_block(BlockObservation(pos=(1, 64, 0), block_id="minecraft:oak_leaves",
                                      confidence=1.0, source="looking_at", last_seen_tick=0))
     fsm = FindAndChopLogs(reach=3.5)
-    fsm._state = "approach"; fsm._target = (5, 64, 0); fsm._recovered = False
+    fsm._state = "approach"; fsm._target = (5, 64, 0); fsm._recover_count = 0; fsm._cleared = set()
     fsm._sub = _Stuck()
     fsm.tick(SkillContext(pose=_pose(), world_map=wm))
     (ok if fsm._state == "recover" and isinstance(fsm._sub, MineBlock) else bad)(
@@ -126,7 +139,7 @@ def main() -> int:
     wm2.update_block(BlockObservation(pos=(1, 64, 0), block_id="minecraft:stone",
                                       confidence=1.0, source="looking_at", last_seen_tick=0))
     fsm = FindAndChopLogs(reach=3.5)
-    fsm._state = "approach"; fsm._target = (5, 64, 0); fsm._recovered = False
+    fsm._state = "approach"; fsm._target = (5, 64, 0); fsm._recover_count = 0; fsm._cleared = set()
     fsm._sub = _Stuck()
     fsm.tick(SkillContext(pose=_pose(), world_map=wm2))
     (ok if fsm._state == "recover" and isinstance(fsm._sub, PillarUp) else bad)(

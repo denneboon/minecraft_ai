@@ -45,7 +45,8 @@ class FindAndChopLogs:
                  scan_budget: int = 60, max_logs: int = 9999,
                  tool_role: Optional[str] = "axe",
                  explore_dist: float = 8.0, max_explore: int = 10,
-                 explore_turn: float = 65.0, is_breakable=None):
+                 explore_turn: float = 65.0, is_breakable=None,
+                 max_recover: int = 5):
         self.is_log = is_log or _is_log_default
         # The ONLY blocks tree-chopping may ever break: logs + leaves. The
         # path-clearing recovery (mine-through) is restricted to these, so
@@ -62,6 +63,7 @@ class FindAndChopLogs:
         self.explore_dist = explore_dist
         self.max_explore = max_explore
         self.explore_turn = explore_turn
+        self.max_recover = max_recover
         self.reset()
 
     def reset(self):
@@ -70,8 +72,10 @@ class FindAndChopLogs:
         self._sub = None
         self._scan_ticks = 0
         self._blacklist = set()
-        self._recovered = False     # pillar-out attempted for this target?
+        self._recover_count = 0         # recovery actions used for this target
+        self._cleared = set()           # obstacles already mined (avoid re-mining)
         self._explore_attempts = 0
+        self._explore_anchor_yaw = None # fixed origin to fan explore headings
         self.chopped = 0
 
     def _eye_vox(self, pose):
@@ -100,6 +104,8 @@ class FindAndChopLogs:
             except TypeError:
                 obs = wm.get_block(v)
             bid = getattr(obs, "block_id", None)
+            if v in self._cleared:           # already mined (map may lag) -> skip
+                continue
             if bid not in (AIR_BLOCK, None) and self.is_breakable(bid):
                 return v
         return None
@@ -126,12 +132,15 @@ class FindAndChopLogs:
                 self._state = "scan"; self._scan_ticks = 0
                 return SkillResult(AgentAction(), SkillStatus.RUNNING, "no log mapped; scanning")
             self._target = tgt
-            self._recovered = False
+            self._recover_count = 0
+            self._cleared = set()
             self._explore_attempts = 0      # found one -> refresh explore budget
+            self._explore_anchor_yaw = None
             ex, ez = pose.x, pose.z
             horiz = math.hypot(tgt[0] + 0.5 - ex, tgt[2] + 0.5 - ez)
             if horiz <= self.reach:
-                self._sub = ChopTrunk(tgt, is_log=self.is_log, tool_role=self.tool_role)
+                self._sub = ChopTrunk(tgt, is_log=self.is_log,
+                                      tool_role=self.tool_role, is_safe=self.is_breakable)
                 self._state = "chop"
                 return SkillResult(AgentAction(), SkillStatus.RUNNING, f"log {tgt} in reach; chopping")
             self._sub = WalkToward(tgt, arrive_dist=self.reach)
@@ -147,8 +156,11 @@ class FindAndChopLogs:
             if self._scan_ticks > self.scan_budget:
                 # Nothing nearby -> walk to a new area and re-scan.
                 if self._explore_attempts < self.max_explore:
+                    if self._explore_anchor_yaw is None:
+                        self._explore_anchor_yaw = float(pose.yaw)
                     self._explore_attempts += 1
-                    h = math.radians(float(pose.yaw) + self._explore_attempts * self.explore_turn)
+                    h = math.radians(self._explore_anchor_yaw
+                                     + self._explore_attempts * self.explore_turn)
                     ex = (int(math.floor(pose.x + self.explore_dist * (-math.sin(h)))),
                           int(math.floor(pose.y)),
                           int(math.floor(pose.z + self.explore_dist * math.cos(h))))
@@ -185,26 +197,30 @@ class FindAndChopLogs:
         if st == "approach":
             r = self._sub.tick(ctx)
             if r.status == SkillStatus.DONE:
-                self._sub = ChopTrunk(self._target, is_log=self.is_log, tool_role=self.tool_role)
+                self._sub = ChopTrunk(self._target, is_log=self.is_log,
+                                      tool_role=self.tool_role, is_safe=self.is_breakable)
                 self._state = "chop"
                 return SkillResult(r.action, SkillStatus.RUNNING, "arrived; chopping")
             if r.status in (SkillStatus.FAILED, SkillStatus.BLOCKED):
-                # Stuck (e.g. fell in a hole)? Try pillaring out once, then
-                # re-approach from the new height. Other failures (or a 2nd
-                # stuck) -> give up on this log.
-                if "stuck" in r.info and not self._recovered:
-                    self._recovered = True
+                # Stuck? Recover up to max_recover times for this log — each
+                # time, mine THROUGH a leaf/log wall ahead (so a multi-block
+                # wall clears across several recoveries) or pillar OUT of a
+                # hole. Anything else, or budget exhausted -> give up on it.
+                if "stuck" in r.info and self._recover_count < self.max_recover:
+                    self._recover_count += 1
                     self._state = "recover"
                     obstacle = self._obstacle_ahead(ctx)
                     if obstacle is not None:
-                        # A wall is blocking the path -> mine through it.
-                        self._sub = MineBlock(obstacle, tool_role=None)
+                        self._cleared.add(obstacle)        # don't re-mine (map lags)
+                        self._sub = MineBlock(obstacle, tool_role=None,
+                                              is_safe=self.is_breakable)
                         return SkillResult(r.action, SkillStatus.RUNNING,
-                                           f"stuck; mining through {obstacle}")
-                    # Otherwise assume a hole -> pillar out.
+                                           f"stuck; mining through {obstacle} "
+                                           f"({self._recover_count}/{self.max_recover})")
                     self._sub = PillarUp(height=2)
                     return SkillResult(r.action, SkillStatus.RUNNING,
-                                       "stuck; pillaring out of the hole")
+                                       f"stuck; pillaring out "
+                                       f"({self._recover_count}/{self.max_recover})")
                 self._blacklist.add(self._target); self._state = "find"
                 return SkillResult(r.action, SkillStatus.RUNNING,
                                    f"approach {r.status.value}; refind")
@@ -213,7 +229,10 @@ class FindAndChopLogs:
         if st == "recover":
             r = self._sub.tick(ctx)
             if r.status in (SkillStatus.DONE, SkillStatus.FAILED, SkillStatus.BLOCKED):
-                # Climbed out (or couldn't) -> re-approach the log once more.
+                # Cleared a block / climbed (or couldn't) -> re-approach. A
+                # remaining wall block or hole re-triggers recover (bounded
+                # by max_recover), so multi-block obstacles clear over a few
+                # passes without an infinite loop.
                 self._sub = WalkToward(self._target, arrive_dist=self.reach)
                 self._state = "approach"
                 return SkillResult(r.action, SkillStatus.RUNNING,

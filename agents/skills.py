@@ -230,10 +230,16 @@ class MineBlock(Skill):
     name = "mine_block"
 
     def __init__(self, voxel: Voxel, tool_role: Optional[str] = "axe",
-                 max_ticks: int = 200, tol_deg: float = 3.0):
+                 max_ticks: int = 200, tol_deg: float = 3.0, is_safe=None):
         self.voxel = voxel
         self.tool_role = tool_role
         self.max_ticks = max_ticks
+        # Optional SAFETY gate: a predicate (block_id -> bool) of blocks this
+        # MineBlock is allowed to strike. If F3 confirms the crosshair is on
+        # a block that FAILS it (e.g. aim drifted onto terrain), the skill
+        # refuses to attack and FAILs — enforcing "only break X" invariants
+        # at the moment of the swing, not just at target-selection time.
+        self.is_safe = is_safe
         self.aim = _Aimer(tol_deg=tol_deg)
         self._tool_ok = tool_role is None
         self._mining_ticks = 0
@@ -285,6 +291,14 @@ class MineBlock(Skill):
         if not aimed:
             return SkillResult(AgentAction(look_dx=dx, look_dy=dy),
                                SkillStatus.RUNNING, "aiming at block")
+        # Safety gate: about to swing — if F3 confirms the crosshair is on a
+        # KNOWN block we're not allowed to break, refuse (never mine terrain
+        # /builds because aim drifted off the intended voxel).
+        if self.is_safe is not None and la is not None \
+                and getattr(la, "block_id", None) is not None \
+                and not self.is_safe(la.block_id):
+            return SkillResult(AgentAction(), SkillStatus.FAILED,
+                               f"refusing to mine non-breakable {la.block_id}")
         self._mining_ticks += 1
         if self._mining_ticks > self.max_ticks:
             return SkillResult(AgentAction(), SkillStatus.FAILED,
@@ -380,10 +394,12 @@ class Bridge(Skill):
         self._start: Optional[Tuple[float, float]] = None
         self._ticks_this_block = 0
         self._selected = False
+        self._max_dist = 0.0
 
     def reset(self):
         self._placed = 0; self._start = None
         self._ticks_this_block = 0; self._selected = False
+        self._max_dist = 0.0
 
     def tick(self, ctx: SkillContext) -> SkillResult:
         p = ctx.pose
@@ -392,10 +408,14 @@ class Bridge(Skill):
         if self._start is None:
             self._start = (float(p.x), float(p.z))
         dist = math.hypot(float(p.x) - self._start[0], float(p.z) - self._start[1])
+        # Reset the stall budget on ANY real forward progress (not just at
+        # whole-block crossings) so slow, steady sneak-bridging isn't failed.
+        if dist > self._max_dist + 0.1:
+            self._max_dist = dist
+            self._ticks_this_block = 0
         placed_now = int(dist)
         if placed_now > self._placed:
             self._placed = placed_now
-            self._ticks_this_block = 0
         if self._placed >= self.length:
             return SkillResult(AgentAction(movement={"sneak": self.keep_sneak,
                                                      "backward": False}),
@@ -458,20 +478,38 @@ class WalkToward(Skill):
         self._stuck = 0
 
     def _edge_ahead(self, ctx: SkillContext, px, py, pz, tx, tz) -> bool:
-        """True if the block we'd step onto next (toward the target) is a
-        KNOWN air block (a drop). Unknown ground -> not an edge (proceed)."""
+        """True if a block we'd step onto next is a KNOWN air block (a
+        drop). We walk along the actual direction to the target, so check
+        every ground cell the foot could land on — the cell ~0.8 blocks
+        ahead AND both cardinal neighbours when the move is diagonal — so a
+        diagonal step can't sidestep the fall check. Unknown ground -> not
+        an edge (proceed)."""
         wm = ctx.world_map
         if wm is None or not self.avoid_fall:
             return False
-        sx = (1 if tx > px else -1) if abs(tx - px) >= abs(tz - pz) else 0
-        sz = 0 if sx != 0 else (1 if tz > pz else -1)
+        dx, dz = tx - px, tz - pz
+        mag = math.hypot(dx, dz)
+        if mag < 1e-6:
+            return False
+        ux, uz = dx / mag, dz / mag
         foot = int(math.floor(py))
-        ground = (int(math.floor(px)) + sx, foot - 1, int(math.floor(pz)) + sz)
-        try:
-            obs = wm.get_block(ground, dimension=ctx.dimension)
-        except TypeError:
-            obs = wm.get_block(ground)
-        return obs is not None and obs.block_id == AIR_BLOCK
+        fx, fz = int(math.floor(px)), int(math.floor(pz))
+        ahead = (int(math.floor(px + ux * 0.8)), int(math.floor(pz + uz * 0.8)))
+        cells = {ahead}
+        if abs(dx) > 0.35 and abs(dz) > 0.35:        # diagonal -> guard both sides
+            cells.add((fx + (1 if dx > 0 else -1), fz))
+            cells.add((fx, fz + (1 if dz > 0 else -1)))
+        for cx, cz in cells:
+            if (cx, cz) == (fx, fz):                 # the cell we're already on
+                continue
+            ground = (cx, foot - 1, cz)
+            try:
+                obs = wm.get_block(ground, dimension=ctx.dimension)
+            except TypeError:
+                obs = wm.get_block(ground)
+            if obs is not None and obs.block_id == AIR_BLOCK:
+                return True
+        return False
 
     def tick(self, ctx: SkillContext) -> SkillResult:
         p = ctx.pose
@@ -527,18 +565,23 @@ class ChopTrunk(Skill):
     name = "chop_trunk"
 
     def __init__(self, start_voxel: Voxel, is_log=None,
-                 max_height: int = 10, tool_role: Optional[str] = "axe"):
+                 max_height: int = 10, tool_role: Optional[str] = "axe",
+                 is_safe=None):
         self.start = tuple(start_voxel)
         self.is_log = is_log or (lambda b: bool(b) and str(b).endswith("_log"))
         self.max_height = max_height
         self.tool_role = tool_role
+        # Safety gate passed to each MineBlock so trunk mining can't strike
+        # terrain even if aim drifts (defaults to "only this skill's logs").
+        self.is_safe = is_safe or self.is_log
         self.reset()
 
     def reset(self):
         self._target = self.start
         self._mined = 0
         self._phase = "mine"
-        self._mine = MineBlock(self._target, tool_role=self.tool_role)
+        self._mine = MineBlock(self._target, tool_role=self.tool_role,
+                               is_safe=self.is_safe)
         self._aim = None
         self._check_ticks = 0
 
@@ -568,7 +611,8 @@ class ChopTrunk(Skill):
         la = ctx.looking_at
         if la is not None and getattr(la, "pos", None) is not None \
                 and tuple(la.pos) == self._target and self.is_log(la.block_id):
-            self._mine = MineBlock(self._target, tool_role=self.tool_role)
+            self._mine = MineBlock(self._target, tool_role=self.tool_role,
+                                   is_safe=self.is_safe)
             self._phase = "mine"; self._check_ticks = 0
             return SkillResult(AgentAction(), SkillStatus.RUNNING,
                                f"log above at {self._target}; mining")
