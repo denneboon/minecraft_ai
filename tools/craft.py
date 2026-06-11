@@ -11,8 +11,13 @@ the inventory screen. Panic: Ctrl+Shift+F12 (the usual emergency stop).
 """
 from __future__ import annotations
 
+import os
 import sys
 import time
+
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 
 import main as M
 from utils.console import ensure_utf8_stdout
@@ -65,6 +70,15 @@ def main(argv=None) -> int:
     try:
         print(f"[craft] opening inventory (gui_scale={ui_scale}) — target {target}")
         ctl.open_inventory()
+        if "--debug" in argv:
+            try:
+                import cv2
+                dbg = capture.get_frame()
+                cv2.imwrite(os.path.join(ROOT, "data", "_craft_debug.png"),
+                            dbg[:, :, ::-1])
+                print(f"[craft] frame {dbg.shape} saved to data/_craft_debug.png")
+            except Exception as e:
+                print(f"[craft] frame dump failed: {e}")
         snap = ctl.read()
         have = inventory_counts(snap)
         print(f"[craft] inventory: "
