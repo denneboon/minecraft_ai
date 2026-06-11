@@ -183,23 +183,24 @@ def _have(available: Dict[str, int], item: str) -> int:
 def plan_step(target_id: str, available: Dict[str, int], assets, cat
               ) -> Optional[CraftStep]:
     """Can ``target_id`` be crafted in ONE step from ``available`` (item ->
-    count)? Returns the concrete cell placement, or None. Picks, per cell,
-    the acceptable item the bot has the most of."""
+    count)? Returns the concrete cell placement, or None.
+
+    PRESENCE-based, not count-based: a cell is satisfiable if the bot HAS at
+    least one of an acceptable item — the same stack can fill several cells.
+    Stack COUNTS from the inventory OCR are unreliable (and a 64-stack
+    legitimately fills all 9 cells), so we don't decrement per cell; the game
+    enforces the real amount (placing simply does nothing if short, which the
+    executor handles harmlessly)."""
     rec = recipe_for(target_id, assets, cat)
     if rec is None:
         return None
     cell_items: Dict[Tuple[int, int], str] = {}
-    need: Dict[str, int] = {}
     for (rc, opts) in rec.placements():
-        choice = None
-        for opt in sorted(opts, key=lambda o: -_have(available, o)):
-            if _have(available, opt) - need.get(opt, 0) > 0:
-                choice = opt
-                break
+        choice = next((opt for opt in sorted(opts, key=lambda o: -_have(available, o))
+                       if _have(available, opt) > 0), None)
         if choice is None:
-            return None                       # missing an ingredient
+            return None                       # don't have ANY acceptable item
         cell_items[rc] = choice
-        need[choice] = need.get(choice, 0) + 1
     return CraftStep(rec.result_id, rec.result_count, not rec.fits_2x2,
                      cell_items)
 

@@ -28,7 +28,7 @@ from control.input_gate import InputGate
 from vision.capture import Capture, CaptureConfig
 from vision.inventory import build_inventory_reader
 from vision.tooltip import build_tooltip_reader
-from agents.inventory_inspector import InventoryInspector
+from agents.inventory_inspector import InventoryInspector, InspectorConfig
 from control.hotbar import build_hotbar_manager
 from control.inventory_control import InventoryController
 from agents.crafting import Crafter, inventory_counts
@@ -69,7 +69,12 @@ def main(argv=None) -> int:
     # Hover-to-learn: identify items the static recogniser is unsure about
     # by hovering the slot + OCRing the tooltip id.
     tooltip = build_tooltip_reader(settings, assets=a)
-    inspector = InventoryInspector(tooltip, capture, mouse=mouse, gate=gate)
+    # sample_store=reader.sample_store: each hover TEACHES the recogniser, so
+    # learned items are read statically next time (no more hovering them).
+    inspector = InventoryInspector(
+        tooltip, capture, mouse=mouse, gate=gate,
+        sample_store=getattr(reader, "sample_store", None),
+        config=InspectorConfig(max_resolutions_per_call=20))
     try:
         origin = capture.window_origin()
     except Exception:
