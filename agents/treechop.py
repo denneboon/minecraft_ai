@@ -28,8 +28,9 @@ from typing import Optional
 
 from brain.interfaces import AgentAction
 from agents.skills import (
-    SkillStatus, SkillResult, SkillContext, WalkToward, ChopTrunk, PillarUp,
-    MineBlock, Eat, find_nearest_block, block_in_reach, PLAYER_REACH, _Aimer,
+    SkillStatus, SkillResult, SkillContext, WalkToward, NavigateTo, ChopTrunk,
+    PillarUp, MineBlock, Eat, find_nearest_block, block_in_reach, PLAYER_REACH,
+    _Aimer,
 )
 from vision.world.map import AIR_BLOCK
 
@@ -205,9 +206,11 @@ class FindAndChopLogs:
                                       tool_role=self.tool_role, is_safe=self.is_breakable)
                 self._state = "chop"
                 return SkillResult(AgentAction(), SkillStatus.RUNNING, f"log {tgt} in reach; chopping")
-            self._sub = WalkToward(tgt, arrive_dist=self.reach)
+            # A* route AROUND known gaps/obstacles to within reach of the log,
+            # following the path with the reactive WalkToward.
+            self._sub = NavigateTo(tgt, arrive_reach=PLAYER_REACH)
             self._state = "approach"
-            return SkillResult(AgentAction(), SkillStatus.RUNNING, f"log {tgt}; approaching")
+            return SkillResult(AgentAction(), SkillStatus.RUNNING, f"log {tgt}; navigating")
 
         if st == "scan":
             self._scan_ticks += 1
@@ -301,7 +304,7 @@ class FindAndChopLogs:
                 # remaining wall block or hole re-triggers recover (bounded
                 # by max_recover), so multi-block obstacles clear over a few
                 # passes without an infinite loop.
-                self._sub = WalkToward(self._target, arrive_dist=self.reach)
+                self._sub = NavigateTo(self._target, arrive_reach=PLAYER_REACH)
                 self._state = "approach"
                 return SkillResult(r.action, SkillStatus.RUNNING,
                                    f"recovered ({r.info}); re-approaching")

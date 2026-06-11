@@ -37,6 +37,7 @@ from typing import Optional, Tuple
 
 from brain.interfaces import AgentAction
 from vision.world.map import AIR_BLOCK
+from vision.world.pathfind import find_path, PathfinderConfig
 
 Voxel = Tuple[int, int, int]
 
@@ -650,6 +651,118 @@ class WalkToward(Skill):
                            SkillStatus.RUNNING, f"{info} (d={dist:.1f})")
 
 
+class NavigateTo(Skill):
+    """Route to ``goal`` by A* over the WorldMap, FOLLOWING the path with the
+    reactive WalkToward (sprint / jump / edge-safe) one waypoint at a time.
+    This is the planner layer: A* routes AROUND known gaps/obstacles that the
+    straight-line WalkToward alone would fail at. Replans when a segment gets
+    stuck/edges out; falls back to a direct reactive walk when there's no map
+    or no route. DONE when ``goal`` is within reach (or arrive_dist).
+
+    The A* default here is ``passable`` (unknown = open) because the
+    recogniser's map is sparse — that lets it route around the KNOWN
+    walls/gaps it has mapped while WalkToward's own edge check guards the
+    unknown last metre."""
+    name = "navigate_to"
+
+    def __init__(self, goal: Voxel, *, arrive_reach: float = PLAYER_REACH,
+                 arrive_dist: Optional[float] = None,
+                 unknown_policy: str = "passable", max_replans: int = 5,
+                 dimension: Optional[str] = None):
+        self.goal = tuple(goal)
+        self.arrive_reach = arrive_reach     # done when goal within this 3D reach
+        self.arrive_dist = arrive_dist       # ...or within this horizontal dist
+        self.cfg = PathfinderConfig(unknown_policy=unknown_policy)
+        self.max_replans = max_replans
+        self.dimension = dimension
+        self.reset()
+
+    def reset(self):
+        self._path = []
+        self._wp = 0
+        self._sub = None
+        self._replans = 0
+
+    @staticmethod
+    def _feet(pose):
+        return (int(math.floor(pose.x)), int(math.floor(pose.y)),
+                int(math.floor(pose.z)))
+
+    def _arrived(self, pose) -> bool:
+        if self.arrive_dist is not None:
+            d = math.hypot(self.goal[0] + 0.5 - pose.x, self.goal[2] + 0.5 - pose.z)
+            return d <= self.arrive_dist
+        return block_in_reach(pose, self.goal, self.arrive_reach)
+
+    def _goal_candidates(self):
+        # The goal voxel (a log) usually isn't standable; A* needs a standable
+        # FEET cell. Try the goal, then standable cells beside/below it.
+        gx, gy, gz = self.goal
+        yield self.goal
+        for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            for dy in (0, -1, 1):
+                yield (gx + dx, gy + dy, gz + dz)
+
+    def _plan(self, ctx) -> bool:
+        feet = self._feet(ctx.pose)
+        dim = self.dimension if self.dimension is not None else ctx.dimension
+        for g in self._goal_candidates():
+            res = find_path(ctx.world_map, feet, g, dimension=dim, config=self.cfg)
+            if res and res.waypoints:
+                self._path = list(res.waypoints)
+                self._wp = 0
+                return True
+        return False
+
+    def _reactive(self, ctx):
+        if self._sub is None or not isinstance(self._sub, WalkToward):
+            self._sub = WalkToward(self.goal, arrive_dist=(self.arrive_dist or 1.6))
+        return self._sub.tick(ctx)
+
+    def tick(self, ctx: SkillContext) -> SkillResult:
+        pose = ctx.pose
+        if pose is None:
+            return SkillResult(AgentAction(), SkillStatus.BLOCKED, "no pose")
+        if self._arrived(pose):
+            return SkillResult(AgentAction(movement={"forward": False}),
+                               SkillStatus.DONE, "arrived")
+        if ctx.world_map is None:                    # no map -> straight-line
+            return self._reactive(ctx)
+
+        if not self._path:
+            if self._replans > self.max_replans:
+                r = self._reactive(ctx)              # routing exhausted -> best effort
+                if r.status == SkillStatus.FAILED:
+                    return SkillResult(r.action, SkillStatus.FAILED, "no route")
+                return r
+            self._replans += 1
+            if not self._plan(ctx):
+                return self._reactive(ctx)           # A* found nothing this tick
+
+        # Advance past waypoints we're already standing on.
+        def _hd(wp):
+            return math.hypot(wp[0] + 0.5 - pose.x, wp[2] + 0.5 - pose.z)
+        while self._wp < len(self._path) - 1 and _hd(self._path[self._wp]) <= 1.3:
+            self._wp += 1
+            self._sub = None
+        wp = self._path[self._wp]
+        if self._sub is None or getattr(self._sub, "target", None) != wp:
+            self._sub = WalkToward(wp, arrive_dist=1.1, stuck_window=14)
+        r = self._sub.tick(ctx)
+        if r.status == SkillStatus.DONE:
+            self._sub = None
+            if self._wp >= len(self._path) - 1:
+                self._path = []                      # reached path end -> re-eval/replan
+                return SkillResult(r.action, SkillStatus.RUNNING, "reached path end")
+            self._wp += 1
+            return SkillResult(r.action, SkillStatus.RUNNING,
+                               f"waypoint {self._wp}/{len(self._path)}")
+        if r.status in (SkillStatus.FAILED, SkillStatus.BLOCKED):
+            self._path = []; self._sub = None        # segment blocked -> replan around it
+            return SkillResult(r.action, SkillStatus.RUNNING, "segment blocked; replanning")
+        return r
+
+
 class ChopTrunk(Skill):
     """Chop a vertical run of logs IN PLACE (no walking): mine the start
     voxel, look up to the block above, and if it's still a log, mine that
@@ -799,12 +912,13 @@ def find_nearest_block(world_map, origin, match, *, max_radius: int = 48,
 # Registry of the currently-implemented skills (name -> class). The task
 # layer / a future planner can look skills up by name.
 SKILLS = {s.name: s for s in (SelectRole, LookAtVoxel, Eat, MineBlock,
-                              PillarUp, Bridge, WalkToward, ChopTrunk, SkillSequence)}
+                              PillarUp, Bridge, WalkToward, NavigateTo, ChopTrunk, SkillSequence)}
 
 
 __all__ = [
     "SkillStatus", "SkillResult", "SkillContext", "Skill",
     "SelectRole", "LookAtVoxel", "Eat", "MineBlock", "PillarUp", "Bridge",
-    "WalkToward", "ChopTrunk", "SkillSequence", "find_nearest_block",
+    "WalkToward", "NavigateTo", "ChopTrunk", "SkillSequence", "find_nearest_block",
+    "block_in_reach", "block_reach_distance", "PLAYER_REACH",
     "aim_angles", "norm_angle", "SKILLS",
 ]

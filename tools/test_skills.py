@@ -351,6 +351,38 @@ def test_walk_toward():
         f"known drop ahead -> {r.status} ({r.info})")
 
 
+def test_navigate_to():
+    print("\n[10b] NavigateTo (A* route + follow)")
+    from agents.skills import NavigateTo, norm_angle
+    from vision.world.map import WorldMap
+    goal = (6, 64, 0)
+    # Empty map + 'passable' A* -> everything standable -> plans + follows to
+    # the goal. Simulate the camera turning (look_dx) + walking (forward).
+    wm = WorldMap()
+    pose = _pose(x=0.0, y=64.0, z=0.0, yaw=-90.0)
+    sk = NavigateTo(goal, arrive_dist=1.5)
+    status = None
+    for _ in range(120):
+        r = sk.tick(SkillContext(pose=pose, world_map=wm, px_per_deg=6.5))
+        status = r.status
+        if status in (SkillStatus.DONE, SkillStatus.FAILED):
+            break
+        pose.yaw = norm_angle(pose.yaw + r.action.look_dx / 6.5)
+        if r.action.movement.get("forward"):
+            pose.x += 0.5
+    (ok if status == SkillStatus.DONE else bad)(f"routes + follows to goal -> {status}")
+
+    # No map -> reactive straight-line fallback (still emits movement).
+    sk2 = NavigateTo(goal, arrive_dist=1.5)
+    r = sk2.tick(SkillContext(pose=_pose(yaw=-90.0), world_map=None, px_per_deg=6.5))
+    (ok if r.status == SkillStatus.RUNNING else bad)(f"no map -> reactive fallback ({r.status})")
+
+    # Already at the goal -> DONE immediately.
+    r = NavigateTo(goal, arrive_dist=1.5).tick(
+        SkillContext(pose=_pose(x=6.5, z=0.0), world_map=WorldMap()))
+    (ok if r.status == SkillStatus.DONE else bad)(f"at goal -> DONE ({r.status})")
+
+
 def test_chop_trunk():
     print("\n[9] ChopTrunk chains up a multi-log trunk")
     from agents.skills import ChopTrunk, aim_angles
@@ -402,6 +434,7 @@ def main() -> int:
     test_bridge(cat)
     test_sequence_and_query(cat)
     test_walk_toward()
+    test_navigate_to()
     test_chop_trunk()
     print("\n" + ("ALL SKILL TESTS PASSED" if not _fails
                   else f"{_fails} CHECK(S) FAILED"))
