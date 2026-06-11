@@ -421,6 +421,70 @@ class Bridge(Skill):
             f"{'safe-' if self.keep_sneak else 'god-'}bridge {self._placed+1}/{self.length}")
 
 
+class ChopTrunk(Skill):
+    """Chop a vertical run of logs IN PLACE (no walking): mine the start
+    voxel, look up to the block above, and if it's still a log, mine that
+    too — repeating up the trunk until the block above isn't a log (or a
+    safety height cap). Composes the live-verified MineBlock + LookAtVoxel.
+
+    The 'is the block above a log?' check reads F3's targeted block after
+    aiming up, with a few ticks of slack for the ~3 Hz OCR to catch up."""
+    name = "chop_trunk"
+
+    def __init__(self, start_voxel: Voxel, is_log=None,
+                 max_height: int = 10, tool_role: Optional[str] = "axe"):
+        self.start = tuple(start_voxel)
+        self.is_log = is_log or (lambda b: bool(b) and str(b).endswith("_log"))
+        self.max_height = max_height
+        self.tool_role = tool_role
+        self.reset()
+
+    def reset(self):
+        self._target = self.start
+        self._mined = 0
+        self._phase = "mine"
+        self._mine = MineBlock(self._target, tool_role=self.tool_role)
+        self._aim = None
+        self._check_ticks = 0
+
+    def tick(self, ctx: SkillContext) -> SkillResult:
+        if self._mined >= self.max_height:
+            return SkillResult(AgentAction(), SkillStatus.DONE,
+                               f"reached height cap ({self._mined})")
+        if self._phase == "mine":
+            r = self._mine.tick(ctx)
+            if r.status == SkillStatus.DONE:
+                self._mined += 1
+                self._target = (self._target[0], self._target[1] + 1, self._target[2])
+                self._aim = LookAtVoxel(self._target, tol_deg=3.0)
+                self._phase = "aim_up"; self._check_ticks = 0
+                return SkillResult(r.action, SkillStatus.RUNNING,
+                                   f"mined {self._mined}; looking up")
+            return r                          # RUNNING / FAILED / BLOCKED
+        if self._phase == "aim_up":
+            r = self._aim.tick(ctx)
+            if r.status == SkillStatus.DONE:
+                self._phase = "check"
+                return SkillResult(AgentAction(), SkillStatus.RUNNING,
+                                   "checking for log above")
+            return r
+        # phase == "check": wait for F3 to confirm a log at the new target.
+        self._check_ticks += 1
+        la = ctx.looking_at
+        if la is not None and getattr(la, "pos", None) is not None \
+                and tuple(la.pos) == self._target and self.is_log(la.block_id):
+            self._mine = MineBlock(self._target, tool_role=self.tool_role)
+            self._phase = "mine"; self._check_ticks = 0
+            return SkillResult(AgentAction(), SkillStatus.RUNNING,
+                               f"log above at {self._target}; mining")
+        if self._check_ticks >= 8:
+            return SkillResult(AgentAction(), SkillStatus.DONE,
+                               f"trunk cleared ({self._mined} logs)")
+        # hold aim while the OCR catches up
+        return (self._aim.tick(ctx) if self._aim is not None
+                else SkillResult(AgentAction(), SkillStatus.RUNNING, "wait"))
+
+
 class SkillSequence(Skill):
     """Run a list of skills in order — the glue that composes primitives
     into a behaviour. Advances to the next skill when the current one is
@@ -490,12 +554,12 @@ def find_nearest_block(world_map, origin, match, *, max_radius: int = 48,
 # Registry of the currently-implemented skills (name -> class). The task
 # layer / a future planner can look skills up by name.
 SKILLS = {s.name: s for s in (SelectRole, LookAtVoxel, Eat, MineBlock,
-                              PillarUp, Bridge, SkillSequence)}
+                              PillarUp, Bridge, ChopTrunk, SkillSequence)}
 
 
 __all__ = [
     "SkillStatus", "SkillResult", "SkillContext", "Skill",
     "SelectRole", "LookAtVoxel", "Eat", "MineBlock", "PillarUp", "Bridge",
-    "SkillSequence", "find_nearest_block",
+    "ChopTrunk", "SkillSequence", "find_nearest_block",
     "aim_angles", "norm_angle", "SKILLS",
 ]

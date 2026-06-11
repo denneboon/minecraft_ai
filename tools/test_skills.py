@@ -234,6 +234,43 @@ def test_sequence_and_query(cat):
     (ok if res2 is None else bad)("no match -> None")
 
 
+def test_chop_trunk():
+    print("\n[9] ChopTrunk chains up a multi-log trunk")
+    from agents.skills import ChopTrunk, aim_angles
+    logs = {(0, 64, 0), (0, 65, 0)}     # base + one above; (0,66,0) is NOT a log
+    pose = _pose(); wm = _FakeMap()
+    sk = ChopTrunk((0, 64, 0), is_log=lambda b: b and b.endswith("_log"),
+                   tool_role=None)
+    attacks = {}
+    status = None
+    for _ in range(120):
+        ctx = SkillContext(pose=pose, world_map=wm)
+        ph, tgt = sk._phase, sk._target
+        if ph == "mine":
+            v = sk._mine.voxel
+            eye = (pose.x, pose.y + 1.62, pose.z)
+            pose.yaw, pose.pitch = aim_angles(eye, (v[0]+.5, v[1]+.5, v[2]+.5))
+            attacks[v] = attacks.get(v, 0)
+            if sk._mine._mining_ticks >= 1 and attacks[v] >= 1:
+                ctx.looking_at = SimpleNamespace(pos=(v[0], v[1], v[2]+1),
+                                                 block_id="minecraft:dirt")  # broke
+            else:
+                ctx.looking_at = SimpleNamespace(pos=v, block_id="minecraft:oak_log")
+            attacks[v] += 1
+        else:  # aim_up / check: keep aimed at the (above) target
+            eye = (pose.x, pose.y + 1.62, pose.z)
+            pose.yaw, pose.pitch = aim_angles(eye, (tgt[0]+.5, tgt[1]+.5, tgt[2]+.5))
+            ctx.looking_at = (SimpleNamespace(pos=tgt, block_id="minecraft:oak_log")
+                              if tgt in logs and ph == "check" else
+                              (SimpleNamespace(pos=tgt, block_id="minecraft:air")
+                               if ph == "check" else None))
+        r = sk.tick(ctx); status = r.status
+        if status in (SkillStatus.DONE, SkillStatus.FAILED):
+            break
+    (ok if status == SkillStatus.DONE and sk._mined == 2 else bad)(
+        f"chopped 2-log trunk then stopped -> {status}, mined={sk._mined}")
+
+
 def main() -> int:
     print("=" * 60); print(" Skills — offline self-test"); print("=" * 60)
     from vision.mc_assets import MCAssets
@@ -247,6 +284,7 @@ def main() -> int:
     test_pillar_up(cat)
     test_bridge(cat)
     test_sequence_and_query(cat)
+    test_chop_trunk()
     print("\n" + ("ALL SKILL TESTS PASSED" if not _fails
                   else f"{_fails} CHECK(S) FAILED"))
     return 0 if not _fails else 1
