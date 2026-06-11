@@ -2293,7 +2293,18 @@ def build_world_perception(settings: Optional[Dict[str, Any]] = None,
                 model = assets.block_model(bid.split(":", 1)[-1])
                 parent = (model or {}).get("parent") or ""
                 short = (parent.split("/")[-1] if parent else "").lower()
-                res = any(h in short for h in _UNRELIABLE_CROP_HINTS)
+                if not short:
+                    # No resolvable simple parent model => a multipart /
+                    # blockstate-driven THIN block (vine, glass_pane, iron_bars,
+                    # ladder, fences, walls, …). Its crosshair crop is a thin
+                    # overlay dominated by the backing block and is visually
+                    # confusable with leaves/grass — proven net-harmful (vine
+                    # collection dragged grass 0.85->0.79 and oak_leaves
+                    # 1.00->0.80). Skip it like a sprite; solid cubes always
+                    # resolve to a cube/leaves/column parent and are kept.
+                    res = True
+                else:
+                    res = any(h in short for h in _UNRELIABLE_CROP_HINTS)
             except Exception:
                 res = False
             _sprite_cache[bid] = res
