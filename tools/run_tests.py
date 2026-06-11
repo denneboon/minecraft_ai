@@ -39,6 +39,7 @@ OFFLINE_TESTS = [
     "test_script_runner",
     "test_hotbar",
     "test_skills",
+    "test_treechop",
 ]
 
 

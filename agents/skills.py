@@ -607,7 +607,7 @@ class SkillSequence(Skill):
 
 
 def find_nearest_block(world_map, origin, match, *, max_radius: int = 48,
-                       dimension: Optional[str] = None):
+                       dimension: Optional[str] = None, exclude=None):
     """Nearest observed block satisfying ``match(block_id) -> bool`` within
     ``max_radius`` (Chebyshev) of ``origin`` voxel. Returns ``(voxel, obs)``
     or ``None``. Used to spot the closest oak log the recogniser has mapped.
@@ -624,6 +624,8 @@ def find_nearest_block(world_map, origin, match, *, max_radius: int = 48,
     for obs in it:
         bid = getattr(obs, "block_id", None)
         if bid == AIR_BLOCK or bid is None or not match(bid):
+            continue
+        if exclude is not None and tuple(obs.pos) in exclude:
             continue
         vx, vy, vz = obs.pos
         d2 = (vx - ox) ** 2 + (vy - oy) ** 2 + (vz - oz) ** 2
