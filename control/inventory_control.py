@@ -38,7 +38,8 @@ def grid_slot(row: int, col: int, width: int) -> str:
 class InventoryController:
     def __init__(self, mouse, keyboard, reader, hotbar, capture, *,
                  ui_scale: int = 2, container: str = "player_inventory",
-                 settle: float = 0.16):
+                 settle: float = 0.16, window_origin: Tuple[int, int] = (0, 0),
+                 inspector=None):
         self._m = mouse
         self._kb = keyboard
         self._reader = reader
@@ -47,27 +48,50 @@ class InventoryController:
         self._ui = ui_scale
         self.container = container
         self._settle = settle
+        # Slot rects are in FRAME coords; the OS cursor is in DESKTOP coords,
+        # so every hover offsets by the captured window's top-left.
+        self._origin = window_origin
+        # Optional hover-to-learn inspector: after the static recogniser read,
+        # it hovers slots the recogniser is unsure about and OCRs their
+        # tooltip ids (and teaches the recogniser for next time).
+        self._inspector = inspector
         self._rects = None                 # slot_name -> SlotRect (last read)
 
     # ── perception ───────────────────────────────────────────────────
     def read(self):
         """Capture a frame, parse the open container -> InventorySnapshot,
-        and cache the slot rects for hovering."""
+        cache the slot rects, and (if an inspector is wired) hover-resolve
+        any items the recogniser couldn't confidently identify."""
         frame = self._cap.get_frame()
         self._rects = slot_rects(frame.shape, layout=self.container,
                                  ui_scale=self._ui)
-        return self._reader.read(frame, container=self.container)
+        snap = self._reader.read(frame, container=self.container)
+        if snap is None:
+            return snap
+        if getattr(snap, "frame_shape", None) is None:
+            try:
+                snap.frame_shape = frame.shape[:2]
+                snap.ui_scale = self._ui
+            except Exception:
+                pass
+        if self._inspector is not None:
+            try:
+                self._inspector.resolve_unknowns(
+                    snap, window_origin=self._origin, pre_hover_frame=frame)
+            except Exception as e:
+                print(f"[inv] hover-resolve failed: {e}")
+        return snap
 
     def _center(self, slot_name: str) -> Tuple[int, int]:
         if self._rects is None or slot_name not in self._rects:
             self.read()
         r = self._rects[slot_name]
         cx, cy = r.center()
-        return int(cx), int(cy)
+        return int(self._origin[0] + cx), int(self._origin[1] + cy)
 
     # ── primitive actions (hotkey-first) ─────────────────────────────
     def hover(self, slot_name: str) -> None:
-        x, y = self._center(slot_name)
+        x, y = self._center(slot_name)        # already desktop coords
         self._m.move_to_screen_xy(x, y)
         time.sleep(self._settle)
 

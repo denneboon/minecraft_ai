@@ -27,6 +27,8 @@ from utils.focus import _find_minecraft_hwnd, activate_minecraft
 from control.input_gate import InputGate
 from vision.capture import Capture, CaptureConfig
 from vision.inventory import build_inventory_reader
+from vision.tooltip import build_tooltip_reader
+from agents.inventory_inspector import InventoryInspector
 from control.hotbar import build_hotbar_manager
 from control.inventory_control import InventoryController
 from agents.crafting import Crafter, inventory_counts
@@ -56,15 +58,26 @@ def main(argv=None) -> int:
     safety = M.build_safety(settings, gate=gate)
     mouse = M.build_mouse(settings, gate=gate)
     kb = M.build_keyboard(settings, keymap_flat, gate=gate)
-    capture = Capture(CaptureConfig(hwnd=hwnd, threaded=True))
+    capture = Capture(CaptureConfig(hwnd=hwnd, use_client_area=True, threaded=True))
     safety.start(); mouse.start(); kb.start(); capture.start()
     time.sleep(0.3)
 
     a = MCAssets.load()
     cat = Catalog.load(a)
-    reader = build_inventory_reader(settings)
+    reader = build_inventory_reader(settings, assets=a)
     hotbar = build_hotbar_manager(settings, catalog=cat)
-    ctl = InventoryController(mouse, kb, reader, hotbar, capture, ui_scale=ui_scale)
+    # Hover-to-learn: identify items the static recogniser is unsure about
+    # by hovering the slot + OCRing the tooltip id.
+    tooltip = build_tooltip_reader(settings, assets=a)
+    inspector = InventoryInspector(tooltip, capture, mouse=mouse, gate=gate)
+    try:
+        origin = capture.window_origin()
+    except Exception:
+        origin = (0, 0)
+    print(f"[craft] window origin (desktop top-left): {origin}")
+    ctl = InventoryController(mouse, kb, reader, hotbar, capture,
+                              ui_scale=ui_scale, window_origin=origin,
+                              inspector=inspector)
     crafter = Crafter(ctl, a, cat)
 
     try:
@@ -80,6 +93,11 @@ def main(argv=None) -> int:
             except Exception as e:
                 print(f"[craft] frame dump failed: {e}")
         snap = ctl.read()
+        if "--debug" in argv:
+            for nm, sc in sorted((getattr(snap, "slots", {}) or {}).items()):
+                if getattr(sc, "item", None):
+                    print(f"    {nm:12} {sc.item.split(':')[-1]:18} x{getattr(sc,'count',1)} "
+                          f"conf={getattr(sc,'confidence',0):.2f}")
         have = inventory_counts(snap)
         print(f"[craft] inventory: "
               + ", ".join(f"{k.split(':')[-1]}={v}" for k, v in sorted(have.items())[:12]))
