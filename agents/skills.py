@@ -258,10 +258,12 @@ class MineBlock(Skill):
         self.aim = _Aimer(tol_deg=tol_deg)
         self._tool_ok = tool_role is None
         self._mining_ticks = 0
+        self._saw_target = False       # has the crosshair confirmed THIS voxel?
 
     def reset(self):
         self._tool_ok = self.tool_role is None
         self._mining_ticks = 0
+        self._saw_target = False
 
     def _is_gone(self, ctx: SkillContext) -> bool:
         wm = ctx.world_map
@@ -274,15 +276,19 @@ class MineBlock(Skill):
         return obs is not None and obs.block_id == AIR_BLOCK
 
     def tick(self, ctx: SkillContext) -> SkillResult:
-        # Robust break signal: once we've been attacking the voxel, if F3's
-        # targeted block is no longer THIS voxel, it broke (we're now
-        # looking past it). This is more reliable than waiting for the
-        # WorldMap to carve the mined voxel to air, which lags. Either
-        # signal completes the skill.
+        # Robust break signal: complete only AFTER the crosshair has
+        # actually confirmed THIS voxel and then moved off it (the block
+        # broke, we're now looking past it). Requiring "saw it first"
+        # prevents a false DONE when a leaf is between us and the target —
+        # we break the intervening leaf (it's on the path), keep going, and
+        # only finish when the real target breaks. More reliable than the
+        # lagging WorldMap-air check; either signal completes the skill.
         la = ctx.looking_at
-        if self._mining_ticks >= 1 and la is not None and \
-                getattr(la, "pos", None) is not None and \
-                tuple(la.pos) != tuple(self.voxel):
+        la_pos = tuple(la.pos) if (la is not None and getattr(la, "pos", None) is not None) else None
+        if la_pos == tuple(self.voxel):
+            self._saw_target = True
+        if self._saw_target and self._mining_ticks >= 1 and \
+                la_pos is not None and la_pos != tuple(self.voxel):
             return SkillResult(AgentAction(), SkillStatus.DONE, "mined (target moved off)")
         # Already air in the map? done.
         if self._is_gone(ctx):
@@ -561,10 +567,11 @@ class WalkToward(Skill):
         # course. If progress has stalled, jump too: MC mantles over a
         # 1-block step / out of a 1-deep hole. Don't jump while edge-avoiding
         # (we already returned above if a known drop is ahead).
-        mv = {"forward": True, "sprint": self.sprint}
-        if self._stuck >= self.jump_after:
-            mv["jump"] = True
-        info = "jump-walking" if mv.get("jump") else "walking"
+        # Always specify jump explicitly (True only while stalled) — never
+        # omit it, or a previously-set jump would stay held across ticks.
+        jumping = self._stuck >= self.jump_after
+        mv = {"forward": True, "sprint": self.sprint, "jump": jumping}
+        info = "jump-walking" if jumping else "walking"
         return SkillResult(AgentAction(movement=mv, look_dx=ddx),
                            SkillStatus.RUNNING, f"{info} (d={dist:.1f})")
 

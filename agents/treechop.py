@@ -38,6 +38,25 @@ def _is_log_default(bid: str) -> bool:
     return bool(bid) and (str(bid).endswith("_log") or str(bid).endswith("_stem"))
 
 
+_MOVE_KEYS = ("forward", "backward", "left", "right", "jump", "sprint", "sneak")
+
+
+def _full_movement(mv):
+    """Expand a skill's partial movement dict into a COMPLETE one (every
+    key present, unset -> False). Movement keys are held state; if a tick
+    omits a key, the dispatcher leaves it as-was — so an earlier jump/
+    forward would stay stuck on. Fully specifying every tick guarantees
+    anything not actively commanded is released (no jumping-in-place, no
+    walking-while-mining). Every skill re-issues its movement each tick, so
+    nothing relies on persistence."""
+    full = {k: False for k in _MOVE_KEYS}
+    if mv:
+        for k, v in mv.items():
+            if k in full:
+                full[k] = bool(v)
+    return full
+
+
 class FindAndChopLogs:
     name = "find_and_chop_logs"
 
@@ -76,7 +95,8 @@ class FindAndChopLogs:
         self._cleared = set()           # obstacles already mined (avoid re-mining)
         self._explore_attempts = 0
         self._explore_anchor_yaw = None # fixed origin to fan explore headings
-        self.chopped = 0
+        self.chopped = 0                # trunk-columns chopped (>=1 log each)
+        self.logs = 0                   # actual log blocks broken
 
     def _eye_vox(self, pose):
         return (int(math.floor(pose.x)), int(math.floor(pose.y)),
@@ -117,6 +137,26 @@ class FindAndChopLogs:
                                  dimension=ctx.dimension, exclude=self._blacklist)
         return res[0] if res else None
 
+    def _descend_to_base(self, voxel, ctx):
+        """Lower the target to the bottom of its mapped log column so we
+        chop the WHOLE trunk from the base up (not a stray canopy block).
+        Stops at the lowest contiguous log the WorldMap knows about."""
+        wm = ctx.world_map
+        if wm is None:
+            return voxel
+        x, y, z = voxel
+        for _ in range(20):
+            below = (x, y - 1, z)
+            try:
+                obs = wm.get_block(below, dimension=ctx.dimension)
+            except TypeError:
+                obs = wm.get_block(below)
+            if obs is not None and self.is_log(getattr(obs, "block_id", None)):
+                y -= 1
+            else:
+                break
+        return (x, y, z)
+
     def tick(self, ctx: SkillContext) -> SkillResult:
         pose = ctx.pose
         if pose is None:
@@ -131,6 +171,7 @@ class FindAndChopLogs:
             if tgt is None:
                 self._state = "scan"; self._scan_ticks = 0
                 return SkillResult(AgentAction(), SkillStatus.RUNNING, "no log mapped; scanning")
+            tgt = self._descend_to_base(tgt, ctx)   # chop whole trunks, base-up
             self._target = tgt
             self._recover_count = 0
             self._cleared = set()
@@ -242,13 +283,24 @@ class FindAndChopLogs:
         if st == "chop":
             r = self._sub.tick(ctx)
             if r.status == SkillStatus.DONE:
-                self.chopped += 1
+                # Honest counting: tally the actual logs broken; only count a
+                # "trunk" when at least one log fell (a no-op ChopTrunk that
+                # found the target already gone shouldn't inflate the total).
+                mined = int(getattr(self._sub, "_mined", 0))
+                self.logs += mined
+                if mined >= 1:
+                    self.chopped += 1
                 # Walk onto the base to collect the dropped logs, then refind.
+                # No jumping here (we're not climbing anything) and a roomier
+                # arrive radius so it doesn't flail trying to stand on the
+                # exact column.
                 base = self._target
                 self._blacklist.add(base)
-                self._sub = WalkToward(base, arrive_dist=0.7, stuck_window=12)
+                self._sub = WalkToward(base, arrive_dist=1.4, stuck_window=8,
+                                       jump_after=10 ** 9)
                 self._state = "collect"
-                return SkillResult(r.action, SkillStatus.RUNNING, f"chopped #{self.chopped}; collecting")
+                return SkillResult(r.action, SkillStatus.RUNNING,
+                                   f"chopped {mined} log(s); collecting")
             if r.status in (SkillStatus.FAILED, SkillStatus.BLOCKED):
                 self._blacklist.add(self._target); self._state = "find"
                 return SkillResult(r.action, SkillStatus.RUNNING, f"chop {r.status.value}; refind")
@@ -358,19 +410,24 @@ class TreeChopAgent(BaseAgent):
 
     def decide(self, state):
         from brain.interfaces import AgentAction as _AA
+        def _emit(a):
+            # Always fully specify movement so a held jump/forward from an
+            # earlier tick is released when not actively commanded.
+            a.movement = _full_movement(a.movement)
+            return a
         if self._wp is None:
             if not self._warned_no_world:
                 self._warned_no_world = True
                 print("[treechop] needs vision.world.enabled: true — no "
                       "WorldMap to find logs. Idling.")
-            return _AA()
+            return _emit(_AA())
         if self._fsm is None:
             self._build()
         world = getattr(state, "world", None)
         pose = (world.pose if world is not None and world.pose is not None
                 else self._pose_from_f3(getattr(state, "f3", None)))
         if pose is None:
-            return _AA()                       # wait for a pose this tick
+            return _emit(_AA())                # wait for a pose this tick
         looking_at = world.looking_at if world is not None else None
         ctx = SkillContext(pose=pose, world_map=self._wp.world_map,
                            looking_at=looking_at, hotbar=self._hotbar,
@@ -382,14 +439,14 @@ class TreeChopAgent(BaseAgent):
         # bot alive + sprint-capable on long unattended runs.
         eat_action = self._maybe_eat(ctx, state)
         if eat_action is not None:
-            return eat_action
+            return _emit(eat_action)
 
         res = self._fsm.tick(ctx)
         if self._fsm._state != self._last_state:    # observability
             self._last_state = self._fsm._state
-            print(f"[treechop] {self._fsm._state} | chopped={self._fsm.chopped} "
-                  f"| {res.info}")
-        return res.action
+            print(f"[treechop] {self._fsm._state} | logs={self._fsm.logs} "
+                  f"trunks={self._fsm.chopped} | {res.info}")
+        return _emit(res.action)
 
 
 def build_treechop_agent(settings: dict) -> TreeChopAgent:

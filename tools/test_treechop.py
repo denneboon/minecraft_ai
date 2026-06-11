@@ -182,8 +182,8 @@ def main() -> int:
     (ok if "treechop" in available_agents() else bad)("registered in available_agents")
     ag = build_agent("treechop", {})
     a = ag.decide(SimpleNamespace(f3=None, world=None))
-    (ok if a.interact is None and not a.movement else bad)(
-        "idles safely with no perception attached")
+    (ok if a.interact is None and not any(a.movement.values()) else bad)(
+        "idles safely with no perception (all movement released)")
     ag.attach_perception(SimpleNamespace(world_map=_map_with_log((3, 64, 0))))
     pose = SimpleNamespace(x=0.0, y=64.0, z=0.0, yaw=0.0, pitch=20.0, dimension=None)
     a = ag.decide(SimpleNamespace(f3=None,

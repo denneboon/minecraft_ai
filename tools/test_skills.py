@@ -158,13 +158,32 @@ def test_mine_block(cat):
     # (the robust live signal, independent of the WorldMap carving air).
     wm3 = _FakeMap(); wm3.set(vox, "minecraft:oak_log")
     sk3 = MineBlock(vox, tool_role=None)
-    ctx3 = SkillContext(pose=_pose(yaw=yaw, pitch=pitch), world_map=wm3)
-    sk3.tick(ctx3)            # aim/attack once (mining_ticks -> 1)
+    ctx3 = SkillContext(pose=_pose(yaw=yaw, pitch=pitch), world_map=wm3,
+                        looking_at=SimpleNamespace(pos=vox, block_id="minecraft:oak_log"))
+    sk3.tick(ctx3)            # confirm target + attack once (mining_ticks -> 1)
     ctx3.looking_at = SimpleNamespace(pos=(vox[0], vox[1], vox[2] + 1),
                                       block_id="minecraft:dirt")
     r = sk3.tick(ctx3)
     (ok if r.status == SkillStatus.DONE else bad)(
         f"F3 target moved off voxel -> {r.status}")
+
+    # Leaf in FRONT of the target log: break it (on the path) but do NOT
+    # falsely complete; finish only when the real target breaks.
+    wm4 = _FakeMap(); wm4.set(vox, "minecraft:oak_log")
+    leaf_or_log = lambda b: bool(b) and (str(b).endswith("_log") or str(b).endswith("_leaves"))
+    sk4 = MineBlock(vox, tool_role=None, is_safe=leaf_or_log)
+    ctx4 = SkillContext(pose=_pose(yaw=yaw, pitch=pitch), world_map=wm4,
+                        looking_at=SimpleNamespace(pos=(vox[0], vox[1], vox[2] + 1),
+                                                   block_id="minecraft:oak_leaves"))
+    r = sk4.tick(ctx4)                          # crosshair on a leaf in front
+    not_done = r.status == SkillStatus.RUNNING
+    ctx4.looking_at = SimpleNamespace(pos=vox, block_id="minecraft:oak_log")
+    sk4.tick(ctx4)                              # leaf gone -> now sees the log
+    ctx4.looking_at = SimpleNamespace(pos=(vox[0], vox[1], vox[2] - 1),
+                                      block_id="minecraft:dirt")
+    r = sk4.tick(ctx4)                          # target broke
+    (ok if not_done and r.status == SkillStatus.DONE else bad)(
+        "leaf in front: breaks it then completes only on the real log")
     # Timeout path.
     wm2 = _FakeMap(); wm2.set(vox, "minecraft:stone")
     sk2 = MineBlock(vox, tool_role=None, max_ticks=5)
