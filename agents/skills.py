@@ -290,6 +290,7 @@ class MineBlock(Skill):
         self._mining_ticks = 0
         self._silent = 0               # F3-gap ticks while frozen+mining
         self._await_ticks = 0          # aimed-but-F3-silent ticks (acquisition)
+        self._clear_ticks = 0          # ticks spent clearing occluding leaves
         self.broke = False             # did a LOG actually break? (for counting)
 
     def reset(self):
@@ -298,6 +299,7 @@ class MineBlock(Skill):
         self._mining_ticks = 0
         self._silent = 0
         self._await_ticks = 0
+        self._clear_ticks = 0
         self.broke = False
 
     def _is_log(self, bid) -> bool:
@@ -333,6 +335,10 @@ class MineBlock(Skill):
         # Stays held across leaf→leaf and brief F3 gaps so a leaf WALL doesn't
         # cause spam-clicking; a LOG appearing -> straight into mine_log. ──
         if self._mode == "clear_leaf":
+            self._clear_ticks += 1
+            if self._clear_ticks > 45:        # leaves never revealing a log -> give up
+                return SkillResult(AgentAction(), SkillStatus.FAILED,
+                                   "leaves not clearing to a log — abandon")
             if self._is_log(la_id):                       # log behind -> mine it
                 self._mode = "mine_log"; self._silent = 0
                 return _hold("log behind leaves -> mining")
@@ -380,7 +386,7 @@ class MineBlock(Skill):
                 return SkillResult(AgentAction(), SkillStatus.FAILED,
                                    f"target is {la_id}, not a log — abandon")
             if self._is_pass(la_id):     # a leaf occluding the target log
-                self._mode = "clear_leaf"; self._silent = 0
+                self._mode = "clear_leaf"; self._silent = 0; self._clear_ticks = 0
                 return _hold("leaf occludes target -> clearing")
             return SkillResult(AgentAction(), SkillStatus.FAILED,
                                f"{la_id} blocks the target — abandon")
@@ -761,7 +767,7 @@ class SkillSequence(Skill):
 
 
 def find_nearest_block(world_map, origin, match, *, max_radius: int = 48,
-                       dimension: Optional[str] = None, exclude=None):
+                       dimension: Optional[str] = None, exclude=None, pos_ok=None):
     """Nearest observed block satisfying ``match(block_id) -> bool`` within
     ``max_radius`` (Chebyshev) of ``origin`` voxel. Returns ``(voxel, obs)``
     or ``None``. Used to spot the closest oak log the recogniser has mapped.
@@ -780,6 +786,8 @@ def find_nearest_block(world_map, origin, match, *, max_radius: int = 48,
         if bid == AIR_BLOCK or bid is None or not match(bid):
             continue
         if exclude is not None and tuple(obs.pos) in exclude:
+            continue
+        if pos_ok is not None and not pos_ok(obs.pos):
             continue
         vx, vy, vz = obs.pos
         d2 = (vx - ox) ** 2 + (vy - oy) ** 2 + (vz - oz) ** 2

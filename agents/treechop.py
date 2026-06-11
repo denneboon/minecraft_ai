@@ -133,9 +133,17 @@ class FindAndChopLogs:
 
     def _find(self, ctx):
         eye = self._eye_vox(ctx.pose)
+        py = float(ctx.pose.y)
+        # Only consider logs within a REACHABLE height band of where we are
+        # (feet to ~head+reach). Canopy logs 8-10 blocks overhead can't be
+        # reached from the ground, so don't target them — the level scan maps
+        # trunk-height logs to chop instead.
+        def pos_ok(v):
+            return -4.0 <= (v[1] - py) <= 5.0
         res = find_nearest_block(ctx.world_map, eye, self.is_log,
                                  max_radius=self.max_radius,
-                                 dimension=ctx.dimension, exclude=self._blacklist)
+                                 dimension=ctx.dimension, exclude=self._blacklist,
+                                 pos_ok=pos_ok)
         return res[0] if res else None
 
     def _drop_target(self):
@@ -365,6 +373,7 @@ class TreeChopAgent(BaseAgent):
         self._last_state = None
         self._eat = None          # active Eat skill (eating in progress)
         self._hungry_ticks = 0    # debounce HUD misreads
+        self._eat_fails = 0       # consecutive ineffective eats (cap the loop)
 
     def attach_perception(self, wp) -> None:
         self._wp = wp
@@ -393,27 +402,35 @@ class TreeChopAgent(BaseAgent):
         from brain.interfaces import AgentAction as _AA
         STOP = {"forward": False, "backward": False, "left": False,
                 "right": False, "jump": False, "sprint": False}
+        hunger = getattr(state, "hunger", None)
+        h = float(hunger) if hunger is not None else None
         if self._eat is not None:                       # mid-eat
             r = self._eat.tick(ctx)
             if r.status in (SkillStatus.DONE, SkillStatus.FAILED, SkillStatus.BLOCKED):
                 self._eat = None
                 self._hungry_ticks = 0
+                # If eating didn't restore hunger, count it — after a few
+                # ineffective eats (no food, or a stuck-low HUD read) stop
+                # trying so we don't loop forever standing still eating.
+                if h is not None and 0.0 < h < self._eat_below:
+                    self._eat_fails += 1
+                else:
+                    self._eat_fails = 0
                 return None                             # resume FSM next tick
             a = r.action; a.movement = dict(STOP)       # stand still to eat
             return a
-        if self._eat_below <= 0 or self._hotbar is None \
+        if self._eat_below <= 0 or self._eat_fails >= 3 or self._hotbar is None \
                 or self._hotbar.best_slot_for("food") is None:
             return None
-        hunger = getattr(state, "hunger", None)
-        if hunger is None:
-            return None
-        if float(hunger) < self._eat_below:
+        # Eat only on a PLAUSIBLE low reading. Exactly 0.0 is almost always a
+        # HUD misread (you rarely sit at 0/20), and acting on it spam-eats.
+        if h is not None and 0.0 < h < self._eat_below:
             self._hungry_ticks += 1
         else:
             self._hungry_ticks = 0
         if self._hungry_ticks >= 6:                     # sustained low -> eat
             self._eat = Eat()
-            print(f"[treechop] hungry ({float(hunger):.2f}) -> eating")
+            print(f"[treechop] hungry ({h:.2f}) -> eating")
             a = self._eat.tick(ctx).action; a.movement = dict(STOP)
             return a
         return None

@@ -53,11 +53,12 @@ def main() -> int:
     fsm.tick(SkillContext(pose=_pose(), world_map=_map_with_log((1, 64, 0))))
     (ok if fsm._state == "chop" else bad)(f"state={fsm._state}")
 
-    # 2b. Horizontally-close but TOO HIGH log -> approach, not chop (3D reach).
+    # 2b. A canopy log far overhead (out of the reachable height band) is not
+    #     targeted at all -> scan for reachable ones (no stuck on it).
     fsm = FindAndChopLogs(reach=3.5)
     fsm.tick(SkillContext(pose=_pose(), world_map=_map_with_log((1, 80, 0))))
-    (ok if fsm._state == "approach" else bad)(
-        f"too-high log -> approach not chop (state={fsm._state})")
+    (ok if fsm._state == "scan" else bad)(
+        f"canopy log overhead -> not targeted, scans (state={fsm._state})")
 
     # 3. No log, exploration off -> scan; exhaust budget -> DONE.
     print("\n[3] no log -> scan -> done (no explore)")
