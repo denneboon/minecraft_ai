@@ -234,6 +234,18 @@ def test_mine_block(cat):
         if st in (SkillStatus.DONE, SkillStatus.FAILED): break
     (ok if st == SkillStatus.FAILED else bad)(f"aimed + F3 silent -> bounded abandon ({st})")
 
+    # F3 flicker mid-mine: KEEP holding attack (no spam-click). Once mining
+    # started, a dropped F3 read must not release the button.
+    wmf = _FakeMap(); wmf.set(vox, "minecraft:oak_log")
+    skf = MineBlock(vox, tool_role=None)
+    ctxf = SkillContext(pose=_pose(yaw=yaw, pitch=pitch), world_map=wmf,
+                        looking_at=SimpleNamespace(pos=vox, block_id="minecraft:oak_log"))
+    skf.tick(ctxf)                              # confirm + start swinging
+    ctxf.looking_at = None                      # OCR dropped the read this tick
+    r = skf.tick(ctxf)
+    (ok if r.action.interact == "attack" else bad)(
+        "holds attack through an F3 flicker (no spam-click release)")
+
 
 def test_pillar_up(cat):
     print("\n[6] PillarUp")

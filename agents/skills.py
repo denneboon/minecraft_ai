@@ -260,12 +260,14 @@ class MineBlock(Skill):
         self._mining_ticks = 0
         self._saw_target = False       # has the crosshair confirmed THIS voxel?
         self._await_ticks = 0          # consecutive aimed-but-F3-silent ticks
+        self._started = False          # have we begun swinging at a confirmed block?
 
     def reset(self):
         self._tool_ok = self.tool_role is None
         self._mining_ticks = 0
         self._saw_target = False
         self._await_ticks = 0
+        self._started = False
 
     def _is_gone(self, ctx: SkillContext) -> bool:
         wm = ctx.world_map
@@ -311,6 +313,7 @@ class MineBlock(Skill):
                                    f"select {self.tool_role} slot {slot}")
 
         def _swing(info):
+            self._started = True
             self._mining_ticks += 1
             if self._mining_ticks > self.max_ticks:
                 return SkillResult(AgentAction(), SkillStatus.FAILED, "timed out mining")
@@ -347,8 +350,12 @@ class MineBlock(Skill):
         if safe is False:
             return SkillResult(AgentAction(), SkillStatus.FAILED,
                                f"aimed at {la_id}, not a log — abandon")
-        # Aimed, F3 silent (sky / unreadable) — wait briefly (bounded) for the
-        # few-Hz targeted-block read; give up fast rather than hanging.
+        # Aimed, F3 SILENT (la_id is None). If we'd already started mining,
+        # this is just an OCR flicker mid-swing — KEEP HOLDING attack rather
+        # than releasing (releasing every flicker = spam-clicking). Only the
+        # initial acquisition waits (bounded) for the first F3 confirmation.
+        if self._started:
+            return _swing("mining (F3 flicker)")
         self._await_ticks += 1
         if self._await_ticks > 12:
             return SkillResult(AgentAction(), SkillStatus.FAILED,
