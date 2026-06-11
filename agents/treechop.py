@@ -29,7 +29,7 @@ from typing import Optional
 from brain.interfaces import AgentAction
 from agents.skills import (
     SkillStatus, SkillResult, SkillContext, WalkToward, ChopTrunk, PillarUp,
-    MineBlock, Eat, find_nearest_block, block_in_reach, PLAYER_REACH,
+    MineBlock, Eat, find_nearest_block, block_in_reach, PLAYER_REACH, _Aimer,
 )
 from vision.world.map import AIR_BLOCK
 
@@ -83,6 +83,7 @@ class FindAndChopLogs:
         self.max_explore = max_explore
         self.explore_turn = explore_turn
         self.max_recover = max_recover
+        self._scan_aimer = _Aimer(tol_deg=4.0)   # stale-pose-guarded pitch leveler
         self.reset()
 
     def reset(self):
@@ -231,15 +232,15 @@ class FindAndChopLogs:
                                        f"explore {self._explore_attempts}/{self.max_explore} -> {ex}")
                 return SkillResult(AgentAction(), SkillStatus.DONE,
                                    f"no logs found after exploring; chopped {self.chopped}")
-            # Clean look-around: FIRST level the pitch to ~0 without
-            # touching yaw, THEN rotate yaw only (pitch untouched) — no
-            # up/down bobbing. Level scanning also sweeps the horizon where
-            # tree trunks are, which is exactly what we're looking for.
-            pitch = float(pose.pitch)
-            if abs(pitch) > 5.0:
-                dy = int(max(-120, min(120, (0.0 - pitch) * ctx.px_per_deg * 0.5)))
+            # Clean look-around: FIRST level the pitch to ~0 (yaw untouched),
+            # THEN rotate yaw only. The leveling goes through the SAME
+            # stale-pose-guarded aimer the mining uses, so it issues one
+            # correction per pose update instead of over-applying every tick
+            # and oscillating up/down.
+            _, dy, level_ok = self._scan_aimer.step(ctx, float(pose.yaw), 0.0)
+            if not level_ok:
                 return SkillResult(AgentAction(look_dy=dy), SkillStatus.RUNNING,
-                                   f"leveling pitch ({pitch:.0f}deg)")
+                                   f"leveling pitch ({float(pose.pitch):.0f}deg)")
             return SkillResult(AgentAction(look_dx=70), SkillStatus.RUNNING,
                                f"scanning {self._scan_ticks}")
 
