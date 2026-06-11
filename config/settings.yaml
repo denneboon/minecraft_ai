@@ -336,6 +336,19 @@ control:
       step_hz:   240     # micro-step cadence; matches velocity worker
       curvature: 0.06    # perpendicular bow as fraction of distance
       jitter_px: 0.4     # per-step random offset to break the curve
+
+# Reserved hotbar slots by ROLE. Behaviours (mining, eating, bridging)
+# look up the slot for a role via control/hotbar.py instead of hard-coding
+# slot numbers, and can flag when a slot holds the wrong item. Roles:
+# sword | axe | pickaxe | shovel | hoe | blocks | food | armor.
+hotbar:
+  slot_roles:
+    1: sword
+    2: axe
+    3: pickaxe
+    5: blocks
+    9: food
+  extra_food: []          # extra item stems to treat as food (e.g. modded)
 safety:
   check_focus_interval: 0.075
   auto_stop_on_focus_loss: true

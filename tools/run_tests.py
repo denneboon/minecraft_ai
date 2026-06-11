@@ -37,6 +37,7 @@ OFFLINE_TESTS = [
     "test_inventory_synthetic",
     "test_weather",
     "test_script_runner",
+    "test_hotbar",
 ]
 
 
