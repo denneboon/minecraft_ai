@@ -95,6 +95,21 @@ def test_look_at_voxel():
     r = LookAtVoxel(vox).tick(SkillContext(pose=None))
     (ok if r.status == SkillStatus.BLOCKED else bad)(f"no pose -> {r.status}")
 
+    # Stale-pose guard: after issuing a correction, a SECOND tick with the
+    # SAME (unchanged) pose must NOT issue another (it would stack/overshoot
+    # since the camera move hasn't registered yet) — wait for fresh pose.
+    sk = LookAtVoxel(vox)
+    stale_ctx = SkillContext(pose=_pose(yaw=yaw - 40, pitch=0))
+    r1 = sk.tick(stale_ctx)
+    r2 = sk.tick(stale_ctx)                       # identical pose -> wait
+    moved_then_waited = (r1.action.look_dx != 0) and \
+        (r2.action.look_dx == 0 and r2.action.look_dy == 0)
+    (ok if moved_then_waited else bad)(
+        f"issues once then waits for fresh pose (dx {r1.action.look_dx}->{r2.action.look_dx})")
+    # Fresh pose (changed) -> issues again.
+    r3 = sk.tick(SkillContext(pose=_pose(yaw=yaw - 20, pitch=0)))
+    (ok if r3.action.look_dx != 0 else bad)("issues again once the pose changes")
+
 
 def test_eat(cat):
     print("\n[4] Eat")

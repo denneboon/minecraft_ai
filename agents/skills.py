@@ -129,15 +129,29 @@ class _Aimer:
         self.tol = tol_deg
         self.gain = gain
         self.max_px = max_px
+        self._last_pose = None        # (yaw,pitch) we last issued a move at
 
     def step(self, ctx: SkillContext, want_yaw: float, want_pitch: float
              ) -> Tuple[int, int, bool]:
         p = ctx.pose
+        cur = (round(float(p.yaw), 2), round(float(p.pitch), 2))
         yaw_err = norm_angle(want_yaw - float(p.yaw))
         pitch_err = float(want_pitch) - float(p.pitch)
         aimed = abs(yaw_err) <= self.tol and abs(pitch_err) <= self.tol
         if aimed:
+            self._last_pose = None        # no correction pending
             return 0, 0, True
+        # Stale-pose guard. Pose feedback (F3 OCR, a few Hz) lags the
+        # control tick (~12-20 Hz). After we ISSUE a camera correction, the
+        # pose won't reflect it for a tick or two; issuing another in the
+        # meantime STACKS corrections and overshoots/oscillates (the
+        # crosshair wanders diagonally and never settles). So once we've
+        # issued a move, wait until the pose actually changes before issuing
+        # the next. (Only set when we issue a non-zero look — a stationary
+        # pose while merely walking must NOT block the next turn.)
+        if self._last_pose is not None and cur == self._last_pose:
+            return 0, 0, False
+        self._last_pose = cur
         ppd = max(0.5, float(ctx.px_per_deg))
         dx = int(max(-self.max_px, min(self.max_px, yaw_err * ppd * self.gain)))
         dy = int(max(-self.max_px, min(self.max_px, pitch_err * ppd * self.gain)))
