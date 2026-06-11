@@ -105,6 +105,7 @@ class FindAndChopLogs:
         self._cleared = set()           # obstacles already mined (avoid re-mining)
         self._explore_attempts = 0
         self._explore_anchor_yaw = None # fixed origin to fan explore headings
+        self._approach_ticks = 0        # cap time spent navigating to one log
         self.chopped = 0                # trunk-columns chopped (>=1 log each)
         self.logs = 0                   # actual log blocks broken
 
@@ -190,6 +191,26 @@ class FindAndChopLogs:
             return SkillResult(AgentAction(), SkillStatus.DONE,
                                f"chopped {self.chopped} (limit)")
 
+        # OPPORTUNISTIC CHOP: the crosshair is the authority. If F3 says we're
+        # looking directly at a log that's in reach, chop it NOW — never hover
+        # over a reachable log while busy navigating/aiming/scanning. (Only
+        # pre-empts non-chop states; ChopTrunk owns the chop state once in it.)
+        if self._state != "chop":
+            la = ctx.looking_at
+            la_id = getattr(la, "block_id", None) if la is not None else None
+            la_pos = (tuple(la.pos) if la is not None
+                      and getattr(la, "pos", None) is not None else None)
+            if la_id and self.is_log(la_id) and la_pos is not None \
+                    and la_pos not in self._blacklist \
+                    and block_in_reach(pose, la_pos, PLAYER_REACH):
+                self._target = la_pos
+                self._found_raw = la_pos
+                self._recover_count = 0
+                self._cleared = set()
+                self._sub = ChopTrunk(la_pos, is_log=self.is_log,
+                                      tool_role=self.tool_role, is_safe=self.is_breakable)
+                self._state = "chop"
+
         st = self._state
         if st == "find":
             tgt = self._find(ctx)
@@ -216,7 +237,7 @@ class FindAndChopLogs:
             # A* route AROUND known gaps/obstacles to within reach of the log,
             # following the path with the reactive WalkToward.
             self._sub = NavigateTo(tgt, arrive_reach=PLAYER_REACH)
-            self._state = "approach"
+            self._state = "approach"; self._approach_ticks = 0
             return SkillResult(AgentAction(), SkillStatus.RUNNING, f"log {tgt}; navigating")
 
         if st == "scan":
@@ -267,6 +288,13 @@ class FindAndChopLogs:
             return r
 
         if st == "approach":
+            # Time-cap: don't grind forever trying to reach one log (e.g. an
+            # out-of-reach/across-a-gap target the router can't close on).
+            self._approach_ticks += 1
+            if self._approach_ticks > 160:
+                self._drop_target(); self._state = "find"
+                return SkillResult(AgentAction(movement={"forward": False}),
+                                   SkillStatus.RUNNING, "approach timed out; refind")
             r = self._sub.tick(ctx)
             if r.status == SkillStatus.DONE:
                 # Arrived. Only chop if the log is now actually in 3D reach;
@@ -312,7 +340,7 @@ class FindAndChopLogs:
                 # by max_recover), so multi-block obstacles clear over a few
                 # passes without an infinite loop.
                 self._sub = NavigateTo(self._target, arrive_reach=PLAYER_REACH)
-                self._state = "approach"
+                self._state = "approach"; self._approach_ticks = 0
                 return SkillResult(r.action, SkillStatus.RUNNING,
                                    f"recovered ({r.info}); re-approaching")
             return r

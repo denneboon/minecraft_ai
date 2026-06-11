@@ -92,6 +92,30 @@ def main() -> int:
     tgt = fsm._find(SkillContext(pose=_pose(), world_map=_map_with_log((1, 64, 0))))
     (ok if tgt is None else bad)(f"blacklisted log excluded from find -> {tgt}")
 
+    # 5b. Opportunistic chop: directly looking at an IN-REACH log -> chop it
+    #     NOW, even while scanning/approaching (don't hover over it).
+    print("\n[5b] opportunistic chop on the log under the crosshair")
+    fsm = FindAndChopLogs(reach=3.5)
+    fsm._state = "scan"           # busy doing something else
+    la = SimpleNamespace(pos=(1, 64, 0), block_id="minecraft:oak_log")
+    ctx = SkillContext(pose=_pose(), world_map=WorldMap(), looking_at=la)
+    fsm.tick(ctx)
+    (ok if fsm._state == "chop" and fsm._target == (1, 64, 0) else bad)(
+        f"in-reach log under crosshair -> chop (state={fsm._state}, tgt={fsm._target})")
+    # An OUT-OF-REACH log under the crosshair is NOT opportunistically chopped.
+    fsm2 = FindAndChopLogs(reach=3.5)
+    fsm2._state = "scan"
+    la2 = SimpleNamespace(pos=(1, 80, 0), block_id="minecraft:oak_log")  # too high
+    fsm2.tick(SkillContext(pose=_pose(), world_map=WorldMap(), looking_at=la2))
+    (ok if fsm2._state != "chop" else bad)(
+        f"out-of-reach log under crosshair -> NOT chopped (state={fsm2._state})")
+    # Birch behaves identically to oak.
+    fsm3 = FindAndChopLogs(reach=3.5)
+    fsm3._state = "scan"
+    lb = SimpleNamespace(pos=(1, 64, 0), block_id="minecraft:birch_log")
+    fsm3.tick(SkillContext(pose=_pose(), world_map=WorldMap(), looking_at=lb))
+    (ok if fsm3._state == "chop" else bad)(f"birch log under crosshair -> chop (state={fsm3._state})")
+
     # 6. Approach stuck -> pillar-out recover -> re-approach; 2nd stuck -> give up.
     print("\n[6] stuck -> pillar-out recover")
     from agents.skills import SkillResult
