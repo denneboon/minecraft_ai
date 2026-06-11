@@ -578,8 +578,11 @@ class ItemRecognizer:
         small = cv2.resize(crop_rgb, (16, 16), interpolation=cv2.INTER_AREA)
 
         # Empty-slot heuristic — the slot background is uniformly dark
-        # grey, so an empty slot's std is near-zero.
-        if float(small.std()) < self._EMPTY_STD_THRESHOLD:
+        # grey, so an empty slot's std is near-zero. Measure the INNER
+        # region only: the slot's raised border carries ~14-20 std even when
+        # the slot is empty (it'd defeat the threshold), while an item fills
+        # the centre. Inner-std is ~0 for empty, 40+ for any item.
+        if float(small[2:14, 2:14].std()) < self._EMPTY_STD_THRESHOLD:
             return SlotContent()
 
         # Per-pixel MAE between every template and the slot crop.
