@@ -65,7 +65,16 @@ class Crafter:
         shift-take ALL output; multi-cell recipes place one item per cell.
         Returns (ok, message)."""
         if snap is None:
-            snap = self.ctl.read()
+            # Surgical hover-to-learn: only identify slots until the recipe
+            # is plannable (and not at all if the ingredients are already
+            # recognised) — instead of hovering the whole inventory.
+            def _plannable(s):
+                return plan_step(target_id, inventory_counts(s),
+                                 self.assets, self.cat) is not None
+            try:
+                snap = self.ctl.read(stop_when=_plannable)
+            except TypeError:
+                snap = self.ctl.read()        # controllers without stop_when
         avail = inventory_counts(snap)
         step = plan_step(target_id, avail, self.assets, self.cat)
         if step is None:

@@ -218,6 +218,7 @@ class InventoryInspector:
                          container: Optional[str] = None,
                          restore_cursor: bool = True,
                          pre_hover_frame: Optional[np.ndarray] = None,
+                         stop_when=None,
                          ) -> Dict[str, InspectionResult]:
         """
         Hover over every slot the recogniser is unsure about and update
@@ -253,6 +254,10 @@ class InventoryInspector:
         results: Dict[str, InspectionResult] = {}
         resolved = 0
         try:
+            # Surgical: if the caller already has what it needs from the
+            # static read, don't hover anything at all.
+            if stop_when is not None and stop_when(snap):
+                return results
             for name, slot in rects.items():
                 if resolved >= self.cfg.max_resolutions_per_call:
                     break
@@ -291,6 +296,10 @@ class InventoryInspector:
                     self._save_sample_from_frame(
                         pre_hover_frame, slot, result.item_id)
                 resolved += 1
+                # Surgical: stop the moment the caller has enough (e.g. the
+                # recipe is now plannable) instead of scanning the rest.
+                if stop_when is not None and stop_when(snap):
+                    break
         finally:
             if original_cursor is not None:
                 # Ease back to where the user left the cursor — the

@@ -97,22 +97,21 @@ def main(argv=None) -> int:
                 print(f"[craft] frame {dbg.shape} saved to data/_craft_debug.png")
             except Exception as e:
                 print(f"[craft] frame dump failed: {e}")
-        snap = ctl.read()
+        # Crafter does a SURGICAL read internally (hovers only until the
+        # recipe is plannable). We don't pre-read here, which would hover the
+        # whole inventory and defeat the point.
+        _static = lambda s: True                  # stop_when=True -> no hovers
         if "--debug" in argv:
+            snap = ctl.read(stop_when=_static)     # static-only peek for debug
             for nm, sc in sorted((getattr(snap, "slots", {}) or {}).items()):
                 if getattr(sc, "item", None):
-                    print(f"    {nm:12} {sc.item.split(':')[-1]:18} x{getattr(sc,'count',1)} "
+                    print(f"    {nm:12} {sc.item.split(':')[-1]:18} "
                           f"conf={getattr(sc,'confidence',0):.2f}")
-        have = inventory_counts(snap)
-        print(f"[craft] inventory: "
-              + ", ".join(f"{k.split(':')[-1]}={v}" for k, v in sorted(have.items())[:12]))
-        okc, msg = crafter.craft(target, snap=snap)
+        okc, msg = crafter.craft(target)
         print(f"[craft] {'OK' if okc else 'FAIL'}: {msg}")
         time.sleep(0.4)
-        # show the result
-        after = inventory_counts(ctl.read())
-        made = after.get(target, 0)
-        print(f"[craft] now have {target.split(':')[-1]}={made}")
+        after = inventory_counts(ctl.read(stop_when=_static))   # no-hover check
+        print(f"[craft] now have {target.split(':')[-1]}={after.get(target, 0)}")
         ctl.close()
         return 0 if okc else 1
     finally:

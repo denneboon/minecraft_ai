@@ -58,10 +58,14 @@ class InventoryController:
         self._rects = None                 # slot_name -> SlotRect (last read)
 
     # ── perception ───────────────────────────────────────────────────
-    def read(self):
+    def read(self, *, stop_when=None):
         """Capture a frame, parse the open container -> InventorySnapshot,
         cache the slot rects, and (if an inspector is wired) hover-resolve
-        any items the recogniser couldn't confidently identify."""
+        items the recogniser couldn't confidently identify.
+
+        ``stop_when(snap) -> bool`` makes the hovering SURGICAL: it's checked
+        before any hover (skip entirely if already satisfied) and after each
+        one (stop the moment the caller has what it needs)."""
         frame = self._cap.get_frame()
         self._rects = slot_rects(frame.shape, layout=self.container,
                                  ui_scale=self._ui)
@@ -76,8 +80,13 @@ class InventoryController:
                 pass
         if self._inspector is not None:
             try:
-                self._inspector.resolve_unknowns(
-                    snap, window_origin=self._origin, pre_hover_frame=frame)
+                res = self._inspector.resolve_unknowns(
+                    snap, window_origin=self._origin, pre_hover_frame=frame,
+                    stop_when=stop_when)
+                if res:
+                    print(f"[inv] hovered {len(res)} slot(s) to identify "
+                          + ", ".join(sorted(v.item_id.split(':')[-1]
+                                             for v in res.values() if v.item_id)))
             except Exception as e:
                 print(f"[inv] hover-resolve failed: {e}")
         return snap
