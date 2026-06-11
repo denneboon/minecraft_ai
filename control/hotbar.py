@@ -92,6 +92,22 @@ class HotbarManager:
                 return s
         return None
 
+    def has_reading(self) -> bool:
+        """True if a hotbar reading has been ingested (any slot known)."""
+        return any(i is not None for i in self._items)
+
+    def best_slot_for(self, role: str) -> Optional[int]:
+        """The slot to select for ``role``, robust to having no inventory
+        read: with a reading, the verified slot (or the reserved one as a
+        fallback); without one, just trust the reserved-slot CONFIG. So a
+        behaviour can pick the axe/blocks/food slot even before the
+        inventory recogniser has run."""
+        if self.has_reading():
+            s = self.slot_for_role(role)
+            if s is not None:
+                return s
+        return self._role_slot.get(role)
+
     def has_role(self, role: str) -> bool:
         return self.slot_for_role(role) is not None
 

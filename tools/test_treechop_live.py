@@ -67,7 +67,14 @@ def main() -> int:
     px_per_deg = float(((settings.get("agent", {}) or {}).get("mouse_per_degree", 6.5)) or 6.5)
     from vision.mc_assets import MCAssets
     from knowledge.catalog import Catalog
-    log_ids = {b.id for b in Catalog.load(MCAssets.load()).blocks_in_tag("logs")}
+    from control.hotbar import build_hotbar_manager
+    _cat = Catalog.load(MCAssets.load())
+    log_ids = {b.id for b in _cat.blocks_in_tag("logs")}
+    # Config-trusting hotbar (no inventory read needed): mining selects the
+    # reserved axe slot from settings.yaml (hotbar.slot_roles).
+    hotbar = build_hotbar_manager(settings, catalog=_cat)
+    print(f"[chop] hotbar: axe slot {hotbar.assigned_slot('axe')}, "
+          f"blocks slot {hotbar.assigned_slot('blocks')}")
     def is_log(bid):
         return bool(bid) and (bid in log_ids or str(bid).endswith("_log"))
     time.sleep(0.3)
@@ -99,7 +106,7 @@ def main() -> int:
             mouse.left_release(); attack[0] = False
 
     fsm = FindAndChopLogs(is_log=is_log, reach=3.5, max_logs=args.logs,
-                          tool_role=None)
+                          tool_role="axe")
     print(f"[chop] FindAndChopLogs — target {args.logs} log(s). Walks + mines "
           f"logs only. Panic: Ctrl+Shift+X.")
     status = SkillStatus.RUNNING
@@ -117,7 +124,8 @@ def main() -> int:
             except Exception as e:
                 print(f"[chop] perception error: {e!r}"); continue
             ctx = SkillContext(pose=wf.pose, world_map=wp.world_map,
-                               looking_at=wf.looking_at, px_per_deg=px_per_deg,
+                               looking_at=wf.looking_at, hotbar=hotbar,
+                               px_per_deg=px_per_deg,
                                tick=step, dimension=wf.pose.dimension if wf.pose else None)
             res = fsm.tick(ctx)
             status = res.status

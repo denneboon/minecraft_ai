@@ -271,7 +271,8 @@ class MineBlock(Skill):
         # 1. Select the tool once.
         if not self._tool_ok:
             hb = ctx.hotbar
-            slot = hb.slot_for_role(self.tool_role) if hb is not None else None
+            slot = (hb.best_slot_for(self.tool_role)
+                    if hb is not None else None)
             self._tool_ok = True   # don't loop forever if the tool is missing
             if slot is not None:
                 return SkillResult(AgentAction(hotbar=slot), SkillStatus.RUNNING,

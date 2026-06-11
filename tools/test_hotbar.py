@@ -120,6 +120,28 @@ def test_hotbar_manager() -> None:
     else:
         bad("empty hotbar should give None")
 
+    # best_slot_for: trust the config when there's no inventory reading.
+    hb2 = HotbarManager(cfg, catalog=cat)        # never .update()'d
+    if not hb2.has_reading() and hb2.best_slot_for("axe") == 2 \
+            and hb2.best_slot_for("blocks") == 5:
+        ok("best_slot_for trusts config with no reading (axe=2, blocks=5)")
+    else:
+        bad(f"best_slot_for config-trust wrong: {hb2.best_slot_for('axe')}")
+    # With a reading where the axe is moved, verified slot wins.
+    hb2.update(["minecraft:diamond_sword", None, "minecraft:stone_pickaxe",
+                None, "minecraft:cobblestone", None, "minecraft:iron_axe",
+                None, "minecraft:bread"])
+    if hb2.best_slot_for("axe") == 7:
+        ok("best_slot_for prefers the verified slot when a reading exists (axe@7)")
+    else:
+        bad(f"best_slot_for verified wrong: {hb2.best_slot_for('axe')}")
+    # Reading present but the role is absent -> fall back to reserved slot.
+    hb2.update(["minecraft:diamond_sword"] + [None] * 8)
+    if hb2.best_slot_for("axe") == 2:
+        ok("best_slot_for falls back to reserved slot when item absent")
+    else:
+        bad(f"best_slot_for fallback wrong: {hb2.best_slot_for('axe')}")
+
 
 def test_builder() -> None:
     print("\n[3] build_hotbar_manager from settings")
