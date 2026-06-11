@@ -29,8 +29,9 @@ from typing import Optional
 from brain.interfaces import AgentAction
 from agents.skills import (
     SkillStatus, SkillResult, SkillContext, WalkToward, ChopTrunk, PillarUp,
-    find_nearest_block,
+    MineBlock, find_nearest_block,
 )
+from vision.world.map import AIR_BLOCK
 
 
 def _is_log_default(bid: str) -> bool:
@@ -71,6 +72,29 @@ class FindAndChopLogs:
     def _eye_vox(self, pose):
         return (int(math.floor(pose.x)), int(math.floor(pose.y)),
                 int(math.floor(pose.z)))
+
+    def _obstacle_ahead(self, ctx):
+        """The voxel of a KNOWN solid block directly ahead (foot or head
+        level, toward the target) that's blocking the path, or None. Lets
+        the recover logic MINE THROUGH a wall instead of pillaring."""
+        p, wm = ctx.pose, ctx.world_map
+        if wm is None or self._target is None:
+            return None
+        dx = self._target[0] + 0.5 - p.x
+        dz = self._target[2] + 0.5 - p.z
+        sx = (1 if dx > 0 else -1) if abs(dx) >= abs(dz) else 0
+        sz = 0 if sx != 0 else (1 if dz > 0 else -1)
+        foot = int(math.floor(p.y))
+        bx, bz = int(math.floor(p.x)) + sx, int(math.floor(p.z)) + sz
+        for dyy in (0, 1):                       # foot + head height
+            v = (bx, foot + dyy, bz)
+            try:
+                obs = wm.get_block(v, dimension=ctx.dimension)
+            except TypeError:
+                obs = wm.get_block(v)
+            if obs is not None and obs.block_id not in (AIR_BLOCK, None):
+                return v
+        return None
 
     def _find(self, ctx):
         eye = self._eye_vox(ctx.pose)
@@ -126,10 +150,17 @@ class FindAndChopLogs:
                                        f"explore {self._explore_attempts}/{self.max_explore} -> {ex}")
                 return SkillResult(AgentAction(), SkillStatus.DONE,
                                    f"no logs found after exploring; chopped {self.chopped}")
-            # Rotate the view to map more (oscillate pitch to catch trunks + ground).
-            dy = int(18 * math.sin(self._scan_ticks * 0.5))
-            return SkillResult(AgentAction(look_dx=70, look_dy=dy),
-                               SkillStatus.RUNNING, f"scanning {self._scan_ticks}")
+            # Clean look-around: FIRST level the pitch to ~0 without
+            # touching yaw, THEN rotate yaw only (pitch untouched) — no
+            # up/down bobbing. Level scanning also sweeps the horizon where
+            # tree trunks are, which is exactly what we're looking for.
+            pitch = float(pose.pitch)
+            if abs(pitch) > 5.0:
+                dy = int(max(-120, min(120, (0.0 - pitch) * ctx.px_per_deg * 0.5)))
+                return SkillResult(AgentAction(look_dy=dy), SkillStatus.RUNNING,
+                                   f"leveling pitch ({pitch:.0f}deg)")
+            return SkillResult(AgentAction(look_dx=70), SkillStatus.RUNNING,
+                               f"scanning {self._scan_ticks}")
 
         if st == "explore":
             tgt = self._find(ctx)               # a log may appear as we walk
@@ -155,8 +186,15 @@ class FindAndChopLogs:
                 # stuck) -> give up on this log.
                 if "stuck" in r.info and not self._recovered:
                     self._recovered = True
-                    self._sub = PillarUp(height=2)
                     self._state = "recover"
+                    obstacle = self._obstacle_ahead(ctx)
+                    if obstacle is not None:
+                        # A wall is blocking the path -> mine through it.
+                        self._sub = MineBlock(obstacle, tool_role=None)
+                        return SkillResult(r.action, SkillStatus.RUNNING,
+                                           f"stuck; mining through {obstacle}")
+                    # Otherwise assume a hole -> pillar out.
+                    self._sub = PillarUp(height=2)
                     return SkillResult(r.action, SkillStatus.RUNNING,
                                        "stuck; pillaring out of the hole")
                 self._blacklist.add(self._target); self._state = "find"
