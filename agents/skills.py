@@ -67,6 +67,8 @@ class SkillContext:
     world_map: object = None          # vision.world.map.WorldMap (or None)
     hotbar: object = None             # control.hotbar.HotbarManager (or None)
     looking_at: object = None         # F3 LookingAtBlock (.pos, .block_id) or None
+    targeted_pos: Optional[tuple] = None  # raw F3 targeted-block coords even when
+                                      # the id is unreadable (placement confirm)
     px_per_deg: float = 6.5           # mouse sensitivity (calibrated upstream)
     tick: int = 0
     dimension: Optional[str] = None
@@ -1072,7 +1074,15 @@ class PlaceBlock(Skill):
             la = ctx.looking_at
             lpos = getattr(la, "pos", None)
             lbid = getattr(la, "block_id", None)
-            if lpos == self.placed_at and lbid not in (None, AIR_BLOCK):
+            # Confirm by POSITION: after placing, the crosshair (still aimed at
+            # the same view) now hits the new block AT the placement voxel,
+            # whereas before it hit the support block below it. We accept the
+            # raw F3 targeted coords too, because a freshly-placed block's id
+            # often OCRs to garble (so looking_at parses to None) while its
+            # coords stay clean.
+            hit_pos = lpos if (lpos is not None and lbid not in (None, AIR_BLOCK)) \
+                else ctx.targeted_pos
+            if hit_pos == self.placed_at:
                 return SkillResult(AgentAction(), SkillStatus.DONE,
                                    f"placed + confirmed at {self.placed_at}")
             if self._verify > self.verify_ticks:

@@ -161,6 +161,28 @@ def parse_looking_at_block(lines: Iterable[str]) -> Optional[LookingAtBlock]:
                           face=face, confidence=1.0)
 
 
+def targeted_block_pos(lines: Iterable[str]) -> Optional[Tuple[int, int, int]]:
+    """Return just the targeted block's coordinates, regardless of whether the
+    block id could be read. F3 prints "Targeted Block: x, y, z" reliably even
+    when the id line below it OCRs to garble (proportional font on a busy
+    background) — e.g. a freshly-placed crafting table reads as ``?`` but its
+    coords are clean. ``parse_looking_at_block`` returns None without an id, so
+    this is the position-only fallback for code that just needs to know WHICH
+    block the crosshair is on (placement confirmation, not identification)."""
+    lst: List[str] = [(s or "").strip() for s in lines]
+    label_idx = _find_label_line(lst)
+    if label_idx is None:
+        return None
+    pos = _extract_coords(lst[label_idx])
+    if pos is None:
+        for j in (label_idx + 1, label_idx - 1):
+            if 0 <= j < len(lst):
+                pos = _extract_coords(lst[j])
+                if pos is not None:
+                    break
+    return pos
+
+
 # ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------

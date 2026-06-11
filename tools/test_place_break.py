@@ -101,6 +101,23 @@ def main() -> int:
             break
     (ok if done.status == SkillStatus.DONE else bad)(
         f"confirms placement once the block appears ({done.status})")
+    # id-unreadable path: F3 garbles a fresh block's id (looking_at parses to
+    # None) but the targeted COORDS are clean -> still confirm by position.
+    pbp = PlaceBlock("blocks", pitches=(56.0,), yaw_offs=(0.0,))
+    caim = SkillContext(pose=_pose(), looking_at=_la((0, 63, 1), "up"),
+                        world_map=_wm(), hotbar=_hotbar({"blocks": 5}), px_per_deg=6.5)
+    for _ in range(8):
+        if pbp.tick(caim).action.interact == "use_item":
+            break
+    cpos = SkillContext(pose=_pose(), looking_at=None, targeted_pos=(0, 64, 1),
+                        world_map=_wm(), hotbar=_hotbar({"blocks": 5}), px_per_deg=6.5)
+    dp = None
+    for _ in range(3):
+        dp = pbp.tick(cpos)
+        if dp.status == SkillStatus.DONE:
+            break
+    (ok if dp.status == SkillStatus.DONE else bad)(
+        f"confirms by targeted coords when the id is unreadable ({dp.status})")
     # if the block never appears (MC rejected) and there are no other views,
     # it FAILS rather than hanging.
     pbr = PlaceBlock("blocks", pitches=(56.0,), yaw_offs=(0.0,), verify_ticks=2)

@@ -37,6 +37,7 @@ from control.inventory_control import InventoryController
 from agents.crafting import Crafter, find_item_slot
 from agents.skills import (PlaceBlock, BreakLookedAt, LookAtVoxel,
                            SkillContext, SkillStatus)
+from vision.world.f3_target import targeted_block_pos
 from agents.treechop import _full_movement
 from knowledge.catalog import Catalog
 from vision.mc_assets import MCAssets
@@ -121,11 +122,19 @@ def main(argv=None) -> int:
             if menu_detector is not None and menu_detector.is_pause_menu(frame):
                 M.ensure_playing(capture, menu_detector, kb)
                 time.sleep(0.2); continue
-            wf = wp.update(frame, f3.read(frame))
+            reading = f3.read(frame)
+            wf = wp.update(frame, reading)
             pose = wf.pose
+            # Raw targeted-block coords (survive an unreadable block id — a
+            # freshly-placed table OCRs to '?' but its coords stay clean), so
+            # PlaceBlock can confirm a placement by position.
+            try:
+                tpos = targeted_block_pos(getattr(reading, "raw_text", "").splitlines())
+            except Exception:
+                tpos = None
             ctx = SkillContext(pose=pose, world_map=wp.world_map,
-                               looking_at=wf.looking_at, hotbar=hotbar,
-                               px_per_deg=px_per_deg,
+                               looking_at=wf.looking_at, targeted_pos=tpos,
+                               hotbar=hotbar, px_per_deg=px_per_deg,
                                dimension=getattr(pose, "dimension", None) if pose else None)
             r = skill.tick(ctx)
             _dispatch(r.action)
