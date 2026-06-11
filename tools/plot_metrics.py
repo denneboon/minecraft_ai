@@ -137,6 +137,35 @@ def main(argv=None) -> int:
         p = root / "progress_learning_curve.png"; fig.tight_layout(); fig.savefig(p, dpi=110)
         saved.append(p); plt.close(fig)
 
+    # Benchmark history (deterministic held-out accuracy over time) — the
+    # signal that catches regressions live-accuracy hides.
+    bench_p = root / "benchmark_history.jsonl"
+    if bench_p.is_file():
+        bench = []
+        for line in bench_p.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line:
+                try:
+                    bench.append(json.loads(line))
+                except Exception:
+                    pass
+        if bench:
+            bx = list(range(1, len(bench) + 1))
+            cacc = [b.get("cnn_clean_acc", 0.0) for b in bench]
+            aacc = [b.get("cnn_aug_acc", 0.0) for b in bench]
+            nsmp = [b.get("n_samples", 0) for b in bench]
+            fig, ax = plt.subplots(figsize=(9, 4.5))
+            ax.plot(bx, cacc, "o-", color="#2a9d2a", label="CNN benchmark (clean)")
+            ax.plot(bx, aacc, "s--", color="#b05020", label="CNN benchmark (augmented)")
+            ax.set_ylim(0, 1.02); ax.set_xlabel("benchmark run #")
+            ax.set_ylabel("decided accuracy")
+            ax.set_title("Held-out benchmark accuracy over time (regression watch)")
+            ax.grid(True, alpha=0.3); ax.legend(loc="lower left")
+            ax2 = ax.twinx(); ax2.plot(bx, nsmp, ":", color="#888", lw=1)
+            ax2.set_ylabel("samples in store")
+            p = root / "progress_benchmark.png"; fig.tight_layout()
+            fig.savefig(p, dpi=110); saved.append(p); plt.close(fig)
+
     print(f"[plot] {len(sessions)} session(s) -> wrote {len(saved)} chart(s):")
     for p in saved:
         print(f"    {p}")

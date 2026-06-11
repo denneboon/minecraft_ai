@@ -111,6 +111,10 @@ def main(argv=None) -> int:
                     help="min samples for a block to enter the benchmark")
     ap.add_argument("--augment", action="store_true",
                     help="also show the augmented (lighting/biome/angle) eval")
+    ap.add_argument("--log", action="store_true",
+                    help="append the CNN result to data/metrics/"
+                         "benchmark_history.jsonl (track quality / catch "
+                         "regressions over time; graph via plot_metrics).")
     args = ap.parse_args(argv)
 
     print("=" * 64)
@@ -154,6 +158,27 @@ def main(argv=None) -> int:
     print("=" * 64)
     print("  (deterministic for a fixed store; re-run after a code change "
           "to A/B per-block.)")
+
+    if args.log:
+        import json, time
+        from vision.world.metrics import default_metrics_root
+        cc, ct, _, c_acc, c_cov = _evaluate(cnn, test, classes, False)
+        ac, at, _, a_acc, a_cov = _evaluate(cnn, test, classes, True)
+        rec = {
+            "ts_unix": round(time.time(), 1),
+            "ts": time.strftime("%Y-%m-%d_%H-%M-%S"),
+            "n_samples": len(alls), "n_blocks": len(classes),
+            "cnn_clean_acc": round(c_acc, 4), "cnn_clean_cov": round(c_cov, 4),
+            "cnn_aug_acc": round(a_acc, 4), "cnn_aug_cov": round(a_cov, 4),
+            "per_block_clean": {b.split(":")[-1]:
+                                round(cc.get(b, 0) / ct[b], 4) if ct.get(b) else 0.0
+                                for b in classes},
+        }
+        root = default_metrics_root(); root.mkdir(parents=True, exist_ok=True)
+        with (root / "benchmark_history.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, sort_keys=True) + "\n")
+        print(f"  logged benchmark -> {root / 'benchmark_history.jsonl'} "
+              f"(clean {c_acc:.0%}, aug {a_acc:.0%})")
     return 0
 
 
