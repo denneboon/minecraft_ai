@@ -85,6 +85,29 @@ def main() -> int:
     tgt = fsm._find(SkillContext(pose=_pose(), world_map=_map_with_log((1, 64, 0))))
     (ok if tgt is None else bad)(f"blacklisted log excluded from find -> {tgt}")
 
+    # 6. Approach stuck -> pillar-out recover -> re-approach; 2nd stuck -> give up.
+    print("\n[6] stuck -> pillar-out recover")
+    from agents.skills import SkillResult
+    from brain.interfaces import AgentAction
+    class _Stuck:
+        def tick(self, ctx): return SkillResult(AgentAction(), SkillStatus.FAILED, "stuck (d=5.0)")
+    class _Done:
+        def tick(self, ctx): return SkillResult(AgentAction(), SkillStatus.DONE, "pillared")
+    fsm = FindAndChopLogs(reach=3.5)
+    fsm._state = "approach"; fsm._target = (5, 64, 0); fsm._recovered = False
+    fsm._sub = _Stuck()
+    ctx = SkillContext(pose=_pose(), world_map=_map_with_log((5, 64, 0)))
+    fsm.tick(ctx)
+    (ok if fsm._state == "recover" else bad)(f"approach stuck -> recover (state={fsm._state})")
+    fsm._sub = _Done()
+    fsm.tick(ctx)
+    (ok if fsm._state == "approach" else bad)(f"recovered -> re-approach (state={fsm._state})")
+    # A 2nd stuck (already recovered) blacklists + refinds.
+    fsm._sub = _Stuck()
+    fsm.tick(ctx)
+    (ok if fsm._state == "find" and (5, 64, 0) in fsm._blacklist else bad)(
+        f"2nd stuck -> give up + blacklist (state={fsm._state})")
+
     print("\n" + ("ALL TREECHOP TESTS PASSED" if not _fails
                   else f"{_fails} CHECK(S) FAILED"))
     return 0 if not _fails else 1

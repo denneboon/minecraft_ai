@@ -28,7 +28,7 @@ from typing import Optional
 
 from brain.interfaces import AgentAction
 from agents.skills import (
-    SkillStatus, SkillResult, SkillContext, WalkToward, ChopTrunk,
+    SkillStatus, SkillResult, SkillContext, WalkToward, ChopTrunk, PillarUp,
     find_nearest_block,
 )
 
@@ -57,6 +57,7 @@ class FindAndChopLogs:
         self._sub = None
         self._scan_ticks = 0
         self._blacklist = set()
+        self._recovered = False     # pillar-out attempted for this target?
         self.chopped = 0
 
     def _eye_vox(self, pose):
@@ -85,6 +86,7 @@ class FindAndChopLogs:
                 self._state = "scan"; self._scan_ticks = 0
                 return SkillResult(AgentAction(), SkillStatus.RUNNING, "no log mapped; scanning")
             self._target = tgt
+            self._recovered = False
             ex, ez = pose.x, pose.z
             horiz = math.hypot(tgt[0] + 0.5 - ex, tgt[2] + 0.5 - ez)
             if horiz <= self.reach:
@@ -116,8 +118,28 @@ class FindAndChopLogs:
                 self._state = "chop"
                 return SkillResult(r.action, SkillStatus.RUNNING, "arrived; chopping")
             if r.status in (SkillStatus.FAILED, SkillStatus.BLOCKED):
+                # Stuck (e.g. fell in a hole)? Try pillaring out once, then
+                # re-approach from the new height. Other failures (or a 2nd
+                # stuck) -> give up on this log.
+                if "stuck" in r.info and not self._recovered:
+                    self._recovered = True
+                    self._sub = PillarUp(height=2)
+                    self._state = "recover"
+                    return SkillResult(r.action, SkillStatus.RUNNING,
+                                       "stuck; pillaring out of the hole")
                 self._blacklist.add(self._target); self._state = "find"
-                return SkillResult(r.action, SkillStatus.RUNNING, f"approach {r.status.value}; refind")
+                return SkillResult(r.action, SkillStatus.RUNNING,
+                                   f"approach {r.status.value}; refind")
+            return r
+
+        if st == "recover":
+            r = self._sub.tick(ctx)
+            if r.status in (SkillStatus.DONE, SkillStatus.FAILED, SkillStatus.BLOCKED):
+                # Climbed out (or couldn't) -> re-approach the log once more.
+                self._sub = WalkToward(self._target, arrive_dist=self.reach)
+                self._state = "approach"
+                return SkillResult(r.action, SkillStatus.RUNNING,
+                                   f"recovered ({r.info}); re-approaching")
             return r
 
         if st == "chop":

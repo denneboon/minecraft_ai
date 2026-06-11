@@ -342,7 +342,7 @@ class PillarUp(Skill):
         # Select blocks slot once.
         hb = ctx.hotbar
         if not self._selected and hb is not None:
-            slot = hb.blocks_slot()
+            slot = hb.best_slot_for("blocks")
             self._selected = True
             if slot is None:
                 return SkillResult(AgentAction(), SkillStatus.FAILED, "no blocks")
@@ -406,7 +406,7 @@ class Bridge(Skill):
                                "bridge stalled (no forward progress)")
         hb = ctx.hotbar
         if not self._selected and hb is not None:
-            slot = hb.blocks_slot()
+            slot = hb.best_slot_for("blocks")
             self._selected = True
             if slot is None:
                 return SkillResult(AgentAction(), SkillStatus.FAILED, "no blocks")
@@ -437,13 +437,19 @@ class WalkToward(Skill):
 
     def __init__(self, target: Voxel, arrive_dist: float = 1.6,
                  face_tol_deg: float = 14.0, stuck_window: int = 18,
-                 min_progress: float = 0.12, avoid_fall: bool = True):
+                 min_progress: float = 0.12, avoid_fall: bool = True,
+                 sprint: bool = True, jump_after: int = 4):
         self.target = tuple(target)
         self.arrive_dist = arrive_dist
         self.face_tol = face_tol_deg
         self.stuck_window = stuck_window
         self.min_progress = min_progress
         self.avoid_fall = avoid_fall
+        self.sprint = sprint
+        # When forward progress stalls for this many ticks, start jumping
+        # while walking — MC then mantles over a 1-block step or out of a
+        # 1-deep hole. (Deeper holes escalate to PillarUp in the planner.)
+        self.jump_after = jump_after
         self.aim = _Aimer(tol_deg=face_tol_deg)
         self.reset()
 
@@ -498,9 +504,16 @@ class WalkToward(Skill):
             return SkillResult(AgentAction(look_dx=ddx, look_dy=ddy,
                                            movement={"forward": False}),
                                SkillStatus.RUNNING, f"facing (d={dist:.1f})")
-        # Facing -> walk forward, nudging yaw to stay on course.
-        return SkillResult(AgentAction(movement={"forward": True}, look_dx=ddx),
-                           SkillStatus.RUNNING, f"walking (d={dist:.1f})")
+        # Facing -> walk forward (sprint by default), nudging yaw to stay on
+        # course. If progress has stalled, jump too: MC mantles over a
+        # 1-block step / out of a 1-deep hole. Don't jump while edge-avoiding
+        # (we already returned above if a known drop is ahead).
+        mv = {"forward": True, "sprint": self.sprint}
+        if self._stuck >= self.jump_after:
+            mv["jump"] = True
+        info = "jump-walking" if mv.get("jump") else "walking"
+        return SkillResult(AgentAction(movement=mv, look_dx=ddx),
+                           SkillStatus.RUNNING, f"{info} (d={dist:.1f})")
 
 
 class ChopTrunk(Skill):

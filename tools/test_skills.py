@@ -253,15 +253,24 @@ def test_walk_toward():
             pose.x += 0.6              # advanced toward target
     (ok if status == SkillStatus.DONE else bad)(f"faces + walks to arrive -> {status}")
 
-    # Stuck: facing but never advances -> FAILED.
+    # Sprint is held while walking forward.
+    pose_s = _pose(x=0.0, z=0.0, yaw=-90.0)
+    rs = WalkToward(tgt).tick(SkillContext(pose=pose_s, px_per_deg=6.5))
+    (ok if rs.action.movement.get("sprint") and rs.action.movement.get("forward")
+     else bad)("sprint held while walking forward")
+
+    # Stuck: facing but never advances -> jumps (climb out) then FAILED.
     pose2 = _pose(x=0.0, z=0.0, yaw=-90.0)
-    sk2 = WalkToward(tgt, stuck_window=8)
-    st = None
+    sk2 = WalkToward(tgt, stuck_window=10, jump_after=3)
+    st = None; saw_jump = False
     for _ in range(40):
-        st = sk2.tick(SkillContext(pose=pose2)).status
+        r = sk2.tick(SkillContext(pose=pose2)); st = r.status
+        if r.action.movement.get("jump"):
+            saw_jump = True
         if st in (SkillStatus.DONE, SkillStatus.FAILED):
             break
-    (ok if st == SkillStatus.FAILED else bad)(f"no progress -> {st}")
+    (ok if saw_jump else bad)("jumps while stalling (mantle out of a 1-deep hole / step)")
+    (ok if st == SkillStatus.FAILED else bad)(f"persistent no progress -> {st}")
 
     # Edge ahead: known air below the next step -> FAILED.
     wm = _FakeMap(); wm.set((1, 63, 0), "minecraft:air")
