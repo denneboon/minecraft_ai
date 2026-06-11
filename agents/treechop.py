@@ -347,7 +347,7 @@ class FindAndChopLogs:
                                        f"({self._recover_count}/{self.max_recover})")
                 self._drop_target(); self._state = "find"
                 return SkillResult(r.action, SkillStatus.RUNNING,
-                                   f"approach {r.status.value}; refind")
+                                   f"approach failed [{r.info}]; refind")
             return r
 
         if st == "recover":
@@ -392,7 +392,8 @@ class FindAndChopLogs:
                                    f"chopped {mined} log(s); collecting")
             if r.status in (SkillStatus.FAILED, SkillStatus.BLOCKED):
                 self._drop_target(); self._state = "find"
-                return SkillResult(r.action, SkillStatus.RUNNING, f"chop {r.status.value}; refind")
+                return SkillResult(r.action, SkillStatus.RUNNING,
+                                   f"chop failed [{r.info}]; refind")    # surface WHY
             return r
 
         if st == "collect":
