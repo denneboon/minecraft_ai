@@ -134,117 +134,83 @@ def test_eat(cat):
 
 
 def test_mine_block(cat):
-    print("\n[5] MineBlock")
+    print("\n[5] MineBlock (aim -> freeze + mine latch)")
     vox = (2, 64, 0)
     eye = (0.0, 64.0 + 1.62, 0.0)
     yaw, pitch = aim_angles(eye, (vox[0] + 0.5, vox[1] + 0.5, vox[2] + 0.5))
-    wm = _FakeMap(); wm.set(vox, "minecraft:oak_log")
+    LOG = lambda b: bool(b) and str(b).endswith("_log")
+    LEAFLOG = lambda b: bool(b) and (str(b).endswith("_log") or str(b).endswith("_leaves"))
     hb = _hotbar(cat)
-    sk = MineBlock(vox, tool_role="axe", max_ticks=50)
-    # F3 confirms the crosshair is on the target log -> select axe, then mine.
-    ctx = SkillContext(pose=_pose(yaw=yaw, pitch=pitch), world_map=wm, hotbar=hb,
-                       looking_at=SimpleNamespace(pos=vox, block_id="minecraft:oak_log"))
-    saw_tool = saw_attack = False
-    for _ in range(8):
+    def log_la():  return SimpleNamespace(pos=vox, block_id="minecraft:oak_log")
+
+    # The instant F3 shows the target log: select axe, then FREEZE + mine —
+    # holding the click and NEVER moving the camera.
+    sk = MineBlock(vox, tool_role="axe", is_target=LOG, is_passthrough=LEAFLOG)
+    ctx = SkillContext(pose=_pose(yaw=yaw, pitch=pitch), hotbar=hb, looking_at=log_la())
+    saw_tool = saw_attack = saw_look = False
+    for _ in range(6):
         r = sk.tick(ctx)
         if r.action.hotbar == 2: saw_tool = True
         if r.action.interact == "attack": saw_attack = True
+        if r.action.look_dx or r.action.look_dy: saw_look = True
     (ok if saw_tool else bad)("selected axe before mining")
-    (ok if saw_attack else bad)("mines the log F3 confirms (no aim fiddling)")
-    # Now the block breaks (world carves it to air) -> DONE.
-    wm.set(vox, AIR_BLOCK)
-    r = sk.tick(ctx)
-    (ok if r.status == SkillStatus.DONE else bad)(f"voxel->air -> {r.status}")
+    (ok if saw_attack else bad)("holds attack on the confirmed log")
+    (ok if not saw_look else bad)("NEVER moves the camera while mining a log")
 
-    # F3 break-signal: target moved off the voxel after attacking -> DONE
-    # (the robust live signal, independent of the WorldMap carving air).
-    wm3 = _FakeMap(); wm3.set(vox, "minecraft:oak_log")
-    sk3 = MineBlock(vox, tool_role=None)
-    ctx3 = SkillContext(pose=_pose(yaw=yaw, pitch=pitch), world_map=wm3,
-                        looking_at=SimpleNamespace(pos=vox, block_id="minecraft:oak_log"))
-    sk3.tick(ctx3)            # confirm target + attack once (mining_ticks -> 1)
-    ctx3.looking_at = SimpleNamespace(pos=(vox[0], vox[1], vox[2] + 1),
-                                      block_id="minecraft:dirt")
-    r = sk3.tick(ctx3)
-    (ok if r.status == SkillStatus.DONE else bad)(
-        f"F3 target moved off voxel -> {r.status}")
+    # Log breaks: F3 stops showing a log -> after a brief grace, DONE + broke.
+    ctx.looking_at = None
+    st = None
+    for _ in range(6):
+        r = sk.tick(ctx); st = r.status
+        if st == SkillStatus.DONE: break
+    (ok if st == SkillStatus.DONE and sk.broke else bad)(
+        f"log gone -> DONE + counted ({st}, broke={sk.broke})")
 
-    # Leaf in FRONT of the target log: break it (on the path) but do NOT
-    # falsely complete; finish only when the real target breaks.
-    wm4 = _FakeMap(); wm4.set(vox, "minecraft:oak_log")
-    leaf_or_log = lambda b: bool(b) and (str(b).endswith("_log") or str(b).endswith("_leaves"))
-    sk4 = MineBlock(vox, tool_role=None, is_safe=leaf_or_log)
-    ctx4 = SkillContext(pose=_pose(yaw=yaw, pitch=pitch), world_map=wm4,
+    # Mislabelled target (F3 says the target voxel is dirt) -> abandon, NOT counted.
+    sk2 = MineBlock(vox, tool_role=None, is_target=LOG)
+    ctx2 = SkillContext(pose=_pose(yaw=yaw, pitch=pitch),
+                        looking_at=SimpleNamespace(pos=vox, block_id="minecraft:dirt"))
+    r = sk2.tick(ctx2)
+    (ok if r.status == SkillStatus.FAILED and not sk2.broke else bad)(
+        f"dirt target -> abandon, not counted ({r.status})")
+
+    # Leaf occluding the target log: clear it (frozen, NOT counted), then the
+    # log appears -> mine it -> break -> DONE + counted.
+    sk3 = MineBlock(vox, tool_role=None, is_target=LOG, is_passthrough=LEAFLOG)
+    ctx3 = SkillContext(pose=_pose(yaw=yaw, pitch=pitch),
                         looking_at=SimpleNamespace(pos=(vox[0], vox[1], vox[2] + 1),
                                                    block_id="minecraft:oak_leaves"))
-    r = sk4.tick(ctx4)                          # crosshair on a leaf in front
-    not_done = r.status == SkillStatus.RUNNING
-    ctx4.looking_at = SimpleNamespace(pos=vox, block_id="minecraft:oak_log")
-    sk4.tick(ctx4)                              # leaf gone -> now sees the log
-    ctx4.looking_at = SimpleNamespace(pos=(vox[0], vox[1], vox[2] - 1),
-                                      block_id="minecraft:dirt")
-    r = sk4.tick(ctx4)                          # target broke
-    (ok if not_done and r.status == SkillStatus.DONE else bad)(
-        "leaf in front: breaks it then completes only on the real log")
-    # Timeout path.
-    wm2 = _FakeMap(); wm2.set(vox, "minecraft:stone")
-    sk2 = MineBlock(vox, tool_role=None, max_ticks=5)
-    ctx2 = SkillContext(pose=_pose(yaw=yaw, pitch=pitch), world_map=wm2)
+    r = sk3.tick(ctx3)                          # locked + leaf occluding -> clear
+    cleared = (r.action.interact == "attack"
+               and not (r.action.look_dx or r.action.look_dy))
+    ctx3.looking_at = log_la()                  # leaf gone -> log now visible
+    r = sk3.tick(ctx3)
+    mining = (r.action.interact == "attack")
+    ctx3.looking_at = None                      # log breaks
+    st = None
+    for _ in range(6):
+        r = sk3.tick(ctx3); st = r.status
+        if st == SkillStatus.DONE: break
+    (ok if cleared and mining and st == SkillStatus.DONE and sk3.broke else bad)(
+        "clears occluding leaf (no count) then mines the log behind (counts)")
+
+    # Flicker mid-mine: a brief F3 gap keeps the click held (no spam release).
+    sk4 = MineBlock(vox, tool_role=None, is_target=LOG)
+    ctx4 = SkillContext(pose=_pose(yaw=yaw, pitch=pitch), looking_at=log_la())
+    sk4.tick(ctx4)                              # mine_log
+    ctx4.looking_at = None
+    r = sk4.tick(ctx4)
+    (ok if r.action.interact == "attack" else bad)(
+        "holds attack through a brief F3 gap (no spam-click)")
+
+    # Aimed at sky (F3 silent), never started -> bounded abandon (no hang).
+    sk5 = MineBlock(vox, tool_role=None, is_target=LOG)
+    ctx5 = SkillContext(pose=_pose(yaw=yaw, pitch=pitch))     # looking_at None
     st = SkillStatus.RUNNING
-    for _ in range(20):
-        st = sk2.tick(ctx2).status
-        if st in (SkillStatus.DONE, SkillStatus.FAILED): break
-    (ok if st == SkillStatus.FAILED else bad)(f"never breaks -> {st}")
-
-    # SAFETY gate: refuse to strike a block confirmed NON-breakable (aim
-    # drifted onto terrain) -> FAILED, never attacks it.
-    wms = _FakeMap(); wms.set(vox, "minecraft:oak_log")
-    sks = MineBlock(vox, tool_role=None,
-                    is_safe=lambda b: bool(b) and str(b).endswith("_log"))
-    ctxs = SkillContext(pose=_pose(yaw=yaw, pitch=pitch), world_map=wms,
-                        looking_at=SimpleNamespace(pos=vox, block_id="minecraft:stone"))
-    rs = sks.tick(ctxs)
-    (ok if rs.status == SkillStatus.FAILED and "not a log" in rs.info
-     else bad)(f"abandons a target F3 says isn't a log -> {rs.status} ({rs.info})")
-    # And it DOES attack when the confirmed block is breakable.
-    ctxs.looking_at = SimpleNamespace(pos=vox, block_id="minecraft:oak_log")
-    sks2 = MineBlock(vox, tool_role=None,
-                     is_safe=lambda b: bool(b) and str(b).endswith("_log"))
-    saw = any(sks2.tick(ctxs).action.interact == "attack" for _ in range(4))
-    (ok if saw else bad)("attacks when the confirmed block IS breakable")
-
-    # Settled (aimed) but F3 says DIRT (mislabelled target) -> abandon, don't
-    # stare at it. (dirt voxel differs from the target voxel.)
-    wmd = _FakeMap(); wmd.set(vox, "minecraft:oak_log")
-    skd = MineBlock(vox, tool_role=None,
-                    is_safe=lambda b: bool(b) and str(b).endswith("_log"))
-    ctxd = SkillContext(pose=_pose(yaw=yaw, pitch=pitch), world_map=wmd,
-                        looking_at=SimpleNamespace(pos=(vox[0], vox[1] - 1, vox[2]),
-                                                   block_id="minecraft:dirt"))
-    rd = skd.tick(ctxd)
-    (ok if rd.status == SkillStatus.FAILED and "blocks the target" in rd.info else bad)(
-        f"aimed but F3 says dirt -> abandon ({rd.info})")
-
-    # Aimed but F3 silent (no targeted block) -> bounded wait, then abandon.
-    sk5 = MineBlock(vox, tool_role=None, max_ticks=500)
-    ctx5 = SkillContext(pose=_pose(yaw=yaw, pitch=pitch), world_map=_FakeMap())
-    st = SkillStatus.RUNNING
-    for _ in range(20):
+    for _ in range(16):
         st = sk5.tick(ctx5).status
         if st in (SkillStatus.DONE, SkillStatus.FAILED): break
-    (ok if st == SkillStatus.FAILED else bad)(f"aimed + F3 silent -> bounded abandon ({st})")
-
-    # F3 flicker mid-mine: KEEP holding attack (no spam-click). Once mining
-    # started, a dropped F3 read must not release the button.
-    wmf = _FakeMap(); wmf.set(vox, "minecraft:oak_log")
-    skf = MineBlock(vox, tool_role=None)
-    ctxf = SkillContext(pose=_pose(yaw=yaw, pitch=pitch), world_map=wmf,
-                        looking_at=SimpleNamespace(pos=vox, block_id="minecraft:oak_log"))
-    skf.tick(ctxf)                              # confirm + start swinging
-    ctxf.looking_at = None                      # OCR dropped the read this tick
-    r = skf.tick(ctxf)
-    (ok if r.action.interact == "attack" else bad)(
-        "holds attack through an F3 flicker (no spam-click release)")
+    (ok if st == SkillStatus.FAILED else bad)(f"aimed at sky -> bounded abandon ({st})")
 
 
 def test_pillar_up(cat):

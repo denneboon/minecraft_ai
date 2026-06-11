@@ -250,66 +250,69 @@ class MineBlock(Skill):
         self.voxel = voxel
         self.tool_role = tool_role
         self.max_ticks = max_ticks
-        # Two predicates (block_id -> bool), F3-verified at the swing:
-        #   is_target      — what the TARGET voxel must be to mine it (e.g. a
-        #                    LOG); a mislabelled target (leaf/dirt) is abandoned.
-        #   is_passthrough — blocks IN FRONT of the target we may break THROUGH
-        #                    (e.g. leaves occluding the log). We only ever break
-        #                    these while locked on the target, so a leaf is only
-        #                    broken because a known log is behind it.
+        # Two predicates (block_id -> bool), verified against F3's targeted
+        # block: is_target = what the TARGET must be to mine (a LOG);
+        # is_passthrough = blocks we may break THROUGH to reach it (leaves).
         # ``is_safe`` is the simple alias that sets both.
         self.is_target = is_target if is_target is not None else is_safe
         self.is_passthrough = (is_passthrough if is_passthrough is not None
                                else (is_safe if is_safe is not None else self.is_target))
         self.aim = _Aimer(tol_deg=tol_deg)
         self._tool_ok = tool_role is None
+        # State machine: 'aim' (the ONLY state that moves the camera) ->
+        # 'mine_log' / 'clear_leaf' (camera FROZEN, click held). Latching
+        # like this means: the instant F3 shows a log we stop moving and
+        # just mine — the camera never drifts off the block mid-swing.
+        self._mode = "aim"
         self._mining_ticks = 0
-        self._hit_pos = None           # F3 pos of the block we're swinging at
-        self._hit_was_log = False      # ...and whether it was a log (countable)
-        self.broke = False             # did a LOG we were hitting actually break?
+        self._silent = 0               # F3-gap ticks while frozen+mining
         self._await_ticks = 0          # aimed-but-F3-silent ticks (acquisition)
-        self._silent = 0               # consecutive F3-silent ticks while mining
-        self._started = False          # have we begun swinging?
+        self.broke = False             # did a LOG actually break? (for counting)
 
     def reset(self):
         self._tool_ok = self.tool_role is None
+        self._mode = "aim"
         self._mining_ticks = 0
-        self._hit_pos = None
-        self._hit_was_log = False
-        self.broke = False
-        self._await_ticks = 0
         self._silent = 0
-        self._started = False
+        self._await_ticks = 0
+        self.broke = False
 
-    def _is_gone(self, ctx: SkillContext) -> bool:
-        wm = ctx.world_map
-        if wm is None:
-            return False
-        try:
-            obs = wm.get_block(self.voxel, dimension=ctx.dimension)
-        except TypeError:
-            obs = wm.get_block(self.voxel)
-        return obs is not None and obs.block_id == AIR_BLOCK
+    def _is_log(self, bid) -> bool:
+        return bid is not None and (self.is_target is None or self.is_target(bid))
+
+    def _is_pass(self, bid) -> bool:
+        return bid is not None and (self.is_passthrough is None or self.is_passthrough(bid))
 
     def tick(self, ctx: SkillContext) -> SkillResult:
-        # Rule: only ever break a block while LOCKED onto the target. So a
-        # leaf is broken only because a known log (the target) is behind it;
-        # nothing is broken while merely turning, and we never swing at sky.
         la = ctx.looking_at
         la_id = getattr(la, "block_id", None) if la is not None else None
         la_pos = tuple(la.pos) if (la is not None and getattr(la, "pos", None) is not None) else None
         on_target = (la_pos == tuple(self.voxel))
-        # The block we were swinging at is GONE (crosshair now on a different
-        # real block). If it was a LOG -> it broke (done + counted). If it was
-        # a leaf we were breaking through -> cleared; keep going to the log.
-        if self._hit_pos is not None and la_pos is not None and la_pos != self._hit_pos:
-            if self._hit_was_log:
-                self.broke = True
-                return SkillResult(AgentAction(), SkillStatus.DONE, "mined log")
-            self._hit_pos = None
-        if self._is_gone(ctx):
-            self.broke = True
-            return SkillResult(AgentAction(), SkillStatus.DONE, "mined (air)")
+
+        def _hold(info):                 # camera FROZEN (no look), click held
+            self._mining_ticks += 1
+            if self._mining_ticks > self.max_ticks:
+                return SkillResult(AgentAction(), SkillStatus.FAILED, "timed out mining")
+            return SkillResult(AgentAction(interact="attack"), SkillStatus.RUNNING, info)
+
+        # ── MINING a log: frozen camera, hold click until the log is gone ──
+        if self._mode == "mine_log":
+            if self._is_log(la_id):
+                self._silent = 0
+                return _hold("mining log")
+            self._silent += 1
+            if self._silent <= 3:        # ride out a brief F3 OCR gap, still frozen
+                return _hold("mining log (F3 gap)")
+            self.broke = True            # the log we held on is gone -> counted
+            return SkillResult(AgentAction(), SkillStatus.DONE, "mined log")
+
+        # ── CLEARING an occluding leaf: frozen, hold click; NOT counted ──
+        if self._mode == "clear_leaf":
+            if self._is_pass(la_id) and not self._is_log(la_id):
+                self._silent = 0
+                return _hold("clearing leaf")
+            self._mode = "aim"; self._silent = 0   # leaf gone / now a log -> re-evaluate
+
         if _eye(ctx.pose) is None:
             return SkillResult(AgentAction(), SkillStatus.BLOCKED, "no pose")
         if not self._tool_ok:
@@ -320,59 +323,35 @@ class MineBlock(Skill):
                 return SkillResult(AgentAction(hotbar=slot), SkillStatus.RUNNING,
                                    f"select {self.tool_role} slot {slot}")
 
-        def _swing(info, hit=None, was_log=False):
-            self._started = True
-            if hit is not None:
-                self._hit_pos = hit
-                self._hit_was_log = was_log
-                self._silent = 0
-            self._mining_ticks += 1
-            if self._mining_ticks > self.max_ticks:
-                return SkillResult(AgentAction(), SkillStatus.FAILED, "timed out mining")
-            return SkillResult(AgentAction(interact="attack"), SkillStatus.RUNNING, info)
+        # THE MOMENT F3 shows a LOG under the crosshair: LATCH -> freeze + mine.
+        if self._is_log(la_id):
+            self._mode = "mine_log"; self._silent = 0
+            return _hold("log in crosshair -> mining")
 
-        # PRIORITY: F3 says a LOG is under the crosshair -> mine it RIGHT NOW.
-        # Never keep looking around when we're already on a log.
-        if la_id is not None and (self.is_target is None or self.is_target(la_id)):
-            return _swing(f"mining {la_id}", hit=la_pos, was_log=True)
-
-        # Aim the crosshair at the target voxel.
+        # Otherwise AIM toward the target voxel — the only state that moves.
         eye = _eye(ctx.pose)
         tgt = (self.voxel[0] + 0.5, self.voxel[1] + 0.5, self.voxel[2] + 0.5)
         yaw, pitch = aim_angles(eye, tgt)
         dx, dy, aimed = self.aim.step(ctx, yaw, pitch)
         locked = on_target or aimed
 
-        if la_id is not None:
-            # F3 shows a NON-log block (leaf / dirt / …).
+        if la_id is not None:            # a NON-log block under the crosshair
             if not locked:
-                # still turning toward the target -> break NOTHING (so we
-                # never break leaves the crosshair merely sweeps over).
                 return SkillResult(AgentAction(look_dx=dx, look_dy=dy),
                                    SkillStatus.RUNNING, "aiming at target")
-            if on_target and self.is_target is not None and not self.is_target(la_id):
+            if on_target:                # the target voxel itself isn't a log
                 return SkillResult(AgentAction(), SkillStatus.FAILED,
                                    f"target is {la_id}, not a log — abandon")
-            if self.is_passthrough is None or self.is_passthrough(la_id):
-                # A leaf occluding the target log we're locked on -> break
-                # through it (only because a known log is behind it).
-                return _swing(f"breaking {la_id} (occludes target)", hit=la_pos, was_log=False)
+            if self._is_pass(la_id):     # a leaf occluding the target log
+                self._mode = "clear_leaf"; self._silent = 0
+                return _hold("leaf occludes target -> clearing")
             return SkillResult(AgentAction(), SkillStatus.FAILED,
                                f"{la_id} blocks the target — abandon")
 
-        # F3 SILENT (no targeted block — e.g. aimed past the log into sky).
+        # F3 silent (crosshair on sky / unreadable).
         if not locked:
             return SkillResult(AgentAction(look_dx=dx, look_dy=dy),
                                SkillStatus.RUNNING, "aiming at target")
-        if self._started:
-            # Was mining; brief OCR gap -> keep holding the click (no spam),
-            # but bail soon rather than swinging at air for seconds.
-            self._silent += 1
-            if self._silent > 6:
-                return SkillResult(AgentAction(), SkillStatus.DONE,
-                                   "lost target after mining")
-            return SkillResult(AgentAction(interact="attack"), SkillStatus.RUNNING,
-                               "mining (brief F3 gap)")
         self._await_ticks += 1
         if self._await_ticks > 10:
             return SkillResult(AgentAction(), SkillStatus.FAILED,
