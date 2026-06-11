@@ -1,0 +1,423 @@
+# agents/skills.py
+"""
+Reusable low-level SKILLS for the bot — the action primitives that
+behaviours (tree-chopping, exploring) compose.
+
+Design (futureproof + composable)
+---------------------------------
+A Skill is a TICK-DRIVEN mini-controller, exactly like ``WalkerController``:
+each tick it's handed a :class:`SkillContext` (the current perception) and
+returns a :class:`SkillResult` = one ``AgentAction`` to dispatch + a status
+(RUNNING / DONE / FAILED / BLOCKED). It holds its own progress state across
+ticks. This keeps everything:
+  * non-blocking — the agent loop stays responsive (safety / panic work),
+  * composable — a task FSM just runs the current skill until it's DONE,
+  * testable — the FSM transitions + geometry are exercised offline with a
+    synthetic context; only the on-screen *execution* needs a live game,
+  * swappable — a learned policy can implement the same Skill interface.
+
+What's here vs. planned: see ``docs/bot_actions.md`` for the full action
+catalogue. This module implements the foundational, proven primitives
+(select-role, look-at-voxel, eat, mine-block, pillar-up, bridge — the
+last two factoring the working god-bridge mechanic, where bridging with
+sneak held is just *safe* bridging). Higher-level skills build on these.
+
+NOTE on sign conventions: look_dx>0 turns the view right (yaw increases),
+look_dy>0 looks down (MC pitch increases). The angle math matches the
+walker/god-bridge; signs are confirmed against the live game when a skill
+is first run.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Optional, Tuple
+
+from brain.interfaces import AgentAction
+from vision.world.map import AIR_BLOCK
+
+Voxel = Tuple[int, int, int]
+
+
+class SkillStatus(Enum):
+    RUNNING = "running"     # still working; keep ticking
+    DONE = "done"           # succeeded
+    FAILED = "failed"       # could not complete (e.g. timed out)
+    BLOCKED = "blocked"     # needs something it doesn't have (no pose, no item)
+
+
+@dataclass
+class SkillResult:
+    action: AgentAction
+    status: SkillStatus
+    info: str = ""
+
+
+@dataclass
+class SkillContext:
+    """Everything a skill needs to decide, gathered by the agent each tick.
+
+    ``pose`` is any object exposing ``x, y, z, yaw, pitch`` and an
+    ``eye_y`` (the F3/PlayerPose), or ``None`` when pose is unknown.
+    """
+    pose: object = None
+    world_map: object = None          # vision.world.map.WorldMap (or None)
+    hotbar: object = None             # control.hotbar.HotbarManager (or None)
+    px_per_deg: float = 6.5           # mouse sensitivity (calibrated upstream)
+    tick: int = 0
+    dimension: Optional[str] = None
+
+
+# ── Geometry helpers (pure, offline-testable) ──────────────────────────
+
+def norm_angle(a: float) -> float:
+    """Wrap degrees to (-180, 180]."""
+    a = (a + 180.0) % 360.0 - 180.0
+    return a + 360.0 if a <= -180.0 else a
+
+
+def aim_angles(eye: Tuple[float, float, float],
+               target: Tuple[float, float, float]) -> Tuple[float, float]:
+    """Desired (yaw, pitch) in MC degrees to look from ``eye`` at
+    ``target`` (both world xyz). MC: yaw 0 = +Z increasing clockwise;
+    pitch +90 = straight down. atan2(dy,0) is well-defined (±90)."""
+    dx = target[0] - eye[0]
+    dy = target[1] - eye[1]
+    dz = target[2] - eye[2]
+    yaw = math.degrees(math.atan2(-dx, dz))
+    horiz = math.hypot(dx, dz)
+    pitch = math.degrees(-math.atan2(dy, horiz))
+    return yaw, pitch
+
+
+def _eye(pose) -> Optional[Tuple[float, float, float]]:
+    if pose is None:
+        return None
+    try:
+        ey = pose.eye_y if hasattr(pose, "eye_y") else (pose.y + 1.62)
+        return (float(pose.x), float(ey), float(pose.z))
+    except Exception:
+        return None
+
+
+# ── Skill base ─────────────────────────────────────────────────────────
+
+class Skill:
+    name: str = "skill"
+
+    def reset(self) -> None:
+        """Clear per-run progress so the skill can be reused."""
+
+    def tick(self, ctx: SkillContext) -> SkillResult:   # pragma: no cover
+        raise NotImplementedError
+
+    # Convenience for subclasses.
+    @staticmethod
+    def _idle(status=SkillStatus.RUNNING, info="") -> SkillResult:
+        return SkillResult(AgentAction(), status, info)
+
+
+class _Aimer:
+    """Shared aim helper: one-shot proportional look toward (yaw,pitch).
+    Returns (look_dx, look_dy, aimed?) for a target angle pair."""
+
+    def __init__(self, tol_deg: float = 2.0, gain: float = 0.6,
+                 max_px: int = 140):
+        self.tol = tol_deg
+        self.gain = gain
+        self.max_px = max_px
+
+    def step(self, ctx: SkillContext, want_yaw: float, want_pitch: float
+             ) -> Tuple[int, int, bool]:
+        p = ctx.pose
+        yaw_err = norm_angle(want_yaw - float(p.yaw))
+        pitch_err = float(want_pitch) - float(p.pitch)
+        aimed = abs(yaw_err) <= self.tol and abs(pitch_err) <= self.tol
+        if aimed:
+            return 0, 0, True
+        ppd = max(0.5, float(ctx.px_per_deg))
+        dx = int(max(-self.max_px, min(self.max_px, yaw_err * ppd * self.gain)))
+        dy = int(max(-self.max_px, min(self.max_px, pitch_err * ppd * self.gain)))
+        return dx, dy, False
+
+
+# ── Concrete skills ────────────────────────────────────────────────────
+
+class SelectRole(Skill):
+    """Select the hotbar slot reserved for a role (axe/blocks/food/…).
+    DONE once the held slot matches; FAILED if no such item exists."""
+    name = "select_role"
+
+    def __init__(self, role: str):
+        self.role = role
+
+    def tick(self, ctx: SkillContext) -> SkillResult:
+        hb = ctx.hotbar
+        if hb is None:
+            return SkillResult(AgentAction(), SkillStatus.BLOCKED, "no hotbar")
+        slot = hb.slot_for_role(self.role)
+        if slot is None:
+            return SkillResult(AgentAction(), SkillStatus.FAILED,
+                               f"no {self.role} in hotbar")
+        return SkillResult(AgentAction(hotbar=slot), SkillStatus.DONE,
+                           f"selected slot {slot} for {self.role}")
+
+
+class LookAtVoxel(Skill):
+    """Aim the crosshair at the centre of a world voxel. DONE when within
+    tolerance, BLOCKED without a pose. Foundation for mining/placing."""
+    name = "look_at_voxel"
+
+    def __init__(self, voxel: Voxel, tol_deg: float = 2.0):
+        self.voxel = voxel
+        self.aim = _Aimer(tol_deg=tol_deg)
+
+    def tick(self, ctx: SkillContext) -> SkillResult:
+        eye = _eye(ctx.pose)
+        if eye is None:
+            return SkillResult(AgentAction(), SkillStatus.BLOCKED, "no pose")
+        tgt = (self.voxel[0] + 0.5, self.voxel[1] + 0.5, self.voxel[2] + 0.5)
+        yaw, pitch = aim_angles(eye, tgt)
+        dx, dy, aimed = self.aim.step(ctx, yaw, pitch)
+        if aimed:
+            return SkillResult(AgentAction(), SkillStatus.DONE, "aimed")
+        return SkillResult(AgentAction(look_dx=dx, look_dy=dy),
+                           SkillStatus.RUNNING, f"aiming dx={dx} dy={dy}")
+
+
+class Eat(Skill):
+    """Select the food slot, then hold use-item for ``hold_ticks`` (eating
+    takes ~1.6 s ≈ 32 ticks @20 Hz). DONE after the hold; FAILED if no
+    food. (Whether hunger actually refilled is verified by the caller via
+    the HUD; this skill just performs the eat action reliably.)"""
+    name = "eat"
+
+    def __init__(self, hold_ticks: int = 34):
+        self.hold_ticks = hold_ticks
+        self._held = 0
+        self._selected = False
+
+    def reset(self):
+        self._held = 0; self._selected = False
+
+    def tick(self, ctx: SkillContext) -> SkillResult:
+        hb = ctx.hotbar
+        slot = hb.food_slot() if hb is not None else None
+        if slot is None:
+            return SkillResult(AgentAction(), SkillStatus.FAILED, "no food")
+        if not self._selected:
+            self._selected = True
+            return SkillResult(AgentAction(hotbar=slot), SkillStatus.RUNNING,
+                               f"select food slot {slot}")
+        self._held += 1
+        if self._held >= self.hold_ticks:
+            return SkillResult(AgentAction(), SkillStatus.DONE, "ate")
+        # Right-click hold to eat.
+        return SkillResult(AgentAction(interact="use_item"),
+                           SkillStatus.RUNNING, f"eating {self._held}/{self.hold_ticks}")
+
+
+class MineBlock(Skill):
+    """Mine the block at ``voxel``: select the right tool (``tool_role``,
+    e.g. 'axe' for logs), aim at it, then hold attack until the voxel
+    becomes AIR in the WorldMap (or vanishes) — FAILED on timeout.
+
+    The mined-check is WorldMap-driven so it's verifiable offline; live,
+    the world recogniser / F3 carve the voxel to air once it breaks."""
+    name = "mine_block"
+
+    def __init__(self, voxel: Voxel, tool_role: Optional[str] = "axe",
+                 max_ticks: int = 200, tol_deg: float = 3.0):
+        self.voxel = voxel
+        self.tool_role = tool_role
+        self.max_ticks = max_ticks
+        self.aim = _Aimer(tol_deg=tol_deg)
+        self._tool_ok = tool_role is None
+        self._mining_ticks = 0
+
+    def reset(self):
+        self._tool_ok = self.tool_role is None
+        self._mining_ticks = 0
+
+    def _is_gone(self, ctx: SkillContext) -> bool:
+        wm = ctx.world_map
+        if wm is None:
+            return False
+        try:
+            obs = wm.get_block(self.voxel, dimension=ctx.dimension)
+        except TypeError:
+            obs = wm.get_block(self.voxel)
+        return obs is not None and obs.block_id == AIR_BLOCK
+
+    def tick(self, ctx: SkillContext) -> SkillResult:
+        # Already air? done.
+        if self._is_gone(ctx):
+            return SkillResult(AgentAction(), SkillStatus.DONE, "mined")
+        if _eye(ctx.pose) is None:
+            return SkillResult(AgentAction(), SkillStatus.BLOCKED, "no pose")
+        # 1. Select the tool once.
+        if not self._tool_ok:
+            hb = ctx.hotbar
+            slot = hb.slot_for_role(self.tool_role) if hb is not None else None
+            self._tool_ok = True   # don't loop forever if the tool is missing
+            if slot is not None:
+                return SkillResult(AgentAction(hotbar=slot), SkillStatus.RUNNING,
+                                   f"select {self.tool_role} slot {slot}")
+        # 2. Aim, then 3. hold attack.
+        eye = _eye(ctx.pose)
+        tgt = (self.voxel[0] + 0.5, self.voxel[1] + 0.5, self.voxel[2] + 0.5)
+        yaw, pitch = aim_angles(eye, tgt)
+        dx, dy, aimed = self.aim.step(ctx, yaw, pitch)
+        if not aimed:
+            return SkillResult(AgentAction(look_dx=dx, look_dy=dy),
+                               SkillStatus.RUNNING, "aiming at block")
+        self._mining_ticks += 1
+        if self._mining_ticks > self.max_ticks:
+            return SkillResult(AgentAction(), SkillStatus.FAILED,
+                               "timed out mining")
+        return SkillResult(AgentAction(interact="attack"), SkillStatus.RUNNING,
+                           f"mining {self._mining_ticks}/{self.max_ticks}")
+
+
+class PillarUp(Skill):
+    """Build straight up ``height`` blocks (the god-bridge pillar mechanic):
+    per block — select the blocks slot, look ~straight down, place a block
+    under the feet (use-item) while jumping onto it, then confirm the
+    player's Y rose by ~1. DONE after ``height`` blocks, FAILED if a block
+    won't place (no upward progress within a budget). Used to climb OUT of
+    a hole or to gain height."""
+    name = "pillar_up"
+
+    def __init__(self, height: int = 1, place_pitch: float = 80.0,
+                 per_block_budget: int = 40):
+        self.height = height
+        self.place_pitch = place_pitch
+        self.per_block_budget = per_block_budget
+        self.aim = _Aimer(tol_deg=4.0)
+        self._done_blocks = 0
+        self._base_y: Optional[float] = None
+        self._ticks_this_block = 0
+        self._selected = False
+
+    def reset(self):
+        self._done_blocks = 0; self._base_y = None
+        self._ticks_this_block = 0; self._selected = False
+
+    def tick(self, ctx: SkillContext) -> SkillResult:
+        p = ctx.pose
+        if p is None:
+            return SkillResult(AgentAction(), SkillStatus.BLOCKED, "no pose")
+        if self._base_y is None:
+            self._base_y = float(p.y)
+        if self._done_blocks >= self.height:
+            return SkillResult(AgentAction(), SkillStatus.DONE,
+                               f"pillared {self.height}")
+        # Confirm a finished block: Y rose ~1 above this block's base.
+        if float(p.y) >= self._base_y + 0.9:
+            self._done_blocks += 1
+            self._base_y = float(p.y)
+            self._ticks_this_block = 0
+            self._selected = False
+            if self._done_blocks >= self.height:
+                return SkillResult(AgentAction(), SkillStatus.DONE,
+                                   f"pillared {self.height}")
+        self._ticks_this_block += 1
+        if self._ticks_this_block > self.per_block_budget:
+            return SkillResult(AgentAction(), SkillStatus.FAILED,
+                               "no upward progress (blocked / out of blocks)")
+        # Select blocks slot once.
+        hb = ctx.hotbar
+        if not self._selected and hb is not None:
+            slot = hb.blocks_slot()
+            self._selected = True
+            if slot is None:
+                return SkillResult(AgentAction(), SkillStatus.FAILED, "no blocks")
+            return SkillResult(AgentAction(hotbar=slot), SkillStatus.RUNNING,
+                               f"select blocks slot {slot}")
+        # Look down, jump + place under feet.
+        _, _, aimed = self.aim.step(ctx, float(p.yaw), self.place_pitch)
+        dy = 0 if aimed else int((self.place_pitch - float(p.pitch))
+                                 * ctx.px_per_deg * 0.6)
+        return SkillResult(
+            AgentAction(movement={"jump": True}, look_dy=dy, interact="use_item"),
+            SkillStatus.RUNNING, f"placing block {self._done_blocks+1}/{self.height}")
+
+
+class Bridge(Skill):
+    """Extend a 1-wide bridge forward by ``length`` blocks. With
+    ``keep_sneak=True`` this is SAFE bridging (sneak prevents walking off
+    the edge); with ``keep_sneak=False`` it's the faster god-bridge. Per
+    block: ensure blocks selected, hold backward/forward + sneak as
+    configured, look down at the edge and place. Progress is measured by
+    horizontal distance travelled from the start.
+
+    The precise look/timing is tuned against the live game (see
+    tools/run_god_bridge.py); this skill exposes it as a composable,
+    parameterised primitive. Execution is verified in a live session."""
+    name = "bridge"
+
+    def __init__(self, length: int = 4, keep_sneak: bool = True,
+                 place_pitch: float = 60.0, per_block_budget: int = 30):
+        self.length = length
+        self.keep_sneak = keep_sneak
+        self.place_pitch = place_pitch
+        self.per_block_budget = per_block_budget
+        self._placed = 0
+        self._start: Optional[Tuple[float, float]] = None
+        self._ticks_this_block = 0
+        self._selected = False
+
+    def reset(self):
+        self._placed = 0; self._start = None
+        self._ticks_this_block = 0; self._selected = False
+
+    def tick(self, ctx: SkillContext) -> SkillResult:
+        p = ctx.pose
+        if p is None:
+            return SkillResult(AgentAction(), SkillStatus.BLOCKED, "no pose")
+        if self._start is None:
+            self._start = (float(p.x), float(p.z))
+        dist = math.hypot(float(p.x) - self._start[0], float(p.z) - self._start[1])
+        placed_now = int(dist)
+        if placed_now > self._placed:
+            self._placed = placed_now
+            self._ticks_this_block = 0
+        if self._placed >= self.length:
+            return SkillResult(AgentAction(movement={"sneak": self.keep_sneak,
+                                                     "backward": False}),
+                               SkillStatus.DONE, f"bridged {self.length}")
+        self._ticks_this_block += 1
+        if self._ticks_this_block > self.per_block_budget:
+            return SkillResult(AgentAction(), SkillStatus.FAILED,
+                               "bridge stalled (no forward progress)")
+        hb = ctx.hotbar
+        if not self._selected and hb is not None:
+            slot = hb.blocks_slot()
+            self._selected = True
+            if slot is None:
+                return SkillResult(AgentAction(), SkillStatus.FAILED, "no blocks")
+            return SkillResult(AgentAction(hotbar=slot), SkillStatus.RUNNING,
+                               f"select blocks slot {slot}")
+        dy = int((self.place_pitch - float(p.pitch)) * ctx.px_per_deg * 0.6)
+        # Move backward while facing forward + place = the god-bridge mechanic;
+        # sneak makes it the safe variant.
+        return SkillResult(
+            AgentAction(movement={"backward": True, "sneak": self.keep_sneak},
+                        look_dy=dy, interact="use_item"),
+            SkillStatus.RUNNING,
+            f"{'safe-' if self.keep_sneak else 'god-'}bridge {self._placed+1}/{self.length}")
+
+
+# Registry of the currently-implemented skills (name -> class). The task
+# layer / a future planner can look skills up by name.
+SKILLS = {s.name: s for s in (SelectRole, LookAtVoxel, Eat, MineBlock,
+                              PillarUp, Bridge)}
+
+
+__all__ = [
+    "SkillStatus", "SkillResult", "SkillContext", "Skill",
+    "SelectRole", "LookAtVoxel", "Eat", "MineBlock", "PillarUp", "Bridge",
+    "aim_angles", "norm_angle", "SKILLS",
+]
