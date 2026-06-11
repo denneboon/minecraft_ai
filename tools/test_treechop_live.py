@@ -83,7 +83,7 @@ def main() -> int:
         return bool(bid) and (bid in log_ids or str(bid).endswith("_log"))
     time.sleep(0.3)
 
-    attack = [False]
+    attack = [False]; use_held = [False]
     def release_all():
         try:
             actions.set_movement_state(forward=False, backward=False, left=False,
@@ -93,6 +93,10 @@ def main() -> int:
             try: mouse.left_release()
             except Exception: pass
             attack[0] = False
+        if use_held[0]:
+            try: mouse.right_release()
+            except Exception: pass
+            use_held[0] = False
 
     def dispatch(a):
         if a.movement:
@@ -108,6 +112,14 @@ def main() -> int:
             mouse.left_press(); attack[0] = True
         elif not want and attack[0]:
             mouse.left_release(); attack[0] = False
+        want_use = (a.interact == "use_hold")     # eating (sustained)
+        if want_use and not use_held[0]:
+            mouse.right_press(); use_held[0] = True
+        elif not want_use and use_held[0]:
+            mouse.right_release(); use_held[0] = False
+        if a.interact == "use_item":               # placing (one-shot)
+            try: mouse.right_click()
+            except Exception: pass
 
     fsm = FindAndChopLogs(is_log=is_log, reach=3.5, max_logs=args.logs,
                           tool_role="axe", is_breakable=is_breakable)

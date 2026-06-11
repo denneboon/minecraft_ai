@@ -557,10 +557,11 @@ def _dispatch_action(
         dy = max(-_PX_CAP, min(_PX_CAP, dy))
         mouse.track_target(int(dx), int(dy))
 
-    # Attack is a CONTINUOUS hold while commanded (mining / sustained
-    # combat) — set every tick so it releases when the agent stops. Use/
-    # drop stay one-shot.
+    # Attack + use_hold are CONTINUOUS holds while commanded (mining /
+    # eating) — set every tick so they release when the agent stops.
+    # use_item (placing) and drop stay one-shot.
     actions.set_attack(action.interact == "attack")
+    actions.set_use(action.interact == "use_hold")
     if action.interact == "use_item":
         actions.execute("use_item")
     elif action.interact == "drop_item":
@@ -766,6 +767,7 @@ def _run_agent_loop(
                 try:
                     actions.release_all_movement()
                     actions.set_attack(False)
+                    actions.set_use(False)
                 except Exception:
                     pass
 
@@ -805,6 +807,7 @@ def _run_agent_loop(
             pass
         try:
             actions.set_attack(False)      # never leave the mouse held down
+            actions.set_use(False)
         except Exception:
             pass
         # ALWAYS release every movement key on exit so we don't strand

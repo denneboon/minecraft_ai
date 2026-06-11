@@ -190,6 +190,33 @@ def main() -> int:
                                   world=SimpleNamespace(pose=pose, looking_at=None)))
     (ok if hasattr(a, "movement") else bad)("decide returns an AgentAction with a log mapped")
 
+    # 9. Eat-when-hungry: sustained low hunger -> eats (stands still), and
+    #    NOT when hunger is fine.
+    print("\n[9] eat-when-hungry")
+    s = {"agent": {"treechop": {"eat_below": 0.45}},
+         "hotbar": {"slot_roles": {9: "food"}, "extra_food": []}}
+    ag = build_agent("treechop", s)
+    ag.attach_perception(SimpleNamespace(world_map=_map_with_log((3, 64, 0))))
+    pose = SimpleNamespace(x=0.0, y=64.0, z=0.0, yaw=0.0, pitch=0.0, dimension=None)
+    def _state(hunger):
+        return SimpleNamespace(f3=None,
+                               world=SimpleNamespace(pose=pose, looking_at=None),
+                               hunger=hunger)
+    saw_eat = saw_stop = False
+    for _ in range(16):                       # hungry for many ticks
+        a = ag.decide(_state(0.2))
+        if a.interact == "use_hold":
+            saw_eat = True
+            if not a.movement.get("forward", False) and not a.movement.get("sprint", False):
+                saw_stop = True
+    (ok if saw_eat else bad)("eats (use_hold) when hunger stays low")
+    (ok if saw_stop else bad)("stands still while eating (movement released)")
+    # Full hunger -> never eats.
+    ag2 = build_agent("treechop", s)
+    ag2.attach_perception(SimpleNamespace(world_map=_map_with_log((3, 64, 0))))
+    ate = any(ag2.decide(_state(1.0)).interact == "use_hold" for _ in range(16))
+    (ok if not ate else bad)("does NOT eat when hunger is full")
+
     print("\n" + ("ALL TREECHOP TESTS PASSED" if not _fails
                   else f"{_fails} CHECK(S) FAILED"))
     return 0 if not _fails else 1

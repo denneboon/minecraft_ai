@@ -393,6 +393,7 @@ agent:
   # leaves only.
   treechop:
     max_logs: 9999                 # stop after chopping this many trunks
+    eat_below: 0.45                # eat from the food slot below this hunger (0-1; 0 disables)
   prefer_hotkeys_for_hotbar: true
   humanlike_reaction_time_ms: 60
   jitter_ms: 20

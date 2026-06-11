@@ -29,7 +29,7 @@ from typing import Optional
 from brain.interfaces import AgentAction
 from agents.skills import (
     SkillStatus, SkillResult, SkillContext, WalkToward, ChopTrunk, PillarUp,
-    MineBlock, find_nearest_block,
+    MineBlock, Eat, find_nearest_block,
 )
 from vision.world.map import AIR_BLOCK
 
@@ -283,6 +283,9 @@ class TreeChopAgent(BaseAgent):
         self._settings = settings or {}
         cfg = ((self._settings.get("agent", {}) or {}).get("treechop", {}) or {})
         self._max_logs = int(cfg.get("max_logs", 9999))
+        # Eat when hunger drops below this (0-1; 0.45 ≈ 9/20 food — above
+        # the 6/20 sprint cutoff so the bot keeps sprinting). 0 disables.
+        self._eat_below = float(cfg.get("eat_below", 0.45))
         self._px_per_deg = float(((self._settings.get("agent", {}) or {})
                                   .get("mouse_per_degree", 6.5)) or 6.5)
         self._wp = None
@@ -290,6 +293,8 @@ class TreeChopAgent(BaseAgent):
         self._fsm = None
         self._warned_no_world = False
         self._last_state = None
+        self._eat = None          # active Eat skill (eating in progress)
+        self._hungry_ticks = 0    # debounce HUD misreads
 
     def attach_perception(self, wp) -> None:
         self._wp = wp
@@ -311,6 +316,37 @@ class TreeChopAgent(BaseAgent):
         self._hotbar = build_hotbar_manager(self._settings, catalog=cat)
         self._fsm = FindAndChopLogs(is_log=is_log, is_breakable=is_breakable,
                                     tool_role="axe", max_logs=self._max_logs)
+
+    def _maybe_eat(self, ctx, state):
+        """Returns an AgentAction if the bot should be eating this tick
+        (standing still, holding use), else None to let the FSM run."""
+        from brain.interfaces import AgentAction as _AA
+        STOP = {"forward": False, "backward": False, "left": False,
+                "right": False, "jump": False, "sprint": False}
+        if self._eat is not None:                       # mid-eat
+            r = self._eat.tick(ctx)
+            if r.status in (SkillStatus.DONE, SkillStatus.FAILED, SkillStatus.BLOCKED):
+                self._eat = None
+                self._hungry_ticks = 0
+                return None                             # resume FSM next tick
+            a = r.action; a.movement = dict(STOP)       # stand still to eat
+            return a
+        if self._eat_below <= 0 or self._hotbar is None \
+                or self._hotbar.best_slot_for("food") is None:
+            return None
+        hunger = getattr(state, "hunger", None)
+        if hunger is None:
+            return None
+        if float(hunger) < self._eat_below:
+            self._hungry_ticks += 1
+        else:
+            self._hungry_ticks = 0
+        if self._hungry_ticks >= 6:                     # sustained low -> eat
+            self._eat = Eat()
+            print(f"[treechop] hungry ({float(hunger):.2f}) -> eating")
+            a = self._eat.tick(ctx).action; a.movement = dict(STOP)
+            return a
+        return None
 
     @staticmethod
     def _pose_from_f3(f3):
@@ -340,6 +376,14 @@ class TreeChopAgent(BaseAgent):
                            looking_at=looking_at, hotbar=self._hotbar,
                            px_per_deg=self._px_per_deg,
                            dimension=getattr(pose, "dimension", None))
+
+        # Eat-when-hungry: pauses the FSM, stands still, and eats one item
+        # when hunger stays low (debounced against HUD misreads). Keeps the
+        # bot alive + sprint-capable on long unattended runs.
+        eat_action = self._maybe_eat(ctx, state)
+        if eat_action is not None:
+            return eat_action
+
         res = self._fsm.tick(ctx)
         if self._fsm._state != self._last_state:    # observability
             self._last_state = self._fsm._state

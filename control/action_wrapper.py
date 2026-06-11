@@ -76,6 +76,7 @@ class ActionWrapper:
         self._ms   = mouse
         self._gate = gate
         self._attack_held = False     # continuous left-click (mining/combat)
+        self._use_held = False        # continuous right-click (eating)
 
     def set_attack(self, held: bool) -> None:
         """Hold or release the attack button CONTINUOUSLY (idempotent) —
@@ -92,6 +93,22 @@ class ActionWrapper:
             if self._attack_held:
                 self._ms.left_release()
                 self._attack_held = False
+
+    def set_use(self, held: bool) -> None:
+        """Hold or release the use/right button CONTINUOUSLY (idempotent).
+        Eating needs a sustained right-click (~1.6 s) — per-tick clicks
+        restart the eat each tick. Placing stays a one-shot ``use_item``.
+        Releasing always succeeds so the button never sticks."""
+        if held:
+            if self._gate and not self._gate.allow():
+                return
+            if not self._use_held:
+                self._ms.right_press()
+                self._use_held = True
+        else:
+            if self._use_held:
+                self._ms.right_release()
+                self._use_held = False
 
     # ------------------------------------------------------------------
     # Primary entry point — called once per agent tick

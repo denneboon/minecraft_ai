@@ -106,9 +106,16 @@ def test_eat(cat):
     statuses = [sk.tick(ctx).status for _ in range(3)]
     (ok if sel_ok and SkillStatus.DONE in statuses else bad)(
         f"select slot 9 then eat -> {statuses}")
-    hb.update([None] * 9)
+    # Config-trust: with a food slot reserved, Eat selects it even with no
+    # reading (like the axe). It FAILs only when NO food slot is configured.
+    hb_nofood = HotbarManager(HotbarConfig(slot_roles={2: "axe"}), catalog=cat)
+    r = Eat().tick(SkillContext(pose=_pose(), hotbar=hb_nofood))
+    (ok if r.status == SkillStatus.FAILED else bad)(
+        f"no food slot configured -> {r.status}")
+    # Reserved food slot but empty reading -> still selects it (trust config).
     r = Eat().tick(SkillContext(pose=_pose(), hotbar=hb))
-    (ok if r.status == SkillStatus.FAILED else bad)(f"no food -> {r.status}")
+    (ok if r.action.hotbar == 9 and r.status == SkillStatus.RUNNING else bad)(
+        f"reserved food slot trusted with no reading -> slot {r.action.hotbar}")
 
 
 def test_mine_block(cat):

@@ -205,7 +205,7 @@ class Eat(Skill):
 
     def tick(self, ctx: SkillContext) -> SkillResult:
         hb = ctx.hotbar
-        slot = hb.food_slot() if hb is not None else None
+        slot = hb.best_slot_for("food") if hb is not None else None
         if slot is None:
             return SkillResult(AgentAction(), SkillStatus.FAILED, "no food")
         if not self._selected:
@@ -215,8 +215,9 @@ class Eat(Skill):
         self._held += 1
         if self._held >= self.hold_ticks:
             return SkillResult(AgentAction(), SkillStatus.DONE, "ate")
-        # Right-click hold to eat.
-        return SkillResult(AgentAction(interact="use_item"),
+        # Sustained right-click hold to eat ("use_hold" — main holds the
+        # button down; a per-tick click would restart the eat each tick).
+        return SkillResult(AgentAction(interact="use_hold"),
                            SkillStatus.RUNNING, f"eating {self._held}/{self.hold_ticks}")
 
 
