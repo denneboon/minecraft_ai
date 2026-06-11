@@ -430,6 +430,7 @@ class TreeChopAgent(BaseAgent):
         self._eat = None          # active Eat skill (eating in progress)
         self._hungry_ticks = 0    # debounce HUD misreads
         self._eat_fails = 0       # consecutive ineffective eats (cap the loop)
+        self._build_failed = False
 
     def attach_perception(self, wp) -> None:
         self._wp = wp
@@ -527,7 +528,14 @@ class TreeChopAgent(BaseAgent):
                       "WorldMap to find targets. Idling.")
             return _emit(_AA())
         if self._fsm is None:
-            self._build()
+            if self._build_failed:
+                return _emit(_AA())          # idle quietly; don't re-raise every tick
+            try:
+                self._build()
+            except Exception as e:
+                self._build_failed = True
+                print(f"[{self.name}] build failed ({e}); idling.")
+                return _emit(_AA())
         world = getattr(state, "world", None)
         pose = (world.pose if world is not None and world.pose is not None
                 else self._pose_from_f3(getattr(state, "f3", None)))

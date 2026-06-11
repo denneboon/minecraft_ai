@@ -75,40 +75,28 @@ class ActionWrapper:
         self._kb   = keyboard
         self._ms   = mouse
         self._gate = gate
-        self._attack_held = False     # continuous left-click (mining/combat)
-        self._use_held = False        # continuous right-click (eating)
 
     def set_attack(self, held: bool) -> None:
-        """Hold or release the attack button CONTINUOUSLY (idempotent) —
-        mining and sustained combat need a held left-click, not per-tick
-        clicks. Call every tick with the desired state. Releasing always
-        succeeds (even with the gate closed) so the button never sticks."""
+        """Hold or release the attack button CONTINUOUSLY — mining/combat
+        need a held left-click, not per-tick clicks. Call every tick with the
+        desired state. Delegates straight to the Mouse, whose press/release
+        are idempotent and self-tracked (``_pressed``), so there's no cached
+        flag here to desync from the real button after an emergency_stop/stop
+        (which resets the Mouse's state). press is gate-checked; release is
+        never gated, so the button can't stick on focus loss."""
         if held:
-            if self._gate and not self._gate.allow():
-                return                # gate shut: don't start attacking
-            if not self._attack_held:
-                self._ms.left_press()
-                self._attack_held = True
+            self._ms.left_press()
         else:
-            if self._attack_held:
-                self._ms.left_release()
-                self._attack_held = False
+            self._ms.left_release()
 
     def set_use(self, held: bool) -> None:
-        """Hold or release the use/right button CONTINUOUSLY (idempotent).
-        Eating needs a sustained right-click (~1.6 s) — per-tick clicks
-        restart the eat each tick. Placing stays a one-shot ``use_item``.
-        Releasing always succeeds so the button never sticks."""
+        """Hold or release the use/right button CONTINUOUSLY (eating needs a
+        sustained right-click; per-tick clicks restart the eat). Delegates to
+        the Mouse's idempotent press/release — see ``set_attack``."""
         if held:
-            if self._gate and not self._gate.allow():
-                return
-            if not self._use_held:
-                self._ms.right_press()
-                self._use_held = True
+            self._ms.right_press()
         else:
-            if self._use_held:
-                self._ms.right_release()
-                self._use_held = False
+            self._ms.right_release()
 
     # ------------------------------------------------------------------
     # Primary entry point — called once per agent tick
