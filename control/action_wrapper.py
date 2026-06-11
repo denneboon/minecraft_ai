@@ -75,6 +75,23 @@ class ActionWrapper:
         self._kb   = keyboard
         self._ms   = mouse
         self._gate = gate
+        self._attack_held = False     # continuous left-click (mining/combat)
+
+    def set_attack(self, held: bool) -> None:
+        """Hold or release the attack button CONTINUOUSLY (idempotent) —
+        mining and sustained combat need a held left-click, not per-tick
+        clicks. Call every tick with the desired state. Releasing always
+        succeeds (even with the gate closed) so the button never sticks."""
+        if held:
+            if self._gate and not self._gate.allow():
+                return                # gate shut: don't start attacking
+            if not self._attack_held:
+                self._ms.left_press()
+                self._attack_held = True
+        else:
+            if self._attack_held:
+                self._ms.left_release()
+                self._attack_held = False
 
     # ------------------------------------------------------------------
     # Primary entry point — called once per agent tick

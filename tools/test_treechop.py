@@ -163,6 +163,20 @@ def main() -> int:
     (ok if status == SkillStatus.DONE and fsm2._explore_attempts == 2 else bad)(
         f"exploration bounded -> DONE after {fsm2._explore_attempts} attempts")
 
+    # 8. TreeChopAgent: registered, idles without perception, acts with it.
+    print("\n[8] TreeChopAgent (main.py agent)")
+    from agents import build_agent, available_agents
+    (ok if "treechop" in available_agents() else bad)("registered in available_agents")
+    ag = build_agent("treechop", {})
+    a = ag.decide(SimpleNamespace(f3=None, world=None))
+    (ok if a.interact is None and not a.movement else bad)(
+        "idles safely with no perception attached")
+    ag.attach_perception(SimpleNamespace(world_map=_map_with_log((3, 64, 0))))
+    pose = SimpleNamespace(x=0.0, y=64.0, z=0.0, yaw=0.0, pitch=20.0, dimension=None)
+    a = ag.decide(SimpleNamespace(f3=None,
+                                  world=SimpleNamespace(pose=pose, looking_at=None)))
+    (ok if hasattr(a, "movement") else bad)("decide returns an AgentAction with a log mapped")
+
     print("\n" + ("ALL TREECHOP TESTS PASSED" if not _fails
                   else f"{_fails} CHECK(S) FAILED"))
     return 0 if not _fails else 1

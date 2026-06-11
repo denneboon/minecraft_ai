@@ -245,4 +245,86 @@ class FindAndChopLogs:
         return SkillResult(AgentAction(), SkillStatus.FAILED, f"bad state {st}")
 
 
-__all__ = ["FindAndChopLogs"]
+from types import SimpleNamespace
+from brain.interfaces import BaseAgent
+
+
+class TreeChopAgent(BaseAgent):
+    """main.py agent wrapping FindAndChopLogs — runs the autonomous
+    tree-chopper inside the normal agent loop (safety gate, panic-stop,
+    attack-hold dispatch). Requires ``vision.world.enabled`` so it has a
+    WorldMap + F3 targeted-block to work from.
+
+    Run: ``python main.py --agent treechop``  (set ``hotbar.slot_roles`` so
+    the axe/blocks slots are right; the bot only ever breaks logs+leaves)."""
+
+    name = "treechop"
+
+    def __init__(self, settings: dict):
+        self._settings = settings or {}
+        cfg = ((self._settings.get("agent", {}) or {}).get("treechop", {}) or {})
+        self._max_logs = int(cfg.get("max_logs", 9999))
+        self._px_per_deg = float(((self._settings.get("agent", {}) or {})
+                                  .get("mouse_per_degree", 6.5)) or 6.5)
+        self._wp = None
+        self._hotbar = None
+        self._fsm = None
+        self._warned_no_world = False
+
+    def attach_perception(self, wp) -> None:
+        self._wp = wp
+
+    def reset(self) -> None:
+        self._fsm = None
+
+    def _build(self) -> None:
+        from knowledge.catalog import Catalog
+        from vision.mc_assets import MCAssets
+        from control.hotbar import build_hotbar_manager
+        cat = Catalog.load(MCAssets.load())
+        log_ids = {b.id for b in cat.blocks_in_tag("logs")}
+        leaf_ids = {b.id for b in cat.blocks_in_tag("leaves")}
+        is_log = lambda b: bool(b) and (b in log_ids or str(b).endswith("_log"))
+        is_breakable = lambda b: bool(b) and (
+            b in log_ids or b in leaf_ids
+            or str(b).endswith("_log") or str(b).endswith("_leaves"))
+        self._hotbar = build_hotbar_manager(self._settings, catalog=cat)
+        self._fsm = FindAndChopLogs(is_log=is_log, is_breakable=is_breakable,
+                                    tool_role="axe", max_logs=self._max_logs)
+
+    @staticmethod
+    def _pose_from_f3(f3):
+        if f3 is None or f3.x is None or f3.yaw is None or f3.pitch is None:
+            return None
+        return SimpleNamespace(x=float(f3.x), y=float(f3.y), z=float(f3.z),
+                               yaw=float(f3.yaw), pitch=float(f3.pitch),
+                               dimension=getattr(f3, "dimension", None))
+
+    def decide(self, state):
+        from brain.interfaces import AgentAction as _AA
+        if self._wp is None:
+            if not self._warned_no_world:
+                self._warned_no_world = True
+                print("[treechop] needs vision.world.enabled: true — no "
+                      "WorldMap to find logs. Idling.")
+            return _AA()
+        if self._fsm is None:
+            self._build()
+        world = getattr(state, "world", None)
+        pose = (world.pose if world is not None and world.pose is not None
+                else self._pose_from_f3(getattr(state, "f3", None)))
+        if pose is None:
+            return _AA()                       # wait for a pose this tick
+        looking_at = world.looking_at if world is not None else None
+        ctx = SkillContext(pose=pose, world_map=self._wp.world_map,
+                           looking_at=looking_at, hotbar=self._hotbar,
+                           px_per_deg=self._px_per_deg,
+                           dimension=getattr(pose, "dimension", None))
+        return self._fsm.tick(ctx).action
+
+
+def build_treechop_agent(settings: dict) -> TreeChopAgent:
+    return TreeChopAgent(settings)
+
+
+__all__ = ["FindAndChopLogs", "TreeChopAgent", "build_treechop_agent"]

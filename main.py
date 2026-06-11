@@ -557,10 +557,11 @@ def _dispatch_action(
         dy = max(-_PX_CAP, min(_PX_CAP, dy))
         mouse.track_target(int(dx), int(dy))
 
-    # One-shot interactions
-    if action.interact == "attack":
-        actions.execute("attack")
-    elif action.interact == "use_item":
+    # Attack is a CONTINUOUS hold while commanded (mining / sustained
+    # combat) — set every tick so it releases when the agent stops. Use/
+    # drop stay one-shot.
+    actions.set_attack(action.interact == "attack")
+    if action.interact == "use_item":
         actions.execute("use_item")
     elif action.interact == "drop_item":
         actions.execute("drop_item")
@@ -757,12 +758,14 @@ def _run_agent_loop(
                 except Exception as e:
                     print(f"[AGENT][WARN] dispatch failed: {e}")
             else:
-                # Not allowed to act — be sure no movement keys are stuck.
+                # Not allowed to act — be sure no movement keys or the
+                # attack button are stuck.
                 if keyboard.cfg.verbose:
                     print(f"[DISPATCH] BLOCKED — releasing all movement "
                           f"(gate={gate_now}, screen={state.screen_state})")
                 try:
                     actions.release_all_movement()
+                    actions.set_attack(False)
                 except Exception:
                     pass
 
@@ -798,6 +801,10 @@ def _run_agent_loop(
         # message.
         try:
             mouse.set_velocity(0.0, 0.0)
+        except Exception:
+            pass
+        try:
+            actions.set_attack(False)      # never leave the mouse held down
         except Exception:
             pass
         # ALWAYS release every movement key on exit so we don't strand
