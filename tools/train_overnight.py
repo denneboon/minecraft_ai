@@ -194,25 +194,41 @@ def main(argv=None) -> int:
     patch_dir = None
     steps_since_relocate = 0
     relocate_idx = 0
+    last_safe_pos = None        # last spot we walked freely from (walkable)
+    edge_stuck = 0              # consecutive cornered (edge-blocked) relocations
 
     def _relocate():
         """Walk (edge-safe, never clicks → world untouched) to a fanned-out
         new spot, sampling the whole way, so the recogniser sees blocks from
         many positions/distances/angles — the diversity an in-place spin
-        can't get."""
+        can't get. If it gets CORNERED (every heading reads as an edge), it
+        retreats to the last spot it could walk from instead of spinning."""
         from agents.skills import WalkToward, SkillContext, SkillStatus
         from agents.treechop import _full_movement
-        nonlocal relocate_idx
+        nonlocal relocate_idx, last_safe_pos, edge_stuck
         relocate_idx += 1
         frame = capture.get_frame(); f3 = f3_reader.read(frame)
         wf = wp.update(frame, f3)
         if wf.pose is None:
-            return 0
+            return 0, "no pose"
         p = wf.pose
-        hdg = math.radians(float(p.yaw) + relocate_idx * 73.0)   # fan headings
-        goal = (int(math.floor(p.x + args.walk_dist * (-math.sin(hdg)))),
-                int(math.floor(p.y)),
-                int(math.floor(p.z + args.walk_dist * math.cos(hdg))))
+        here = (p.x, p.y, p.z)
+        if last_safe_pos is None:
+            last_safe_pos = here                # run start = walkable fallback
+        retreating = edge_stuck >= 3
+        if retreating:
+            # Cornered at an edge — go back to known walkable ground rather
+            # than keep facing fresh drops.
+            goal = (int(math.floor(last_safe_pos[0])),
+                    int(math.floor(last_safe_pos[1])),
+                    int(math.floor(last_safe_pos[2])))
+            edge_stuck = 0
+            log(f"cornered ({relocate_idx}) — retreating to {goal}")
+        else:
+            hdg = math.radians(float(p.yaw) + relocate_idx * 73.0)   # fan headings
+            goal = (int(math.floor(p.x + args.walk_dist * (-math.sin(hdg)))),
+                    int(math.floor(p.y)),
+                    int(math.floor(p.z + args.walk_dist * math.cos(hdg))))
         walk = WalkToward(goal, arrive_dist=1.5)
         moved = 0
         reason = "ran out of ticks"
@@ -244,6 +260,13 @@ def main(argv=None) -> int:
             actions.release_all_movement()
         except Exception:
             pass
+        # Track walkability: a relocation that actually moved means `here`
+        # was good ground; a string of edge-blocked ones means we're cornered.
+        if moved > 5:
+            last_safe_pos = here
+            edge_stuck = 0
+        elif "edge" in reason:
+            edge_stuck += 1
         return moved, reason
 
     def write_status(extra=None):
