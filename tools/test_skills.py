@@ -212,6 +212,18 @@ def test_mine_block(cat):
         if st in (SkillStatus.DONE, SkillStatus.FAILED): break
     (ok if st == SkillStatus.FAILED else bad)(f"aimed at sky -> bounded abandon ({st})")
 
+    # 3D reach: an out-of-reach (too-high) target -> abandon, never sits
+    # clicking; a near one is reachable.
+    from agents.skills import block_reach_distance
+    eye0 = (0.5, 65.62, 0.5)
+    (ok if block_reach_distance(eye0, (0, 64, 0)) < 4.5
+        and block_reach_distance(eye0, (0, 80, 0)) > 4.5 else bad)(
+        "block_reach_distance: near in reach, high out of reach")
+    skr = MineBlock((2, 80, 0), tool_role=None, is_target=LOG)
+    rr = skr.tick(SkillContext(pose=_pose(yaw=0, pitch=0)))
+    (ok if rr.status == SkillStatus.FAILED and "out of reach" in rr.info else bad)(
+        f"out-of-reach target -> abandon ({rr.status})")
+
 
 def test_pillar_up(cat):
     print("\n[6] PillarUp")

@@ -29,7 +29,7 @@ from typing import Optional
 from brain.interfaces import AgentAction
 from agents.skills import (
     SkillStatus, SkillResult, SkillContext, WalkToward, ChopTrunk, PillarUp,
-    MineBlock, Eat, find_nearest_block,
+    MineBlock, Eat, find_nearest_block, block_in_reach, PLAYER_REACH,
 )
 from vision.world.map import AIR_BLOCK
 
@@ -188,16 +188,17 @@ class FindAndChopLogs:
             self._cleared = set()
             self._explore_attempts = 0      # found one -> refresh explore budget
             self._explore_anchor_yaw = None
-            ex, ez = pose.x, pose.z
-            horiz = math.hypot(tgt[0] + 0.5 - ex, tgt[2] + 0.5 - ez)
-            if horiz <= self.reach:
+            # 3D reach (eye -> block): a too-high canopy log is NOT "in reach"
+            # just because it's horizontally close, so we don't get stuck
+            # clicking at something we can't touch.
+            if block_in_reach(pose, tgt, PLAYER_REACH):
                 self._sub = ChopTrunk(tgt, is_log=self.is_log,
                                       tool_role=self.tool_role, is_safe=self.is_breakable)
                 self._state = "chop"
                 return SkillResult(AgentAction(), SkillStatus.RUNNING, f"log {tgt} in reach; chopping")
             self._sub = WalkToward(tgt, arrive_dist=self.reach)
             self._state = "approach"
-            return SkillResult(AgentAction(), SkillStatus.RUNNING, f"log {tgt} at {horiz:.1f}; approaching")
+            return SkillResult(AgentAction(), SkillStatus.RUNNING, f"log {tgt}; approaching")
 
         if st == "scan":
             self._scan_ticks += 1
@@ -249,6 +250,12 @@ class FindAndChopLogs:
         if st == "approach":
             r = self._sub.tick(ctx)
             if r.status == SkillStatus.DONE:
+                # Arrived. Only chop if the log is now actually in 3D reach;
+                # if it's still too high/far (walking couldn't help), skip it.
+                if not block_in_reach(pose, self._target, PLAYER_REACH):
+                    self._drop_target(); self._state = "find"
+                    return SkillResult(r.action, SkillStatus.RUNNING,
+                                       "arrived but log still out of reach; refind")
                 self._sub = ChopTrunk(self._target, is_log=self.is_log,
                                       tool_role=self.tool_role, is_safe=self.is_breakable)
                 self._state = "chop"

@@ -103,6 +103,27 @@ def _eye(pose) -> Optional[Tuple[float, float, float]]:
         return None
 
 
+# Survival block-interaction reach (eye -> nearest point of the block).
+PLAYER_REACH = 4.5
+
+
+def block_reach_distance(eye: Tuple[float, float, float], voxel: Voxel) -> float:
+    """Distance from the eye to the NEAREST point of the voxel's 1×1×1 box —
+    the right measure for 'can the player reach this block', using the eye's
+    fractional position and the block's integer corner. Straight-up logs have
+    a small HORIZONTAL distance but a large 3D one, so this (not a 2D check)
+    is what tells us a canopy log is out of reach."""
+    nx = min(max(eye[0], voxel[0]), voxel[0] + 1.0)
+    ny = min(max(eye[1], voxel[1]), voxel[1] + 1.0)
+    nz = min(max(eye[2], voxel[2]), voxel[2] + 1.0)
+    return math.sqrt((eye[0] - nx) ** 2 + (eye[1] - ny) ** 2 + (eye[2] - nz) ** 2)
+
+
+def block_in_reach(pose, voxel, max_reach: float = PLAYER_REACH) -> bool:
+    eye = _eye(pose)
+    return eye is not None and block_reach_distance(eye, voxel) <= max_reach
+
+
 # ── Skill base ─────────────────────────────────────────────────────────
 
 class Skill:
@@ -246,10 +267,12 @@ class MineBlock(Skill):
 
     def __init__(self, voxel: Voxel, tool_role: Optional[str] = "axe",
                  max_ticks: int = 200, tol_deg: float = 3.0,
-                 is_safe=None, is_target=None, is_passthrough=None):
+                 is_safe=None, is_target=None, is_passthrough=None,
+                 max_reach: float = PLAYER_REACH):
         self.voxel = voxel
         self.tool_role = tool_role
         self.max_ticks = max_ticks
+        self.max_reach = max_reach
         # Two predicates (block_id -> bool), verified against F3's targeted
         # block: is_target = what the TARGET must be to mine (a LOG);
         # is_passthrough = blocks we may break THROUGH to reach it (leaves).
@@ -306,15 +329,29 @@ class MineBlock(Skill):
             self.broke = True            # the log we held on is gone -> counted
             return SkillResult(AgentAction(), SkillStatus.DONE, "mined log")
 
-        # ── CLEARING an occluding leaf: frozen, hold click; NOT counted ──
+        # ── CLEARING occluding leaves: frozen, hold click; NOT counted.
+        # Stays held across leaf→leaf and brief F3 gaps so a leaf WALL doesn't
+        # cause spam-clicking; a LOG appearing -> straight into mine_log. ──
         if self._mode == "clear_leaf":
-            if self._is_pass(la_id) and not self._is_log(la_id):
+            if self._is_log(la_id):                       # log behind -> mine it
+                self._mode = "mine_log"; self._silent = 0
+                return _hold("log behind leaves -> mining")
+            if self._is_pass(la_id):                      # still a leaf -> keep clearing
                 self._silent = 0
                 return _hold("clearing leaf")
-            self._mode = "aim"; self._silent = 0   # leaf gone / now a log -> re-evaluate
+            self._silent += 1
+            if self._silent <= 3:                         # brief gap -> keep holding
+                return _hold("clearing (brief gap)")
+            self._mode = "aim"; self._silent = 0          # gone -> re-evaluate
 
-        if _eye(ctx.pose) is None:
+        eye = _eye(ctx.pose)
+        if eye is None:
             return SkillResult(AgentAction(), SkillStatus.BLOCKED, "no pose")
+        # Out of reach? Don't aim/clear-leaves at a block we can't touch (a
+        # too-high canopy log) — abandon so the FSM walks closer or skips it.
+        if block_reach_distance(eye, self.voxel) > self.max_reach:
+            return SkillResult(AgentAction(), SkillStatus.FAILED,
+                               f"target out of reach ({self.voxel})")
         if not self._tool_ok:
             hb = ctx.hotbar
             slot = (hb.best_slot_for(self.tool_role) if hb is not None else None)
