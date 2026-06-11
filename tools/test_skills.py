@@ -141,14 +141,16 @@ def test_mine_block(cat):
     wm = _FakeMap(); wm.set(vox, "minecraft:oak_log")
     hb = _hotbar(cat)
     sk = MineBlock(vox, tool_role="axe", max_ticks=50)
-    ctx = SkillContext(pose=_pose(yaw=yaw, pitch=pitch), world_map=wm, hotbar=hb)
+    # F3 confirms the crosshair is on the target log -> select axe, then mine.
+    ctx = SkillContext(pose=_pose(yaw=yaw, pitch=pitch), world_map=wm, hotbar=hb,
+                       looking_at=SimpleNamespace(pos=vox, block_id="minecraft:oak_log"))
     saw_tool = saw_attack = False
     for _ in range(8):
         r = sk.tick(ctx)
         if r.action.hotbar == 2: saw_tool = True
         if r.action.interact == "attack": saw_attack = True
     (ok if saw_tool else bad)("selected axe before mining")
-    (ok if saw_attack else bad)("issued attack while aimed")
+    (ok if saw_attack else bad)("mines the log F3 confirms (no aim fiddling)")
     # Now the block breaks (world carves it to air) -> DONE.
     wm.set(vox, AIR_BLOCK)
     r = sk.tick(ctx)
@@ -202,8 +204,8 @@ def test_mine_block(cat):
     ctxs = SkillContext(pose=_pose(yaw=yaw, pitch=pitch), world_map=wms,
                         looking_at=SimpleNamespace(pos=vox, block_id="minecraft:stone"))
     rs = sks.tick(ctxs)
-    (ok if rs.status == SkillStatus.FAILED and "non-breakable" in rs.info
-     else bad)(f"refuses to mine confirmed non-breakable block -> {rs.status} ({rs.info})")
+    (ok if rs.status == SkillStatus.FAILED and "not breakable" in rs.info
+     else bad)(f"abandons a target F3 says isn't breakable -> {rs.status} ({rs.info})")
     # And it DOES attack when the confirmed block is breakable.
     ctxs.looking_at = SimpleNamespace(pos=vox, block_id="minecraft:oak_log")
     sks2 = MineBlock(vox, tool_role=None,

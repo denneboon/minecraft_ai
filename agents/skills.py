@@ -276,26 +276,29 @@ class MineBlock(Skill):
         return obs is not None and obs.block_id == AIR_BLOCK
 
     def tick(self, ctx: SkillContext) -> SkillResult:
-        # Robust break signal: complete only AFTER the crosshair has
-        # actually confirmed THIS voxel and then moved off it (the block
-        # broke, we're now looking past it). Requiring "saw it first"
-        # prevents a false DONE when a leaf is between us and the target —
-        # we break the intervening leaf (it's on the path), keep going, and
-        # only finish when the real target breaks. More reliable than the
-        # lagging WorldMap-air check; either signal completes the skill.
+        # F3's "Targeted Block" is the AUTHORITY on what the crosshair is on.
+        # Two rules it gives us:
+        #   * the instant F3 says we're on a breakable block, MINE it — don't
+        #     keep nudging the mouse toward the geometric voxel-centre (that
+        #     never quite agrees up close and makes the view circle on a log);
+        #   * never swing until F3 confirms a breakable block — so a target
+        #     the map mislabelled (e.g. brown leaf_litter read as a log) is
+        #     abandoned instead of hammered.
         la = ctx.looking_at
+        la_id = getattr(la, "block_id", None) if la is not None else None
         la_pos = tuple(la.pos) if (la is not None and getattr(la, "pos", None) is not None) else None
-        if la_pos == tuple(self.voxel):
+        on_target = (la_pos == tuple(self.voxel))
+        if on_target:
             self._saw_target = True
+        # Break signal: saw the target, then the crosshair moved off it.
         if self._saw_target and self._mining_ticks >= 1 and \
-                la_pos is not None and la_pos != tuple(self.voxel):
+                la_pos is not None and not on_target:
             return SkillResult(AgentAction(), SkillStatus.DONE, "mined (target moved off)")
-        # Already air in the map? done.
         if self._is_gone(ctx):
             return SkillResult(AgentAction(), SkillStatus.DONE, "mined")
         if _eye(ctx.pose) is None:
             return SkillResult(AgentAction(), SkillStatus.BLOCKED, "no pose")
-        # 1. Select the tool once.
+        # Select the tool once.
         if not self._tool_ok:
             hb = ctx.hotbar
             slot = (hb.best_slot_for(self.tool_role)
@@ -304,7 +307,28 @@ class MineBlock(Skill):
             if slot is not None:
                 return SkillResult(AgentAction(hotbar=slot), SkillStatus.RUNNING,
                                    f"select {self.tool_role} slot {slot}")
-        # 2. Aim, then 3. hold attack.
+
+        def _swing(info):
+            self._mining_ticks += 1
+            if self._mining_ticks > self.max_ticks:
+                return SkillResult(AgentAction(), SkillStatus.FAILED, "timed out mining")
+            return SkillResult(AgentAction(interact="attack"), SkillStatus.RUNNING, info)
+
+        # F3 has a definite block under the crosshair.
+        if la_id is not None:
+            safe = (self.is_safe is None or self.is_safe(la_id))
+            if safe:
+                # Target log, or a leaf on the line to it -> mine NOW, holding
+                # the view still (no more aim corrections -> no circling).
+                return _swing(f"mining {la_id} {self._mining_ticks}/{self.max_ticks}")
+            if on_target:
+                # Our chosen target is NOT breakable (mislabelled) -> abandon.
+                return SkillResult(AgentAction(), SkillStatus.FAILED,
+                                   f"target is {la_id}, not breakable — abandon")
+            # else: pointed at a non-breakable block that isn't the target ->
+            # fall through and re-aim toward the target voxel.
+
+        # Acquire: aim the crosshair toward the target voxel.
         eye = _eye(ctx.pose)
         tgt = (self.voxel[0] + 0.5, self.voxel[1] + 0.5, self.voxel[2] + 0.5)
         yaw, pitch = aim_angles(eye, tgt)
@@ -312,20 +336,14 @@ class MineBlock(Skill):
         if not aimed:
             return SkillResult(AgentAction(look_dx=dx, look_dy=dy),
                                SkillStatus.RUNNING, "aiming at block")
-        # Safety gate: about to swing — if F3 confirms the crosshair is on a
-        # KNOWN block we're not allowed to break, refuse (never mine terrain
-        # /builds because aim drifted off the intended voxel).
-        if self.is_safe is not None and la is not None \
-                and getattr(la, "block_id", None) is not None \
-                and not self.is_safe(la.block_id):
-            return SkillResult(AgentAction(), SkillStatus.FAILED,
-                               f"refusing to mine non-breakable {la.block_id}")
+        # Geometrically aimed but F3 hasn't confirmed a block yet — hold still
+        # and let the (few-Hz) targeted-block read catch up rather than
+        # swinging blind. Counts toward the timeout so it can't hang.
         self._mining_ticks += 1
         if self._mining_ticks > self.max_ticks:
             return SkillResult(AgentAction(), SkillStatus.FAILED,
-                               "timed out mining")
-        return SkillResult(AgentAction(interact="attack"), SkillStatus.RUNNING,
-                           f"mining {self._mining_ticks}/{self.max_ticks}")
+                               "timed out (no target confirmed)")
+        return SkillResult(AgentAction(), SkillStatus.RUNNING, "aimed; awaiting F3 confirm")
 
 
 class PillarUp(Skill):
