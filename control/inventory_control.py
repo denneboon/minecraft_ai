@@ -157,6 +157,18 @@ class InventoryController:
                 return n
         return 6
 
+    def to_hotbar(self, slot_name: str, snap, *, prefer: int = None) -> int:
+        """Ensure the stack in ``slot_name`` sits in a hotbar slot; return that
+        hotbar slot (1-9). A no-op (just returns the number) if it's already in
+        the hotbar; otherwise a single number-key SWAP shuttles it into a free
+        hotbar slot (empty / non-role, slot 6 first — same policy as carry).
+        Must be called while the inventory screen is open."""
+        if slot_name.startswith("hotbar_"):
+            return int(slot_name.split("_")[1]) + 1
+        n = int(prefer) if prefer is not None else self.carry_slot(snap)
+        self.number_swap(slot_name, n)        # inv stack <-> hotbar slot n
+        return n
+
     # ── compound moves used by crafting ──────────────────────────────
     def move_stack(self, src: str, dst: str, snap) -> int:
         """Move src's whole stack to (empty) dst via a carry hotbar slot —

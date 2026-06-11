@@ -167,15 +167,19 @@ def main(argv=None) -> int:
         ctl.open_inventory()
         snap = ctl.read(stop_when=lambda s: find_item_slot(s, TABLE) is not None)
         tname = find_item_slot(snap, TABLE)
-        ctl.close(); time.sleep(0.3)
         if tname is None:
+            ctl.close()
             print("[table] no crafting_table in inventory — craft one first "
                   "(python tools/craft.py crafting_table)"); return 1
+        # The table must be in the HOTBAR to place it. If it's in the main
+        # inventory (e.g. just crafted), number-key swap it into a hotbar slot.
         if not tname.startswith("hotbar_"):
-            print(f"[table] crafting_table is in {tname}, not the hotbar — "
-                  f"move-to-hotbar not implemented yet"); return 1
-        table_slot = int(tname.split("_")[1]) + 1
-        print(f"[table] crafting_table in hotbar slot {table_slot}")
+            table_slot = ctl.to_hotbar(tname, snap)
+            print(f"[table] moved crafting_table {tname} -> hotbar slot {table_slot}")
+        else:
+            table_slot = int(tname.split("_")[1]) + 1
+            print(f"[table] crafting_table in hotbar slot {table_slot}")
+        ctl.close(); time.sleep(0.3)
 
         def _looking():
             fr = capture.get_frame()

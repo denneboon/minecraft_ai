@@ -114,6 +114,19 @@ def main() -> int:
     (ok if [k[0] for k in kinds] == ["press", "lclick", "release"]
         and kinds[0][1] == "shift" else bad)(f"shift+click ({kinds})")
 
+    # 6. to_hotbar: inv slot -> single number-key swap into a hotbar slot;
+    # already-in-hotbar is a no-op that just returns the number.
+    print("\n[6] to_hotbar = one swap into the hotbar")
+    log = []; c = _ctl(log, None)
+    n = c.to_hotbar("inv_8", _snap({}))              # 6 empty -> swap into 6
+    taps = [e[1] for e in log if e[0] == "tap"]
+    moves = [e for e in log if e[0] == "move"]
+    (ok if n == 6 and taps == ["6"] else bad)(f"inv -> hotbar via one '6' swap (n={n}, {taps})")
+    (ok if moves and moves[0][1:] == center("inv_8") else bad)("hovers the inv slot")
+    log2 = []; c2 = _ctl(log2, None)
+    n2 = c2.to_hotbar("hotbar_3", _snap({}))         # already hotbar -> no-op
+    (ok if n2 == 4 and not log2 else bad)(f"already in hotbar -> no-op, returns 4 (got {n2})")
+
     print("\n" + ("ALL INVENTORY-CONTROL TESTS PASSED" if not _fails
                   else f"{_fails} CHECK(S) FAILED"))
     return 0 if not _fails else 1
