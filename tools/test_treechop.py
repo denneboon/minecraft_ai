@@ -316,6 +316,31 @@ def main() -> int:
     rp._build(); rp._on_fsm_done()
     (ok if rp._task_i == 0 else bad)(f"repeat plan loops to task 0 ({rp._task_i})")
 
+    # 12b. Relocate guard: too many consecutive unreachable targets ->
+    #      blacklist the cluster + relocate (don't grind through each log).
+    print("\n[12b] consecutive approach-fails -> relocate")
+    from brain.interfaces import AgentAction as _AA
+    from agents.skills import SkillResult as _SR
+    class _FailSub:                       # always fails NOT-stuck (e.g. edge)
+        def tick(self, ctx):
+            return _SR(_AA(), SkillStatus.FAILED, "edge ahead (would fall)")
+    fsm = FindAndChopLogs()
+    fsm._state = "approach"; fsm._target = (10, 64, 10)
+    fsm._approach_fails = 3               # next fail is the 4th -> relocate
+    fsm._sub = _FailSub()
+    r = fsm.tick(SkillContext(pose=_pose(), world_map=WorldMap()))
+    (ok if fsm._state == "scan" and "relocating" in r.info else bad)(
+        f"4th unreachable target -> relocate ({fsm._state}, {r.info!r})")
+    (ok if (10, 64, 10) in fsm._blacklist and (11, 65, 11) in fsm._blacklist
+     else bad)("blacklists the surrounding cluster (radius), not just one voxel")
+    (ok if fsm._approach_fails == 0 else bad)("relocate resets the fail counter")
+    # below threshold: just refind (no premature relocate)
+    fsm2 = FindAndChopLogs()
+    fsm2._state = "approach"; fsm2._target = (5, 64, 5); fsm2._sub = _FailSub()
+    r2 = fsm2.tick(SkillContext(pose=_pose(), world_map=WorldMap()))
+    (ok if fsm2._state == "find" and fsm2._approach_fails == 1 else bad)(
+        f"1st fail -> refind, not relocate ({fsm2._state}, n={fsm2._approach_fails})")
+
     # 13. parse_plan: CLI plan string -> planner tasks.
     print("\n[13] parse_plan (CLI plan -> tasks)")
     from agents.treechop import parse_plan

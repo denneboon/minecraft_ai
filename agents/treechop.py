@@ -116,6 +116,7 @@ class FindAndChopLogs:
         self._explore_attempts = 0
         self._explore_anchor_yaw = None # fixed origin to fan explore headings
         self._approach_ticks = 0        # cap time spent navigating to one log
+        self._approach_fails = 0        # consecutive unreachable targets -> relocate
         self.chopped = 0                # trunk-columns chopped (>=1 log each)
         self.logs = 0                   # actual log blocks broken
 
@@ -345,7 +346,25 @@ class FindAndChopLogs:
                     return SkillResult(r.action, SkillStatus.RUNNING,
                                        f"stuck; pillaring out "
                                        f"({self._recover_count}/{self.max_recover})")
-                self._drop_target(); self._state = "find"
+                failed = self._target
+                self._approach_fails += 1
+                self._drop_target()
+                if self._approach_fails >= 4 and failed is not None:
+                    # Repeatedly can't reach targets here (classic case: a whole
+                    # cluster across an edge/gap). Blacklist the surrounding
+                    # cluster so find stops re-picking it one log at a time, and
+                    # relocate (explore) instead of grinding through them all.
+                    fx, fy, fz = failed
+                    for ddx in range(-2, 3):
+                        for ddz in range(-2, 3):
+                            for ddy in range(-3, 6):
+                                self._blacklist.add((fx + ddx, fy + ddy, fz + ddz))
+                    self._approach_fails = 0
+                    self._scan_ticks = self.scan_budget + 1   # -> explore next scan tick
+                    self._state = "scan"
+                    return SkillResult(r.action, SkillStatus.RUNNING,
+                                       f"unreachable cluster near {failed}; relocating")
+                self._state = "find"
                 return SkillResult(r.action, SkillStatus.RUNNING,
                                    f"approach failed [{r.info}]; refind")
             return r
@@ -373,6 +392,7 @@ class FindAndChopLogs:
                 self.logs += mined
                 if mined >= 1:
                     self.chopped += 1
+                    self._approach_fails = 0     # progress -> reset relocate guard
                 # Walk onto the base to collect the dropped logs, then refind.
                 # No jumping here (we're not climbing anything) and a roomier
                 # arrive radius so it doesn't flail trying to stand on the
