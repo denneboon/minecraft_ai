@@ -410,14 +410,81 @@ class Bridge(Skill):
             f"{'safe-' if self.keep_sneak else 'god-'}bridge {self._placed+1}/{self.length}")
 
 
+class SkillSequence(Skill):
+    """Run a list of skills in order — the glue that composes primitives
+    into a behaviour. Advances to the next skill when the current one is
+    DONE; the sequence is DONE when all finish. On a child FAILED/BLOCKED
+    it stops with that status (a task FSM decides what to do next). Being
+    itself a Skill, sequences nest."""
+    name = "sequence"
+
+    def __init__(self, skills, stop_on_block: bool = True):
+        self._skills = list(skills)
+        self._i = 0
+        self.stop_on_block = stop_on_block
+
+    def reset(self):
+        self._i = 0
+        for s in self._skills:
+            s.reset()
+
+    @property
+    def current(self) -> Optional[Skill]:
+        return self._skills[self._i] if self._i < len(self._skills) else None
+
+    def tick(self, ctx: SkillContext) -> SkillResult:
+        if self._i >= len(self._skills):
+            return SkillResult(AgentAction(), SkillStatus.DONE, "sequence done")
+        res = self._skills[self._i].tick(ctx)
+        if res.status == SkillStatus.DONE:
+            self._i += 1
+            label = f"step {self._i}/{len(self._skills)} done"
+            if self._i >= len(self._skills):
+                return SkillResult(res.action, SkillStatus.DONE, "sequence done")
+            # Carry this tick's action through; next skill starts next tick.
+            return SkillResult(res.action, SkillStatus.RUNNING, label)
+        if res.status == SkillStatus.FAILED or (
+                res.status == SkillStatus.BLOCKED and self.stop_on_block):
+            return SkillResult(res.action, res.status,
+                               f"step {self._i+1} {res.status.value}: {res.info}")
+        return res
+
+
+def find_nearest_block(world_map, origin, match, *, max_radius: int = 48,
+                       dimension: Optional[str] = None):
+    """Nearest observed block satisfying ``match(block_id) -> bool`` within
+    ``max_radius`` (Chebyshev) of ``origin`` voxel. Returns ``(voxel, obs)``
+    or ``None``. Used to spot the closest oak log the recogniser has mapped.
+    """
+    if world_map is None:
+        return None
+    try:
+        it = world_map.iter_blocks_in_range(origin, max_radius, dimension=dimension)
+    except TypeError:
+        it = world_map.iter_blocks_in_range(origin, max_radius)
+    best = None
+    best_d2 = None
+    ox, oy, oz = origin
+    for obs in it:
+        bid = getattr(obs, "block_id", None)
+        if bid == AIR_BLOCK or bid is None or not match(bid):
+            continue
+        vx, vy, vz = obs.pos
+        d2 = (vx - ox) ** 2 + (vy - oy) ** 2 + (vz - oz) ** 2
+        if best_d2 is None or d2 < best_d2:
+            best_d2, best = d2, (obs.pos, obs)
+    return best
+
+
 # Registry of the currently-implemented skills (name -> class). The task
 # layer / a future planner can look skills up by name.
 SKILLS = {s.name: s for s in (SelectRole, LookAtVoxel, Eat, MineBlock,
-                              PillarUp, Bridge)}
+                              PillarUp, Bridge, SkillSequence)}
 
 
 __all__ = [
     "SkillStatus", "SkillResult", "SkillContext", "Skill",
     "SelectRole", "LookAtVoxel", "Eat", "MineBlock", "PillarUp", "Bridge",
+    "SkillSequence", "find_nearest_block",
     "aim_angles", "norm_angle", "SKILLS",
 ]

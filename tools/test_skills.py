@@ -185,6 +185,43 @@ def test_bridge(cat):
     (ok if saw_sneak else bad)("keep_sneak held during safe bridge")
 
 
+def test_sequence_and_query(cat):
+    print("\n[8] SkillSequence + find_nearest_block")
+    from agents.skills import SkillSequence, find_nearest_block, SelectRole
+    hb = _hotbar(cat)
+    # Sequence of two selects -> DONE after both.
+    seq = SkillSequence([SelectRole("axe"), SelectRole("food")])
+    ctx = SkillContext(pose=_pose(), hotbar=hb)
+    sts = []
+    for _ in range(5):
+        r = seq.tick(ctx); sts.append(r.status)
+        if r.status in (SkillStatus.DONE, SkillStatus.FAILED): break
+    (ok if sts[-1] == SkillStatus.DONE else bad)(f"two-step sequence -> {sts}")
+    # A failing step stops the sequence with FAILED.
+    hb.update([None] * 9)   # no axe now
+    seq2 = SkillSequence([SelectRole("axe"), SelectRole("food")])
+    r = seq2.tick(SkillContext(pose=_pose(), hotbar=hb))
+    (ok if r.status == SkillStatus.FAILED else bad)(f"failing step -> {r.status}")
+
+    # find_nearest_block over a synthetic WorldMap of logs.
+    from vision.world.map import WorldMap
+    from vision.world.types import BlockObservation
+    wm = WorldMap()
+    for v, bid in [((10, 64, 0), "minecraft:oak_log"),
+                   ((3, 64, 0), "minecraft:oak_log"),
+                   ((1, 64, 0), "minecraft:stone"),
+                   ((2, 64, 0), "minecraft:air")]:
+        wm.update_block(BlockObservation(pos=v, block_id=bid, confidence=1.0,
+                                         source="looking_at", last_seen_tick=0))
+    res = find_nearest_block(wm, (0, 64, 0),
+                             lambda b: b == "minecraft:oak_log", max_radius=48)
+    (ok if res and res[0] == (3, 64, 0) else bad)(
+        f"nearest oak_log from origin -> {res[0] if res else None} (want (3,64,0))")
+    res2 = find_nearest_block(wm, (0, 64, 0),
+                              lambda b: b == "minecraft:diamond_ore")
+    (ok if res2 is None else bad)("no match -> None")
+
+
 def main() -> int:
     print("=" * 60); print(" Skills — offline self-test"); print("=" * 60)
     from vision.mc_assets import MCAssets
@@ -197,6 +234,7 @@ def main() -> int:
     test_mine_block(cat)
     test_pillar_up(cat)
     test_bridge(cat)
+    test_sequence_and_query(cat)
     print("\n" + ("ALL SKILL TESTS PASSED" if not _fails
                   else f"{_fails} CHECK(S) FAILED"))
     return 0 if not _fails else 1
