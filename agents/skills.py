@@ -1009,14 +1009,16 @@ class PlaceBlock(Skill):
     name = "place_block"
 
     def __init__(self, tool_role: str = "blocks", *, slot: Optional[int] = None,
-                 pitches=(53.0, 47.0, 60.0, 41.0),
-                 yaw_offs=(0.0, 45.0, -45.0, 90.0, -90.0, 135.0, -135.0, 180.0),
-                 max_ticks: int = 320, max_reach: float = PLAYER_REACH,
-                 tol_deg: float = 5.0, verify_ticks: int = 7):
+                 pitches=(50.0, 44.0, 58.0),
+                 yaw_offs=(0.0, 60.0, -60.0, 120.0, -120.0, 180.0),
+                 max_ticks: int = 600, max_reach: float = PLAYER_REACH,
+                 tol_deg: float = 5.0, verify_ticks: int = 5):
         self.tool_role = tool_role
         self.slot = slot                 # explicit hotbar slot 1-9, overrides role
-        # forward (yaw_off 0) views first, sweeping pitch; then turn outward
-        self._cands = [(float(p), float(y)) for y in yaw_offs for p in pitches]
+        # SWEEP DIRECTIONS FIRST at the best pitch (turn away from obstacles
+        # like a tree we're standing in), THEN revisit with other pitches —
+        # pitch-outer so we cycle through every heading before nodding up/down.
+        self._cands = [(float(p), float(y)) for p in pitches for y in yaw_offs]
         self.max_ticks = max_ticks
         self.max_reach = max_reach
         self._tol = tol_deg
@@ -1033,6 +1035,7 @@ class PlaceBlock(Skill):
         self._verify = 0
         self._aimer = _Aimer(tol_deg=self._tol)
         self.placed_at = None
+        self._support = None
 
     def _next_view(self) -> bool:
         """Advance to the next candidate; return False if exhausted."""
@@ -1085,7 +1088,12 @@ class PlaceBlock(Skill):
             if hit_pos == self.placed_at:
                 return SkillResult(AgentAction(), SkillStatus.DONE,
                                    f"placed + confirmed at {self.placed_at}")
-            if self._verify > self.verify_ticks:
+            # FAST reject: if the crosshair still shows the SUPPORT block (the
+            # one we placed against) after a couple ticks, nothing went down —
+            # MC rejected it (spot occupied / too close). Don't wait the full
+            # verify window; move on to the next view immediately.
+            stale = (hit_pos is not None and hit_pos == self._support)
+            if self._verify > self.verify_ticks or (stale and self._verify >= 2):
                 self.placed_at = None
                 if not self._next_view():
                     return SkillResult(AgentAction(), SkillStatus.FAILED,
@@ -1108,7 +1116,7 @@ class PlaceBlock(Skill):
                                f"place: aiming view {self._idx}")
         # let F3 'looking at' catch up to the new view before judging
         self._aimed_count += 1
-        if self._aimed_count < 3:
+        if self._aimed_count < 2:
             return SkillResult(AgentAction(), SkillStatus.RUNNING, "place: settling")
         # 3. is placing possible from here? (looking down -> top-face place)
         place = can_place_block(pose, ctx.looking_at, ctx.world_map,
@@ -1116,6 +1124,9 @@ class PlaceBlock(Skill):
                                 assume_face="up")
         if place is not None:
             self.placed_at = place
+            # the block we placed against (looking down -> directly below the
+            # placement voxel); used to fast-detect a rejected placement
+            self._support = (place[0], place[1] - 1, place[2])
             self._mode = "verify"
             self._verify = 0
             return SkillResult(AgentAction(interact="use_item"),

@@ -190,7 +190,7 @@ def main(argv=None) -> int:
         # the crosshair (retrying other views if MC rejected it), so one drive
         # call is enough — DONE means it's confirmed on the ground.
         pb = PlaceBlock(slot=table_slot)
-        if drive(pb, "place", max_secs=30.0, debug=debug) != SkillStatus.DONE \
+        if drive(pb, "place", max_secs=55.0, debug=debug) != SkillStatus.DONE \
                 or pb.placed_at is None:
             print("[table] couldn't place the table"); return 1
         table_pos = pb.placed_at
