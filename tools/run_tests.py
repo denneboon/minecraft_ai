@@ -42,6 +42,7 @@ OFFLINE_TESTS = [
     "test_treechop",
     "test_episode_logger",
     "test_export_dataset",
+    "test_train_bc",
 ]
 
 

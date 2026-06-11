@@ -141,3 +141,7 @@ experiments/**/checkpoints/
 experiments/**/runs/
 experiments/**/wandb/
 experiments/**/outputs/
+
+# Trained policy models (behaviour cloning, etc.)
+data/models/*
+!data/models/.gitkeep
