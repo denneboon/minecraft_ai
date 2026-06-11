@@ -317,6 +317,14 @@ class WorldPerceptionConfig:
     # when the agent dwells on a voxel; a no-op for one-off sightings.
     temporal_voting: bool = True
 
+    # Per-block relative-darkness sample gate. Reject a training sample if
+    # it's darker than ``dark_sample_factor`` x the block's running mean
+    # brightness (only after ``dark_sample_min_history`` samples seed that
+    # mean). Drops night/cave-darkened captures that smear prototypes
+    # without culling genuinely-dark blocks. 0.0 disables.
+    dark_sample_factor: float = 0.7
+    dark_sample_min_history: int = 8
+
     # Run the entity detector every N ticks (1 = every frame).
     entity_detect_every_n_ticks: int = 4
 
@@ -442,6 +450,11 @@ class WorldPerception:
         # capture is suppressed). ``None`` disables the skip (back-compat).
         self._sprite_block_predicate = sprite_block_predicate
         self._sprite_skips = 0
+        # Per-block running mean brightness (for the relative-darkness gate)
+        # and the count of samples that have seeded it.
+        self._block_brightness: Dict[str, float] = {}
+        self._block_brightness_n: Dict[str, int] = {}
+        self._dark_skips = 0
         # Per-voxel temporal vote smoother for vision-patch guesses. When
         # the agent looks at the same voxel across frames, voting over the
         # independent guesses is a free ensemble — far more stable than any
@@ -1564,6 +1577,33 @@ class WorldPerception:
                     print(f"[perception][WARN] crosshair masking failed "
                           f"({e!r}); saving raw patch")
                     self._warned_crosshair_mask = True
+        # Per-block relative-darkness gate. A block lit by deep night/cave
+        # darkness is near-indistinguishable from any other dark block, so
+        # such a sample smears the prototype and wrecks daytime accuracy
+        # (verified: training on night-darkened grass dropped its bright
+        # accuracy from 0.94 to 0.42). We reject a sample only if it's an
+        # OUTLIER-dark version of a block we normally see brighter — so
+        # genuinely-dark blocks (obsidian, deepslate, coal) keep their
+        # samples (their running mean is dark, nothing is an outlier),
+        # which a blunt global brightness floor would have wrongly culled.
+        if self.cfg.dark_sample_factor > 0.0:
+            b = float(patch.mean())
+            ema = self._block_brightness.get(block_id)
+            n = self._block_brightness_n.get(block_id, 0)
+            if (ema is not None and n >= self.cfg.dark_sample_min_history
+                    and b < self.cfg.dark_sample_factor * ema):
+                self._dark_skips += 1
+                if self._dark_skips <= 3:
+                    print(f"[perception] skip dark sample {block_id} "
+                          f"(brightness {b:.0f} < {self.cfg.dark_sample_factor:.2f}"
+                          f"x block mean {ema:.0f}; low-light, would smear "
+                          f"the prototype)")
+                self._last_sample_at[key] = self._tick
+                return
+            # Update the running brightness mean for this block.
+            self._block_brightness[block_id] = (
+                b if ema is None else 0.9 * ema + 0.1 * b)
+            self._block_brightness_n[block_id] = n + 1
         path = self.sample_store.save(block_id, patch, metadata=metadata)
         if path is None:
             # Duplicate or cap reached — still update the throttle so we

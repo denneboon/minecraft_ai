@@ -650,6 +650,74 @@ def test_sprite_sample_skip() -> bool:
     return True
 
 
+def test_dark_sample_gate() -> bool:
+    """The per-block darkness gate must reject a sample that's an
+    outlier-dark version of a normally-brighter block (night/cave smear),
+    while keeping bright samples — without needing per-block thresholds."""
+    print("\n[20] Per-block relative-darkness sample gate")
+    import tempfile, numpy as _np
+    from pathlib import Path as _Path
+    from vision.world.perception import WorldPerception, WorldPerceptionConfig
+    from vision.world.map import WorldMap
+    from vision.world.sample_store import WorldSampleStore
+    from vision.world.screen_ray import ScreenRay, CameraIntrinsics
+
+    cfg = WorldPerceptionConfig()
+    cfg.dark_sample_min_history = 2      # seed fast for the test
+    cfg.dark_sample_factor = 0.7
+    cfg.mask_crosshair_in_samples = False
+    wp = WorldPerception(config=cfg, world_map=WorldMap(),
+                         sample_store=WorldSampleStore(_Path(tempfile.mkdtemp())))
+    wp._screen_ray = ScreenRay(CameraIntrinsics(960, 540, 90.0))
+    rng = _np.random.default_rng(0)
+
+    def feed(bright_lo, bright_hi, vox):
+        wp._tick += 100   # clear the per-(block,voxel) cooldown
+        frame = rng.integers(bright_lo, bright_hi, (540, 960, 3), dtype=_np.uint8)
+        wp._maybe_save_crosshair_sample(
+            frame_rgb=frame, sr=wp._screen_ray,
+            block_id="minecraft:grass_block", voxel=vox,
+            metadata={"distance_blocks": 3.0})
+
+    # Seed the running mean with two BRIGHT samples (~100).
+    feed(92, 108, (1, 2, 3))
+    feed(92, 108, (1, 2, 4))
+    n_after_bright = wp.sample_store.manifest().get("minecraft:grass_block", 0)
+    if n_after_bright < 2:
+        _fail(f"bright seed samples were not saved ({n_after_bright})")
+        return False
+    # A DARK sample (~30) of the same block is an outlier -> skipped.
+    feed(22, 38, (1, 2, 5))
+    n_after_dark = wp.sample_store.manifest().get("minecraft:grass_block", 0)
+    if n_after_dark != n_after_bright:
+        _fail(f"dark sample was NOT skipped ({n_after_bright} -> {n_after_dark})")
+        return False
+    _ok(f"outlier-dark sample skipped (store stayed at {n_after_dark})")
+    # Another BRIGHT sample still saves.
+    feed(92, 108, (1, 2, 6))
+    if wp.sample_store.manifest().get("minecraft:grass_block", 0) <= n_after_dark:
+        _fail("a bright sample after the dark one was wrongly skipped")
+        return False
+    _ok("bright samples still captured (gate is not over-eager)")
+    # factor=0 disables the gate (back-compat): a dark sample saves.
+    cfg2 = WorldPerceptionConfig()
+    cfg2.dark_sample_factor = 0.0
+    cfg2.mask_crosshair_in_samples = False
+    wp2 = WorldPerception(config=cfg2, world_map=WorldMap(),
+                          sample_store=WorldSampleStore(_Path(tempfile.mkdtemp())))
+    wp2._screen_ray = ScreenRay(CameraIntrinsics(960, 540, 90.0))
+    wp2._tick = 9999
+    dark = rng.integers(22, 38, (540, 960, 3), dtype=_np.uint8)
+    wp2._maybe_save_crosshair_sample(
+        frame_rgb=dark, sr=wp2._screen_ray, block_id="minecraft:obsidian",
+        voxel=(1, 2, 3), metadata={"distance_blocks": 3.0})
+    if "minecraft:obsidian" not in wp2.sample_store.manifest():
+        _fail("factor=0 should disable the gate (dark sample should save)")
+        return False
+    _ok("factor=0 disables the gate (dark blocks like obsidian unaffected)")
+    return True
+
+
 def test_temporal_voter() -> bool:
     """Per-voxel temporal vote smoothing: first sight passes through
     unchanged (single-frame safe), repeated agreement boosts confidence,
@@ -1267,6 +1335,7 @@ def main() -> int:
         ("air_guard",       test_air_carving_guards()),
         ("blockid_gate",    test_block_id_validator_gate()),
         ("sprite_skip",     test_sprite_sample_skip()),
+        ("dark_gate",       test_dark_sample_gate()),
         ("temporal_vote",   test_temporal_voter()),
         ("sweep_cap",       test_sweep_delta_cap()),
         ("strict_xhair",    test_strict_gate_crosshair_bypass()),
