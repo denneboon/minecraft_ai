@@ -47,6 +47,16 @@ def main() -> int:
     (ok if fsm._state == "approach" and fsm._target == (8, 64, 0) else bad)(
         f"state={fsm._state} target={fsm._target}")
 
+    # 1b. goal_blocks: DONE once that many blocks are actually gathered.
+    print("\n[1b] goal_blocks completes on blocks gathered")
+    fsm = FindAndChopLogs(goal_blocks=2)
+    r = fsm.tick(SkillContext(pose=_pose(), world_map=WorldMap()))
+    not_done_yet = r.status != SkillStatus.DONE
+    fsm.logs = 2                                # 2 blocks broken/collected
+    r = fsm.tick(SkillContext(pose=_pose(), world_map=WorldMap()))
+    (ok if not_done_yet and r.status == SkillStatus.DONE and "goal" in r.info
+     else bad)(f"goal_blocks=2 -> DONE at 2 gathered ({r.status})")
+
     # 2. In-reach log -> chop immediately.
     print("\n[2] in-reach log -> chop")
     fsm = FindAndChopLogs(reach=3.5)
@@ -287,14 +297,14 @@ def main() -> int:
         {"kind": "block", "match": ["stone"], "tool": "pickaxe", "count": 5},
     ]}}})
     pl._build()
-    # task 1 = logs (ChopTrunk feller), max 3
+    # task 1 = logs (ChopTrunk feller), goal 3 GATHERED blocks
     (ok if pl._task_i == 0 and isinstance(pl._fsm._make_mine((0, 0, 0)), _CT)
-        and pl._fsm.max_logs == 3 else bad)("task 1 = logs (ChopTrunk, count 3)")
+        and pl._fsm.goal_blocks == 3 else bad)("task 1 = logs (ChopTrunk, goal 3)")
     # simulate task-1 FSM done -> advance to task 2
     pl._on_fsm_done()
     (ok if pl._task_i == 1 and isinstance(pl._fsm._make_mine((0, 0, 0)), _MB)
-        and pl._fsm.is_log("minecraft:stone") and pl._fsm.max_logs == 5 else bad)(
-        "advances to task 2 = harvest stone (MineBlock, count 5)")
+        and pl._fsm.is_log("minecraft:stone") and pl._fsm.goal_blocks == 5 else bad)(
+        "advances to task 2 = harvest stone (MineBlock, goal 5)")
     # task-2 done -> plan complete, stays idle, no crash on extra fires
     pl._on_fsm_done(); pl._on_fsm_done()
     (ok if pl._task_i == 2 else bad)(f"plan complete + bounded ({pl._task_i})")

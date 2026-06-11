@@ -73,12 +73,17 @@ class FindAndChopLogs:
                  tool_role: Optional[str] = "axe",
                  explore_dist: float = 8.0, max_explore: int = 10,
                  explore_turn: float = 65.0, is_breakable=None,
-                 max_recover: int = 5, mine_action=None):
+                 max_recover: int = 5, mine_action=None, goal_blocks=None):
         # mine_action(voxel) -> Skill: what to do once IN REACH of a target.
         # Default fells the trunk (ChopTrunk); a flat block-gatherer passes a
         # plain MineBlock factory. This is the one knob that turns the
         # tree-chopper into a generic "find -> go -> mine -> collect" gatherer.
         self._mine_action = mine_action
+        # goal_blocks: complete (DONE) once this many blocks have actually
+        # been BROKEN (F3-confirmed -> ~= gathered, since auto-pickup happens
+        # while standing there). This is the closed-loop goal metric — "get 8
+        # logs" = 8 logs broken/collected — vs max_logs which caps trunks.
+        self.goal_blocks = goal_blocks
         self.is_log = is_log or _is_log_default
         # The ONLY blocks tree-chopping may ever break: logs + leaves. The
         # path-clearing recovery (mine-through) is restricted to these, so
@@ -200,6 +205,9 @@ class FindAndChopLogs:
         pose = ctx.pose
         if pose is None:
             return SkillResult(AgentAction(), SkillStatus.BLOCKED, "no pose")
+        if self.goal_blocks is not None and self.logs >= self.goal_blocks:
+            return SkillResult(AgentAction(), SkillStatus.DONE,
+                               f"goal reached: {self.logs} blocks gathered")
         if self.chopped >= self.max_logs:
             return SkillResult(AgentAction(), SkillStatus.DONE,
                                f"chopped {self.chopped} (limit)")
@@ -617,13 +625,13 @@ def _fsm_for_task(task: dict, cat) -> "FindAndChopLogs":
         is_brk = lambda b: bool(b) and (
             is_log(b) or b in leaf_ids or str(b).endswith("_leaves"))
         return FindAndChopLogs(is_log=is_log, is_breakable=is_brk,
-                               tool_role=task.get("tool", "axe"), max_logs=count)
+                               tool_role=task.get("tool", "axe"), goal_blocks=count)
     match = [str(m).lower() for m in (task.get("match") or [kind])]
     tool = task.get("tool", "pickaxe")
     pred = lambda b: bool(b) and any(m in str(b).lower() for m in match)
     mine = (lambda v: MineBlock(v, tool_role=tool, is_target=pred, is_passthrough=pred))
     return FindAndChopLogs(is_log=pred, is_breakable=pred, tool_role=tool,
-                           max_logs=count, mine_action=mine)
+                           goal_blocks=count, mine_action=mine)
 
 
 class PlannerAgent(TreeChopAgent):
