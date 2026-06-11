@@ -311,6 +311,18 @@ def main() -> int:
     t = pl.telemetry()
     (ok if t.get("of") == 2 else bad)(f"telemetry reports plan size ({t})")
 
+    # 13. parse_plan: CLI plan string -> planner tasks.
+    print("\n[13] parse_plan (CLI plan -> tasks)")
+    from agents.treechop import parse_plan
+    tasks = parse_plan("logs:8, stone:16, diamond_ore")
+    (ok if len(tasks) == 3 else bad)(f"3 tasks parsed ({len(tasks)})")
+    (ok if tasks[0] == {"kind": "logs", "count": 8} else bad)(f"logs:8 -> {tasks[0]}")
+    (ok if tasks[1]["kind"] == "block" and tasks[1]["match"] == ["stone"]
+        and tasks[1]["count"] == 16 else bad)(f"stone:16 -> {tasks[1]}")
+    (ok if tasks[2]["count"] == 9999 else bad)(f"no count -> unbounded ({tasks[2]['count']})")
+    (ok if parse_plan("") == [] else bad)("empty plan -> []")
+    (ok if parse_plan("stone:notanum")[0]["count"] == 9999 else bad)("bad count -> unbounded")
+
     print("\n" + ("ALL TREECHOP TESTS PASSED" if not _fails
                   else f"{_fails} CHECK(S) FAILED"))
     return 0 if not _fails else 1

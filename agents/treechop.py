@@ -613,6 +613,33 @@ class HarvestAgent(TreeChopAgent):
                                     mine_action=mine_action)
 
 
+def parse_plan(spec: str) -> list:
+    """Parse a CLI plan string into planner tasks. Format: comma-separated
+    `name:count` (count optional). 'logs'/'wood'/'tree(s)' -> fell trees;
+    any other name -> mine blocks whose id contains it (pickaxe).
+        "logs:8, stone:16, diamond_ore:3"
+    """
+    tasks = []
+    for tok in str(spec).split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        name, count = tok, 9999
+        if ":" in tok:
+            name, c = tok.rsplit(":", 1)
+            try:
+                count = int(c.strip())
+            except ValueError:
+                count = 9999
+        name = name.strip().lower()
+        if name in ("logs", "log", "wood", "tree", "trees"):
+            tasks.append({"kind": "logs", "count": count})
+        else:
+            tasks.append({"kind": "block", "match": [name],
+                          "tool": "pickaxe", "count": count})
+    return tasks
+
+
 def _fsm_for_task(task: dict, cat) -> "FindAndChopLogs":
     """Build the gather FSM for one plan task. kind 'logs' fells trunks;
     anything else gathers blocks whose id contains any of `match`."""
@@ -704,4 +731,5 @@ def build_harvest_agent(settings: dict) -> HarvestAgent:
 
 
 __all__ = ["FindAndChopLogs", "TreeChopAgent", "HarvestAgent", "PlannerAgent",
-           "build_treechop_agent", "build_harvest_agent", "build_planner_agent"]
+           "build_treechop_agent", "build_harvest_agent", "build_planner_agent",
+           "parse_plan"]

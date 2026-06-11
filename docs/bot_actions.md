@@ -85,24 +85,26 @@ The "planner" decides, given terrain, HOW to make progress or get unstuck.
 | `is_log(id)` / role of a block | ✅ | `catalog.blocks_in_tag("logs")` |
 | `reachable(voxel)` — can A* get there | 🟡 | `vision/world/pathfind.py` |
 
-## 9. High-level behaviours (task FSM)
+## 9. High-level behaviours (agents — `agents/treechop.py`)
 | behaviour | status | composes |
 | --- | --- | --- |
-| `goto(target)` | ✅ | walker |
-| `explore` — roam to unmapped terrain, avoid falls | 🔜 | walk + planner + scan |
-| `chop_tree` — path to a log, mine the trunk up, collect drops | 🔜 | find_nearest + walk + mine + collect |
-| `find_and_chop_logs` — explore → spot oak log → chop → scan nearby → repeat | 🔜 | the headline goal (piece 6) |
-| `collect(item)` | 🔜 | |
+| `goto(target)` | ✅ | `NavigateTo` (A* route + reactive follow) |
+| `find_and_chop_logs` (`--agent treechop`) | ✅ | find → navigate → ChopTrunk → collect → explore |
+| `harvest` (`--agent harvest`) — gather ANY block type | ✅ | same FSM, plain MineBlock + a block predicate |
+| `planner` (`--agent planner`) — run an ordered multi-task plan | ✅ | sequences behaviours; advances on goal/DONE |
+| `explore` — roam to unmapped terrain, avoid falls | ✅ | walk + scan, fan headings |
+| `collect(item)` — walk over drops | 🟡 | incidental (auto-pickup while standing); no item-entity vision yet |
 
 ---
 
-### Build order (each: offline-test the logic, then live-verify execution, then commit)
-1. **Hotbar roles** ✅ — `knowledge/item_roles.py`, `control/hotbar.py`
-2. **Skill primitives** ✅ — `agents/skills.py` (look/select/eat/mine/pillar/bridge)
-3. Mining behaviour (tool + verify-broken + drop collection) 🔜
-4. Locomotion planner (jump-over / pillar-out / mine-through / avoid-fall) 🔜
-5. Exploration locomotion 🔜
-6. `find_and_chop_logs` task FSM 🔜
+### Roadmap (each: offline-test the logic, live-verify execution, commit)
+1. **Hotbar roles** ✅ · 2. **Skill primitives** ✅ · 3. **Mining** ✅ (F3 aim→freeze latch, reach-gated, species-agnostic)
+4. **Locomotion planner** ✅ (jump-over / pillar-out / mine-through / avoid-fall + A* `NavigateTo`)
+5. **Exploration** ✅ · 6. **find_and_chop_logs FSM** ✅
+7. **T2 Data** ✅ — `brain/episode_logger.py` (per-run obs/action/outcome JSONL) + `tools/export_dataset.py` (→ ML rows)
+8. **T2 Generalisation** ✅ — `harvest` (any block via `mine_action` hook)
+9. **T3 Goal/planner** ✅ — `PlannerAgent` sequences tasks toward gathered-count goals
+— Next: closed-loop INVENTORY verify (vs gathered-count proxy); perception self-teach (species/ores); behaviour-cloning on the episode dataset.
 
 Every skill is tick-driven and emits one `AgentAction`, so the same
 interface admits a future *learned* policy (the agent loop, safety gate,

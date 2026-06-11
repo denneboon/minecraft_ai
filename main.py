@@ -879,6 +879,12 @@ def _build_cli() -> argparse.ArgumentParser:
         help="Run the legacy hardware smoke test instead of an agent.",
     )
     p.add_argument(
+        "--plan", type=str, default=None,
+        help="For --agent planner: an ordered plan, comma-separated "
+             "name:count (e.g. \"logs:8, stone:16\"). Overrides "
+             "settings.agent.planner.tasks.",
+    )
+    p.add_argument(
         "--script", type=str, default=None,
         help="Play a recorded macro/script file instead of an agent. "
              "Supports AutoHotkey (.ahk), Macro/Keybind-Mod (.txt), a "
@@ -969,6 +975,16 @@ def main(argv: Optional[list] = None) -> int:
         args.duration if args.duration is not None
         else _get(settings, "agent.max_runtime_sec", 60)
     )
+
+    # CLI plan override for the planner agent.
+    if args.plan:
+        try:
+            from agents.treechop import parse_plan
+            tasks = parse_plan(args.plan)
+            settings.setdefault("agent", {}).setdefault("planner", {})["tasks"] = tasks
+            print(f"[MAIN] Plan override: {tasks}")
+        except Exception as e:
+            print(f"[MAIN][WARN] could not parse --plan {args.plan!r}: {e}")
 
     # ── Construct subsystems ──────────────────────────────────────────
     gate      = InputGate()

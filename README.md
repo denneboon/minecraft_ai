@@ -75,7 +75,9 @@ run anywhere. All paths are from the repo root.
 | `python main.py --test` | Legacy mouse / hotbar hardware smoke test (no agent). |
 | `python main.py --script scripts/macros/bridge.ahk --duration 60` | Play a recorded macro (`.ahk` / `.txt` / `.json` / `.mcs`) instead of an agent. |
 | `python tools/run_god_bridge.py` | Adaptive god-bridge runner (pillar-up, auto-align yaw/pitch, diagonal back-strafe). Many flags — `--places`, `--strafe {left,right}`, `--target-pitch`, `--max-seconds`, `--keep-sneak`, `--countdown`. |
-| `python main.py --agent treechop` | **Autonomous tree-chopper** (first-class agent): scans → finds an oak log → walks to it (sprint; jumps/pillars out of holes; mines through leaves) → chops the trunk with the axe → collects → explores for the next. Breaks **logs + leaves only**. Needs `vision.world.enabled` + `hotbar.slot_roles`. Skills: `agents/skills.py` + `agents/treechop.py`; action map: `docs/bot_actions.md`. `tools/test_treechop_live.py` is a standalone runner of the same behavior. |
+| `python main.py --agent treechop` | **Autonomous tree-chopper**: scans → finds a log → A*-routes to it (sprint; jumps/pillars out of holes; mines through leaves) → chops the trunk with the axe → collects → explores for the next. Breaks **logs + leaves only**; species-agnostic (oak/birch/…). Needs `vision.world.enabled` + `hotbar.slot_roles`. |
+| `python main.py --agent harvest` | **Generic block gatherer** — same find→navigate→mine→collect behavior for any block type. Configure `settings.agent.harvest.match` (e.g. `[stone, cobblestone]`) + `tool`. |
+| `python main.py --agent planner --plan "logs:8, stone:16"` | **Goal/planner** — runs an ordered plan, advancing when each task's goal (blocks gathered) is met or the area is exhausted. Plan via `--plan` or `settings.agent.planner.tasks`. Behaviors compose: treechop / harvest / planner, all behind the `Skill`/`AgentAction` seam. Skills: `agents/skills.py` + `agents/treechop.py`; action map: `docs/bot_actions.md`. `tools/test_treechop_live.py` standalone-runs the chopper. |
 | `python tools/run_script.py <file>` | Run (or `--inspect`) a single macro/script file. |
 | `python tools/learn_world_live.py` | Autonomous self-teaching live test for the world block recogniser. Records graph-ready metrics to `data/metrics/` each run (`--save-patches` for screenshots, `--no-metrics` to disable). |
 | `python tools/train_overnight.py --minutes 480` | Long unattended self-teaching trainer (camera-only). Sweeps the view for hours collecting blocks under changing day/weather, retrains the CNN continuously, checkpoints metrics + a heartbeat (`data/metrics/overnight_status.json`) every 15 min. Pauses on focus loss, resumes automatically; panic-stop Ctrl+Shift+X/End/Pause. |
@@ -129,6 +131,8 @@ run anywhere. All paths are from the repo root.
 | `python tools/replay_demo.py <session_dir>` | Replay a recorded demo with an input overlay. |
 | `python tools/world_view_3d.py <map>` | Interactive 3D viewer for a saved WorldMap. |
 | `python tools/export_world.py` | Export a WorldMap snapshot (JSON / schematic). |
+| `python tools/episode_summary.py [--all]` | Summarise a recorded agent episode (state-time %, action mix, throughput) — or roll up all of them. Episodes are logged per run to `data/episodes/`. |
+| `python tools/export_dataset.py` | Flatten episodes into an `(observation → action)` CSV + manifest under `data/datasets/` — ML-ready data for the future learned-policy swap. |
 | `python tools/profile_loop.py` | Profile the live agent loop stage by stage. |
 | `python tools/profile_perception.py` | cProfile the perception + OCR path on live frames. |
 
