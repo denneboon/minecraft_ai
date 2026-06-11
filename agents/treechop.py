@@ -92,6 +92,7 @@ class FindAndChopLogs:
         self._scan_ticks = 0
         self._blacklist = set()
         self._recover_count = 0         # recovery actions used for this target
+        self._found_raw = None          # the voxel find returned (pre-descend)
         self._cleared = set()           # obstacles already mined (avoid re-mining)
         self._explore_attempts = 0
         self._explore_anchor_yaw = None # fixed origin to fan explore headings
@@ -137,6 +138,13 @@ class FindAndChopLogs:
                                  dimension=ctx.dimension, exclude=self._blacklist)
         return res[0] if res else None
 
+    def _drop_target(self):
+        """Blacklist BOTH the raw found voxel and the descended base, so
+        find() can't immediately re-pick the same (unreachable) log."""
+        for v in (self._target, self._found_raw):
+            if v is not None:
+                self._blacklist.add(v)
+
     def _descend_to_base(self, voxel, ctx):
         """Lower the target to the bottom of its mapped log column so we
         chop the WHOLE trunk from the base up (not a stray canopy block).
@@ -171,6 +179,7 @@ class FindAndChopLogs:
             if tgt is None:
                 self._state = "scan"; self._scan_ticks = 0
                 return SkillResult(AgentAction(), SkillStatus.RUNNING, "no log mapped; scanning")
+            self._found_raw = tgt                   # remember what find returned
             tgt = self._descend_to_base(tgt, ctx)   # chop whole trunks, base-up
             self._target = tgt
             self._recover_count = 0
@@ -262,7 +271,7 @@ class FindAndChopLogs:
                     return SkillResult(r.action, SkillStatus.RUNNING,
                                        f"stuck; pillaring out "
                                        f"({self._recover_count}/{self.max_recover})")
-                self._blacklist.add(self._target); self._state = "find"
+                self._drop_target(); self._state = "find"
                 return SkillResult(r.action, SkillStatus.RUNNING,
                                    f"approach {r.status.value}; refind")
             return r
@@ -295,14 +304,14 @@ class FindAndChopLogs:
                 # arrive radius so it doesn't flail trying to stand on the
                 # exact column.
                 base = self._target
-                self._blacklist.add(base)
+                self._drop_target()
                 self._sub = WalkToward(base, arrive_dist=1.4, stuck_window=8,
                                        jump_after=10 ** 9)
                 self._state = "collect"
                 return SkillResult(r.action, SkillStatus.RUNNING,
                                    f"chopped {mined} log(s); collecting")
             if r.status in (SkillStatus.FAILED, SkillStatus.BLOCKED):
-                self._blacklist.add(self._target); self._state = "find"
+                self._drop_target(); self._state = "find"
                 return SkillResult(r.action, SkillStatus.RUNNING, f"chop {r.status.value}; refind")
             return r
 

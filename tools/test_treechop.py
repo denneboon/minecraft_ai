@@ -217,6 +217,17 @@ def main() -> int:
     ate = any(ag2.decide(_state(1.0)).interact == "use_hold" for _ in range(16))
     (ok if not ate else bad)("does NOT eat when hunger is full")
 
+    # 10. Giving up blacklists the RAW found voxel (not just the descended
+    #     base) so find can't infinite-loop re-picking an unreachable log.
+    print("\n[10] give-up blacklists the found voxel (no infinite re-pick)")
+    fsm = FindAndChopLogs(reach=3.5)
+    ctx = SkillContext(pose=_pose(), world_map=_map_with_log((8, 70, 0)))
+    fsm.tick(ctx)                              # find -> sets _found_raw + target
+    fsm._drop_target()                         # simulate giving up on it
+    again = fsm._find(ctx)
+    (ok if again is None else bad)(
+        f"found voxel excluded from find after give-up -> {again}")
+
     print("\n" + ("ALL TREECHOP TESTS PASSED" if not _fails
                   else f"{_fails} CHECK(S) FAILED"))
     return 0 if not _fails else 1
