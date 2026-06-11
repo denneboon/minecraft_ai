@@ -111,12 +111,15 @@ def _normalise_patch(patch_rgb: np.ndarray) -> Optional[np.ndarray]:
 
 @dataclass
 class WorldSampleStoreConfig:
-    # Hard cap on per-block samples. Once a block has this many stored
-    # samples, new captures are dropped. The de-dup hash already
-    # collapses identical pixels; this cap bounds the diversity any
-    # single block can contribute to the NN index so the matcher stays
-    # cheap.
-    max_samples_per_block: int = 80
+    # Hard cap on per-block samples (sliding window — see eviction below).
+    # This is the single biggest lever on recogniser quality: it bounds how
+    # much real-condition DIVERSITY a block can retain (positions, distances,
+    # angles, lighting). 80 proved too low — a block saturates with near-
+    # duplicate views from one spot and never generalises (oak_log was stuck
+    # at ~0.5). 220 (validated by train_overnight) holds a full walk/day's
+    # variety; crucially it's the DEFAULT so EVERY run (agent play, live
+    # self-teach) retains diversity instead of evicting it back down to 80.
+    max_samples_per_block: int = 220
 
     # When the cap is hit, evict the OLDEST sample to make room for the
     # new one (sliding window) instead of refusing the new capture. This
