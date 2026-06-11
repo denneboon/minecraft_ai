@@ -42,13 +42,20 @@ class FindAndChopLogs:
 
     def __init__(self, is_log=None, reach: float = 3.5, max_radius: int = 32,
                  scan_budget: int = 60, max_logs: int = 9999,
-                 tool_role: Optional[str] = "axe"):
+                 tool_role: Optional[str] = "axe",
+                 explore_dist: float = 8.0, max_explore: int = 10,
+                 explore_turn: float = 65.0):
         self.is_log = is_log or _is_log_default
         self.reach = reach
         self.max_radius = max_radius
         self.scan_budget = scan_budget
         self.max_logs = max_logs
         self.tool_role = tool_role
+        # Exploration: when no log is mapped, walk to a new area and re-scan
+        # (fanning the heading each attempt) instead of giving up.
+        self.explore_dist = explore_dist
+        self.max_explore = max_explore
+        self.explore_turn = explore_turn
         self.reset()
 
     def reset(self):
@@ -58,6 +65,7 @@ class FindAndChopLogs:
         self._scan_ticks = 0
         self._blacklist = set()
         self._recovered = False     # pillar-out attempted for this target?
+        self._explore_attempts = 0
         self.chopped = 0
 
     def _eye_vox(self, pose):
@@ -87,6 +95,7 @@ class FindAndChopLogs:
                 return SkillResult(AgentAction(), SkillStatus.RUNNING, "no log mapped; scanning")
             self._target = tgt
             self._recovered = False
+            self._explore_attempts = 0      # found one -> refresh explore budget
             ex, ez = pose.x, pose.z
             horiz = math.hypot(tgt[0] + 0.5 - ex, tgt[2] + 0.5 - ez)
             if horiz <= self.reach:
@@ -104,12 +113,35 @@ class FindAndChopLogs:
                 self._state = "find"
                 return SkillResult(AgentAction(), SkillStatus.RUNNING, "log appeared; refind")
             if self._scan_ticks > self.scan_budget:
+                # Nothing nearby -> walk to a new area and re-scan.
+                if self._explore_attempts < self.max_explore:
+                    self._explore_attempts += 1
+                    h = math.radians(float(pose.yaw) + self._explore_attempts * self.explore_turn)
+                    ex = (int(math.floor(pose.x + self.explore_dist * (-math.sin(h)))),
+                          int(math.floor(pose.y)),
+                          int(math.floor(pose.z + self.explore_dist * math.cos(h))))
+                    self._sub = WalkToward(ex, arrive_dist=1.5)
+                    self._state = "explore"
+                    return SkillResult(AgentAction(), SkillStatus.RUNNING,
+                                       f"explore {self._explore_attempts}/{self.max_explore} -> {ex}")
                 return SkillResult(AgentAction(), SkillStatus.DONE,
-                                   f"no logs found (scanned); chopped {self.chopped}")
+                                   f"no logs found after exploring; chopped {self.chopped}")
             # Rotate the view to map more (oscillate pitch to catch trunks + ground).
             dy = int(18 * math.sin(self._scan_ticks * 0.5))
             return SkillResult(AgentAction(look_dx=70, look_dy=dy),
                                SkillStatus.RUNNING, f"scanning {self._scan_ticks}")
+
+        if st == "explore":
+            tgt = self._find(ctx)               # a log may appear as we walk
+            if tgt is not None:
+                self._state = "find"
+                return SkillResult(AgentAction(), SkillStatus.RUNNING, "log spotted while exploring")
+            r = self._sub.tick(ctx)
+            if r.status in (SkillStatus.DONE, SkillStatus.FAILED, SkillStatus.BLOCKED):
+                self._state = "scan"; self._scan_ticks = 0
+                return SkillResult(r.action, SkillStatus.RUNNING,
+                                   f"explored ({r.info}); scanning")
+            return r
 
         if st == "approach":
             r = self._sub.tick(ctx)

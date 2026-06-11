@@ -53,9 +53,9 @@ def main() -> int:
     fsm.tick(SkillContext(pose=_pose(), world_map=_map_with_log((1, 64, 0))))
     (ok if fsm._state == "chop" else bad)(f"state={fsm._state}")
 
-    # 3. No log -> scan; exhaust budget -> DONE.
-    print("\n[3] no log -> scan -> done")
-    fsm = FindAndChopLogs(scan_budget=5)
+    # 3. No log, exploration off -> scan; exhaust budget -> DONE.
+    print("\n[3] no log -> scan -> done (no explore)")
+    fsm = FindAndChopLogs(scan_budget=5, max_explore=0)
     ctx = SkillContext(pose=_pose(), world_map=WorldMap())
     r = fsm.tick(ctx)
     in_scan = fsm._state == "scan"
@@ -107,6 +107,37 @@ def main() -> int:
     fsm.tick(ctx)
     (ok if fsm._state == "find" and (5, 64, 0) in fsm._blacklist else bad)(
         f"2nd stuck -> give up + blacklist (state={fsm._state})")
+
+    # 7. Exploration: no nearby log -> walk to a new area; log appearing
+    #    mid-explore -> find; bounded by max_explore.
+    print("\n[7] no nearby log -> explore")
+    fsm = FindAndChopLogs(scan_budget=2, max_explore=3)
+    empty = SkillContext(pose=_pose(), world_map=WorldMap())
+    for _ in range(6):
+        r = fsm.tick(empty)
+        if fsm._state == "explore":
+            break
+    (ok if fsm._state == "explore" and fsm._explore_attempts >= 1 else bad)(
+        f"scan exhausted -> explore (state={fsm._state}, attempts={fsm._explore_attempts})")
+    # A log appears while exploring -> back to find.
+    fsm.tick(SkillContext(pose=_pose(), world_map=_map_with_log((9, 64, 0))))
+    (ok if fsm._state in ("find", "approach") else bad)(
+        f"log spotted while exploring -> {fsm._state}")
+    # Bounded: exploration eventually gives up (DONE) on an empty world.
+    from agents.skills import SkillResult as _SR
+    from brain.interfaces import AgentAction as _AA
+    fsm2 = FindAndChopLogs(scan_budget=1, max_explore=2)
+    class _DoneSub2:
+        def tick(self, ctx): return _SR(_AA(), SkillStatus.DONE, "walked")
+    status = None
+    for _ in range(60):
+        r = fsm2.tick(empty); status = r.status
+        if fsm2._state == "explore":
+            fsm2._sub = _DoneSub2()       # finish each explore walk instantly
+        if status == SkillStatus.DONE:
+            break
+    (ok if status == SkillStatus.DONE and fsm2._explore_attempts == 2 else bad)(
+        f"exploration bounded -> DONE after {fsm2._explore_attempts} attempts")
 
     print("\n" + ("ALL TREECHOP TESTS PASSED" if not _fails
                   else f"{_fails} CHECK(S) FAILED"))
