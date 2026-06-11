@@ -65,6 +65,7 @@ class SkillContext:
     pose: object = None
     world_map: object = None          # vision.world.map.WorldMap (or None)
     hotbar: object = None             # control.hotbar.HotbarManager (or None)
+    looking_at: object = None         # F3 LookingAtBlock (.pos, .block_id) or None
     px_per_deg: float = 6.5           # mouse sensitivity (calibrated upstream)
     tick: int = 0
     dimension: Optional[str] = None
@@ -252,7 +253,17 @@ class MineBlock(Skill):
         return obs is not None and obs.block_id == AIR_BLOCK
 
     def tick(self, ctx: SkillContext) -> SkillResult:
-        # Already air? done.
+        # Robust break signal: once we've been attacking the voxel, if F3's
+        # targeted block is no longer THIS voxel, it broke (we're now
+        # looking past it). This is more reliable than waiting for the
+        # WorldMap to carve the mined voxel to air, which lags. Either
+        # signal completes the skill.
+        la = ctx.looking_at
+        if self._mining_ticks >= 1 and la is not None and \
+                getattr(la, "pos", None) is not None and \
+                tuple(la.pos) != tuple(self.voxel):
+            return SkillResult(AgentAction(), SkillStatus.DONE, "mined (target moved off)")
+        # Already air in the map? done.
         if self._is_gone(ctx):
             return SkillResult(AgentAction(), SkillStatus.DONE, "mined")
         if _eye(ctx.pose) is None:

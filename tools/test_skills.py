@@ -131,6 +131,18 @@ def test_mine_block(cat):
     wm.set(vox, AIR_BLOCK)
     r = sk.tick(ctx)
     (ok if r.status == SkillStatus.DONE else bad)(f"voxel->air -> {r.status}")
+
+    # F3 break-signal: target moved off the voxel after attacking -> DONE
+    # (the robust live signal, independent of the WorldMap carving air).
+    wm3 = _FakeMap(); wm3.set(vox, "minecraft:oak_log")
+    sk3 = MineBlock(vox, tool_role=None)
+    ctx3 = SkillContext(pose=_pose(yaw=yaw, pitch=pitch), world_map=wm3)
+    sk3.tick(ctx3)            # aim/attack once (mining_ticks -> 1)
+    ctx3.looking_at = SimpleNamespace(pos=(vox[0], vox[1], vox[2] + 1),
+                                      block_id="minecraft:dirt")
+    r = sk3.tick(ctx3)
+    (ok if r.status == SkillStatus.DONE else bad)(
+        f"F3 target moved off voxel -> {r.status}")
     # Timeout path.
     wm2 = _FakeMap(); wm2.set(vox, "minecraft:stone")
     sk2 = MineBlock(vox, tool_role=None, max_ticks=5)
