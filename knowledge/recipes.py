@@ -316,7 +316,8 @@ def plan_make(target_id: str, count: int, available: Dict[str, int],
     # afterwards), so we need ONE table on hand — plan it first if absent, so
     # its planks/logs are part of the gather/craft plan. The table itself is
     # 2x2-craftable, so this doesn't loop.
-    if count > 0 and not target_rec.fits_2x2 and _have(avail, _TABLE) < 1:
+    if (count > 0 and _have(avail, target_id) < count
+            and not target_rec.fits_2x2 and _have(avail, _TABLE) < 1):
         _ensure(_TABLE, 1, max_depth)
 
     if _ensure(target_id, count, max_depth):

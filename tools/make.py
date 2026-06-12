@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+"""
+make X from scratch — the autonomous goal that ties everything together.
+
+    python tools/make.py wooden_pickaxe
+    python tools/make.py oak_planks 16
+
+Works out the plan (gather raw + craft chain), GATHERS logs it's short on,
+CRAFTS the 2x2 intermediates (planks/sticks/table), and TABLE-CRAFTS the final
+3x3 recipe — count-aware (only the shortfall). Needs MC running + focused.
+Panic: Ctrl+Shift+F12.
+"""
+from __future__ import annotations
+
+import os
+import sys
+import time
+
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+from utils.console import ensure_utf8_stdout
+ensure_utf8_stdout()
+
+import main as M
+from utils.focus import _find_minecraft_hwnd, activate_minecraft
+from control.input_gate import InputGate
+from control.action_wrapper import ActionWrapper
+from vision.capture import Capture, CaptureConfig
+from vision.ocr import build_f3_reader
+from vision.world import build_world_perception
+from vision.inventory import build_inventory_reader
+from vision.tooltip import build_tooltip_reader
+from agents.inventory_inspector import InventoryInspector, InspectorConfig
+from control.hotbar import build_hotbar_manager
+from control.inventory_control import InventoryController
+from agents.crafting import Crafter
+from agents.inventory_memory import InventoryMemory
+from agents.maker import Maker
+from agents.treechop import FindAndChopLogs, _full_movement
+from agents.skills import SkillContext, SkillStatus
+from knowledge.catalog import Catalog
+from vision.mc_assets import MCAssets
+from tools.table_craft import run_table_craft
+
+_LOGSUF = ("_log", "_wood", "_stem", "_hyphae")
+
+
+def main(argv=None) -> int:
+    argv = argv if argv is not None else sys.argv[1:]
+    pos = [x for x in argv if not x.startswith("-")]
+    target = (pos[0] if pos else "wooden_pickaxe")
+    if ":" not in target:
+        target = "minecraft:" + target
+    count = int(pos[1]) if len(pos) > 1 and pos[1].isdigit() else 1
+    debug = "--debug" in argv
+
+    wins = _find_minecraft_hwnd()
+    if not wins:
+        print("[make] Minecraft not found"); return 2
+    hwnd = wins[0][0]; activate_minecraft(); time.sleep(0.5)
+
+    settings = M._load_yaml(M.SETTINGS_PATH)
+    keymap = M._flatten_keymap_for_keyboard(M._load_json(M.KEYMAP_PATH))
+    ui_scale = int((settings.get("capture") or {}).get("ui_scale", 2))
+    px_per_deg = float((settings.get("agent") or {}).get("mouse_per_degree", 6.5) or 6.5)
+
+    gate = InputGate()
+    safety = M.build_safety(settings, gate=gate)
+    mouse = M.build_mouse(settings, gate=gate)
+    kb = M.build_keyboard(settings, keymap, gate=gate)
+    capture = Capture(CaptureConfig(hwnd=hwnd, use_client_area=True, threaded=True))
+    safety.start(); mouse.start(); kb.start(); capture.start(); time.sleep(0.3)
+
+    f3 = build_f3_reader(settings)
+    wp = build_world_perception(settings)
+    menu_detector = M.build_menu_detector_default(settings)
+    a = MCAssets.load(); cat = Catalog.load(a)
+    reader = build_inventory_reader(settings, assets=a)
+    hotbar = build_hotbar_manager(settings, catalog=cat)
+    tooltip = build_tooltip_reader(settings, assets=a)
+    try:
+        origin = capture.window_origin()
+    except Exception:
+        origin = (0, 0)
+    inspector = InventoryInspector(
+        tooltip, capture, mouse=mouse, gate=gate,
+        sample_store=getattr(reader, "sample_store", None),
+        config=InspectorConfig(max_resolutions_per_call=24))
+    actions = ActionWrapper(kb, mouse, gate=gate)
+    memory = InventoryMemory()
+    ctl = InventoryController(mouse, kb, reader, hotbar, capture,
+                              ui_scale=ui_scale, window_origin=origin,
+                              inspector=inspector, memory=memory)
+    crafter = Crafter(ctl, a, cat)
+
+    log_ids = {b.id for b in cat.blocks_in_tag("logs")}
+    leaf_ids = {b.id for b in cat.blocks_in_tag("leaves")}
+
+    def is_log(bid):
+        return bool(bid) and (bid in log_ids or str(bid).endswith(_LOGSUF))
+
+    def is_breakable(bid):
+        return bool(bid) and (is_log(bid) or bid in leaf_ids
+                              or str(bid).endswith("_leaves"))
+
+    def _dispatch(action):
+        if action.hotbar:
+            kb.tap(str(action.hotbar))
+        if action.look_dx or action.look_dy:
+            try:
+                mouse.track_target(int(action.look_dx), int(action.look_dy))
+            except Exception:
+                pass
+        if action.interact == "use_item":
+            try:
+                mouse.right_click()
+            except Exception:
+                pass
+        actions.set_attack(action.interact == "attack")
+        try:
+            actions.set_movement_state(**_full_movement(action.movement))
+        except Exception:
+            pass
+
+    def _stop():
+        actions.set_attack(False)
+        try:
+            actions.release_all_movement()
+        except Exception:
+            pass
+
+    def _gather(item_id, qty):
+        """Gather ``qty`` of a raw material (logs only) by chopping trees."""
+        if not is_log(item_id):
+            print(f"[make] can't gather {item_id.split(':')[-1]} (only logs)")
+            return False
+        fsm = FindAndChopLogs(is_log=is_log, reach=3.5, max_logs=max(1, qty),
+                              goal_blocks=qty, tool_role="axe",
+                              is_breakable=is_breakable)
+        t0 = time.time(); last = None
+        try:
+            while time.time() - t0 < 12.0 + 25.0 * qty:    # budget scales w/ qty
+                frame = capture.get_frame()
+                if menu_detector is not None and menu_detector.is_pause_menu(frame):
+                    M.ensure_playing(capture, menu_detector, kb)
+                    time.sleep(0.2); continue
+                wf = wp.update(frame, f3.read(frame))
+                pose = wf.pose
+                ctx = SkillContext(pose=pose, world_map=wp.world_map,
+                                   looking_at=wf.looking_at, hotbar=hotbar,
+                                   px_per_deg=px_per_deg,
+                                   dimension=getattr(pose, "dimension", None) if pose else None)
+                r = fsm.tick(ctx)
+                _dispatch(r.action)
+                if debug and fsm._state != last:
+                    print(f"[make]  gather: {fsm._state} chopped={fsm.chopped} "
+                          f"logs={fsm.logs}/{qty} | {r.info}")
+                    last = fsm._state
+                if r.status in (SkillStatus.DONE, SkillStatus.FAILED):
+                    break
+                time.sleep(0.1)
+        finally:
+            _stop()
+        got = fsm.logs >= qty
+        print(f"[make] gather {item_id.split(':')[-1]}: chopped {fsm.logs}/{qty} "
+              f"({'enough' if got else 'short'})")
+        return got
+
+    def _table_craft(tgt):
+        return run_table_craft(
+            tgt, capture=capture, mouse=mouse, kb=kb, f3=f3, wp=wp,
+            menu_detector=menu_detector, reader=reader, hotbar=hotbar,
+            inspector=inspector, actions=actions, gate=gate, cat=cat, assets=a,
+            ui_scale=ui_scale, origin=origin, px_per_deg=px_per_deg,
+            memory=memory, debug=debug)
+
+    maker = Maker(ctl, crafter, memory, a, cat,
+                  gather_fn=_gather, table_craft_fn=_table_craft, log=print)
+    try:
+        if not M.ensure_playing(capture, menu_detector, kb):
+            print("[make] game is paused — click into MC"); return 1
+        print(f"[make] === make {count} {target.split(':')[-1]} ===")
+        ok, msg = maker.make(target, count)
+        print(f"[make] {'SUCCESS' if ok else 'FAILED'}: {msg}")
+        return 0 if ok else 1
+    finally:
+        _stop()
+        try:
+            if hasattr(mouse, "release_all"):
+                mouse.release_all()
+        except Exception:
+            pass
+        try:
+            kb.stop()
+        except Exception:
+            pass
+        capture.stop()
+        try:
+            safety.stop()
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
