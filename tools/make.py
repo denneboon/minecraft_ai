@@ -152,11 +152,13 @@ def main(argv=None) -> int:
                     M.ensure_playing(capture, menu_detector, kb)
                     time.sleep(0.2); t0 += time.time() - p0; continue  # don't burn budget
                 if not gate.allow():              # focus lost: don't act on a
-                    _stop()                       # gated/stale frame; ABORT if it
-                    if _lost is None: _lost = time.time()  # stays lost (don't flail)
-                    if time.time() - _lost > 6.0:
-                        ended = "focus lost"; break
-                    time.sleep(0.2); t0 += 0.2; continue
+                    _stop()                       # gated/stale frame. Try to GRAB
+                    if _lost is None: _lost = time.time()  # focus back; abort only
+                    try: activate_minecraft()              # if it won't hold.
+                    except Exception: pass
+                    if time.time() - _lost > 10.0:
+                        ended = "focus lost (couldn't hold Minecraft foreground)"; break
+                    time.sleep(0.3); t0 += 0.3; continue
                 _lost = None
                 wf = wp.update(frame, f3.read(frame))
                 wf = wp.update(frame, f3.read(frame))
