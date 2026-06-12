@@ -62,6 +62,7 @@ import numpy as np
 from vision.inventory_layout import (
     SlotRect,
     slot_rects,
+    hud_hotbar_rects,
     ARMOR_SLOTS, HOTBAR_SLOTS, MAIN_SLOTS,
 )
 
@@ -1164,42 +1165,55 @@ class InventoryReader:
         for name, slot in rects.items():
             crop = frame_rgb[slot.y:slot.y + slot.h,
                              slot.x:slot.x + slot.w]
-            # 1. Short-circuit on placeholder slots (armour, off-hand,
-            # brewing fuel/ingredient).
-            if self.empty_slot.is_empty(name, crop):
-                snap.slots[name] = SlotContent(source="placeholder")
-                continue
-
-            # 2. NN match against real captured samples — these
-            # describe Mojang's actual renderer output, so they beat
-            # any synthetic template for items whose icon doesn't come
-            # from a simple flat PNG or full-cube projection.
-            content = self.sample_recog.recognize(crop)
-            if content is not None:
-                content.source = "sample"
-            else:
-                # 3. Synthetic templates — works for flat items + cube
-                # blocks; everything else falls through to "unknown".
-                content = self.recognizer.recognize(crop)
-                if content.is_empty:
-                    content.source = "empty"
-                elif content.item is None:
-                    content.source = "unknown"
-                else:
-                    content.source = "vision"
-
-            # Count / durability / glint applies whenever the slot has
-            # ANY pixels (identified by either matcher OR marked
-            # unknown). True empty slots skip these as a perf win.
-            if not content.is_empty:
-                content.count      = max(1, self.count.read(crop))
-                content.durability = self.durability.read(crop)
-                content.enchanted  = self.glint.detect(crop)
-            snap.slots[name] = content
+            snap.slots[name] = self._recognize_slot(name, crop)
 
         if mouse_xy is not None:
             snap.cursor = self._read_cursor(frame_rgb, mouse_xy)
 
+        return snap
+
+    def _recognize_slot(self, name: str, crop: np.ndarray) -> SlotContent:
+        """Identify one slot crop: placeholder -> real-sample NN -> synthetic
+        template, then count/durability/glint. Shared by the container read
+        and the HUD-hotbar read."""
+        # 1. Short-circuit on placeholder slots (armour, off-hand, brewing).
+        if self.empty_slot.is_empty(name, crop):
+            return SlotContent(source="placeholder")
+        # 2. NN match against real captured samples — these describe Mojang's
+        # actual renderer output, beating synthetic templates for code-rendered
+        # icons (shulkers, banners, chests, potions…).
+        content = self.sample_recog.recognize(crop)
+        if content is not None:
+            content.source = "sample"
+        else:
+            # 3. Synthetic templates — flat items + cube blocks; else unknown.
+            content = self.recognizer.recognize(crop)
+            if content.is_empty:
+                content.source = "empty"
+            elif content.item is None:
+                content.source = "unknown"
+            else:
+                content.source = "vision"
+        # Count / durability / glint for any slot with pixels (true empty skips).
+        if not content.is_empty:
+            content.count      = max(1, self.count.read(crop))
+            content.durability = self.durability.read(crop)
+            content.enchanted  = self.glint.detect(crop)
+        return content
+
+    def read_hud_hotbar(self, frame_rgb: np.ndarray) -> InventorySnapshot:
+        """Read the 9 GAMEPLAY HUD hotbar slots (inventory CLOSED) from a
+        normal frame — the always-on-screen bar — so the bot knows what's in
+        its hotbar WITHOUT opening anything. Returns a snapshot with only
+        ``hotbar_0..8`` populated (``container='hud_hotbar'``)."""
+        snap = InventorySnapshot(
+            container="hud_hotbar",
+            frame_shape=tuple(frame_rgb.shape[:2]),
+            ui_scale=self.ui_scale,
+        )
+        for name, slot in hud_hotbar_rects(frame_rgb.shape, self.ui_scale).items():
+            crop = frame_rgb[slot.y:slot.y + slot.h, slot.x:slot.x + slot.w]
+            snap.slots[name] = self._recognize_slot(name, crop)
         return snap
 
     # ------------------------------------------------------------------

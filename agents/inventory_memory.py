@@ -26,75 +26,82 @@ from __future__ import annotations
 
 from typing import Dict, Tuple
 
-# Slots that count as "carried storage" (exclude the craft grid, armour, result).
-_STORAGE = ("inv_", "hotbar_")
+# Carried-storage slot prefixes (exclude the craft grid, armour, result).
 _HOTBAR = "hotbar_"
 
 
 def count_regions(snap) -> Tuple[Dict[str, int], Dict[str, int]]:
-    """(total_counts, hotbar_counts) from an inventory snapshot — item id ->
-    summed stack count, across all storage and across the hotbar alone."""
-    total: Dict[str, int] = {}
+    """(main_inventory_counts, hotbar_counts) from a snapshot — item id ->
+    summed stack count, in the deep inventory (``inv_*``) and the hotbar
+    (``hotbar_*``) SEPARATELY. Kept apart so a HUD-only hotbar read can refresh
+    the hotbar without clobbering remembered deep-inventory counts."""
+    inv: Dict[str, int] = {}
     hotbar: Dict[str, int] = {}
     for name, sc in (getattr(snap, "slots", {}) or {}).items():
-        if not name.startswith(_STORAGE):
-            continue
         item = getattr(sc, "item", None)
         if not item:
             continue
         n = max(1, int(getattr(sc, "count", 1) or 1))
-        total[item] = total.get(item, 0) + n
         if name.startswith(_HOTBAR):
             hotbar[item] = hotbar.get(item, 0) + n
-    return total, hotbar
+        elif name.startswith("inv_"):
+            inv[item] = inv.get(item, 0) + n
+    return inv, hotbar
 
 
 def inventory_counts(snap) -> Dict[str, int]:
     """item id -> total count across the main inventory + hotbar."""
-    return count_regions(snap)[0]
+    inv, hotbar = count_regions(snap)
+    out = dict(inv)
+    for k, v in hotbar.items():
+        out[k] = out.get(k, 0) + v
+    return out
 
 
 class InventoryMemory:
     """What the bot believes it is carrying, learned from inventory reads."""
 
     def __init__(self):
-        self._counts: Dict[str, int] = {}     # item -> total carried
-        self._hotbar: Dict[str, int] = {}     # item -> count in the hotbar
+        self._inv: Dict[str, int] = {}        # deep inventory (from a full read)
+        self._hotbar: Dict[str, int] = {}     # hotbar (full read OR HUD read)
+        self._delta: Dict[str, int] = {}      # tracked changes since last read
         self._complete = False                # ever captured a full inventory?
 
     # ── learning ─────────────────────────────────────────────────────
     def observe(self, snap, *, complete: bool = True) -> None:
-        """Record counts from an inventory snapshot. A normal open-inventory
-        read sees every slot, so ``complete=True`` (the default) REPLACES the
-        ledger with the fresh truth. Pass ``complete=False`` for a partial /
-        HUD-only glimpse: it's merged in but doesn't claim to be the whole
-        picture (so :meth:`assess` still verifies a shortfall)."""
-        total, hotbar = count_regions(snap)
+        """Record counts from a snapshot.
+
+        ``complete=True`` (a normal open-inventory read, which sees every slot)
+        REPLACES the whole ledger with fresh truth. ``complete=False`` is a
+        partial glimpse — currently the gameplay HUD hotbar — which refreshes
+        ONLY the hotbar (items may have left it, so it replaces, not merges)
+        and leaves the remembered deep inventory untouched. Either way the
+        tracked-delta overlay is cleared (we just saw ground truth)."""
+        inv, hotbar = count_regions(snap)
+        self._hotbar = hotbar                  # hotbar is fully seen by both reads
         if complete:
-            self._counts = total
-            self._hotbar = hotbar
+            self._inv = inv
             self._complete = True
-        else:
-            self._counts.update(total)
-            self._hotbar.update(hotbar)
+        self._delta = {}
 
     def note_delta(self, item: str, delta: int) -> None:
         """Keep the ledger in sync after a KNOWN change — crafted ``+k``, used
-        or placed ``-k`` — so the next 'do I have enough?' need not re-open."""
-        self._counts[item] = max(0, self.count(item) + int(delta))
-        if delta < 0:                          # spent from somewhere; assume hotbar
-            self._hotbar[item] = max(0, self.hotbar_count(item) + int(delta))
+        or placed ``-k`` — so the next 'do I have enough?' need not re-open.
+        Cleared by the next :meth:`observe` (real read wins)."""
+        self._delta[item] = self._delta.get(item, 0) + int(delta)
 
     def forget(self) -> None:
         """Drop all knowledge (e.g. after actions we couldn't track) so the
         next query opens and re-reads."""
-        self._counts = {}
+        self._inv = {}
         self._hotbar = {}
+        self._delta = {}
         self._complete = False
 
     # ── querying ─────────────────────────────────────────────────────
     def count(self, item: str) -> int:
-        return int(self._counts.get(item, 0))
+        return max(0, int(self._inv.get(item, 0)) + int(self._hotbar.get(item, 0))
+                   + int(self._delta.get(item, 0)))
 
     def hotbar_count(self, item: str) -> int:
         return int(self._hotbar.get(item, 0))
@@ -127,6 +134,30 @@ class InventoryMemory:
             return ("have", 0)
         return ("check", int(n))
 
+    # ── category queries (a SET of item ids — e.g. all log types) ─────
+    def count_across(self, items) -> int:
+        """Total carried across a set of item ids (any log counts toward
+        'want 8 logs')."""
+        return sum(self.count(i) for i in set(items))
+
+    def hotbar_across(self, items) -> int:
+        return sum(self.hotbar_count(i) for i in set(items))
+
+    def deficit_across(self, items, n: int) -> int:
+        return max(0, int(n) - self.count_across(items))
+
+    def assess_across(self, items, n: int) -> Tuple[str, int]:
+        """Like :meth:`assess` but over a category of acceptable items."""
+        items = set(items)
+        if int(n) <= 0:
+            return ("have", 0)
+        if self._complete and self.count_across(items) >= n:
+            return ("have", 0)
+        if self.hotbar_across(items) >= n:
+            return ("have", 0)
+        return ("check", int(n))
+
     def snapshot(self) -> Dict[str, int]:
-        """A copy of the remembered totals (for logging/debug)."""
-        return dict(self._counts)
+        """The remembered totals (for logging/debug)."""
+        items = set(self._inv) | set(self._hotbar) | set(self._delta)
+        return {it: self.count(it) for it in items if self.count(it) > 0}

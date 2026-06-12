@@ -365,6 +365,33 @@ def slot_rects(frame_shape: Tuple[int, int],
     return out
 
 
+def hud_hotbar_rects(frame_shape: Tuple[int, int],
+                     ui_scale: int = 2) -> Dict[str, SlotRect]:
+    """Screen rects of the 9 GAMEPLAY HUD hotbar slots (inventory CLOSED) —
+    the always-visible bar at the bottom of the screen, so the bot can read
+    what it's carrying in the hotbar without opening anything.
+
+    Geometry differs from the inventory's hotbar row: the HUD widget is the
+    182×22 ``hotbar`` sprite, centred horizontally and anchored to the screen
+    bottom, with a 20-GUI-px slot pitch (not 18). Item i is drawn 3 px in from
+    the widget's top-left, then +20 px each, at 16×16. Names ``hotbar_0..8``
+    match the inventory layout so a snapshot reads the same downstream."""
+    H, W = frame_shape[:2]
+    s = max(1, int(ui_scale))
+    widget_left = (W - 182 * s) // 2
+    top = H - 22 * s + 3 * s            # widget bottom-anchored, item 3px inset
+    sw = _SLOT_W_GUI * s
+    sh = _SLOT_H_GUI * s
+    out: Dict[str, SlotRect] = {}
+    for i in range(9):
+        out[f"hotbar_{i}"] = SlotRect(
+            name=f"hotbar_{i}",
+            x=widget_left + (3 + i * 20) * s,
+            y=top, w=sw, h=sh,
+        )
+    return out
+
+
 def background_rect(frame_shape: Tuple[int, int],
                     *,
                     layout: str = "player_inventory",

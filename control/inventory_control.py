@@ -92,6 +92,14 @@ class InventoryController:
                                              for v in res.values() if v.item_id)))
             except Exception as e:
                 print(f"[inv] hover-resolve failed: {e}")
+        # Record the hotbar's per-slot item LAYOUT, so a later HUD-only read can
+        # relabel slots by position (HUD visual item recognition is unreliable
+        # over the world background, but the layout + live count OCR are enough).
+        if self._hb is not None and snap is not None:
+            try:
+                self._hb.update([snap.slots.get(f"hotbar_{i}") for i in range(9)])
+            except Exception:
+                pass
         # Feed the inventory ledger. A read of the player inventory sees every
         # carried slot, so it's a COMPLETE observation; a container view
         # (crafting table / chest) also shows the player inventory rows, so it
@@ -100,6 +108,43 @@ class InventoryController:
         if self._memory is not None and snap is not None:
             try:
                 self._memory.observe(snap, complete=True)
+            except Exception:
+                pass
+        return snap
+
+    def read_hotbar(self):
+        """Read the always-visible GAMEPLAY HUD hotbar (inventory CLOSED) so the
+        bot learns its hotbar counts WITHOUT opening anything, and fold it into
+        the ledger as a PARTIAL (hotbar-only) observation.
+
+        HUD visual item recognition is unreliable (the world shows through the
+        semi-transparent slots, so the icon templates abstain), but the white
+        count digits OCR fine and the per-slot item LAYOUT is known from the
+        last full read (the hotbar manager). So we RELABEL each slot by position
+        — identity from the layout, live count from the HUD. Returns the
+        hotbar-only snapshot, or None if the reader can't do a HUD read.
+
+        Caveat: a slot that fully EMPTIED since the last full read can read
+        stale (the count OCR can't see "0"); the open-to-verify fallback in
+        assess()/ensure() covers that."""
+        if not hasattr(self._reader, "read_hud_hotbar"):
+            return None
+        frame = self._cap.get_frame()
+        snap = self._reader.read_hud_hotbar(frame)
+        if snap is None:
+            return None
+        if self._hb is not None:
+            for i in range(9):
+                sc = snap.slots.get(f"hotbar_{i}")
+                if sc is None:
+                    continue
+                item = self._hb.item_in_slot(i + 1)      # remembered layout
+                sc.item = item
+                if item is None:
+                    sc.count = 0                          # slot was empty
+        if self._memory is not None:
+            try:
+                self._memory.observe(snap, complete=False)
             except Exception:
                 pass
         return snap
