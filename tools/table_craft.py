@@ -284,9 +284,11 @@ def main(argv=None) -> int:
         tctl.close(); time.sleep(0.5)
 
         # 5. Break the table back. After the screen closes the crosshair is
-        # still on it; if not, BreakLookedAt safely refuses anything else.
-        drive(BreakLookedAt(avoid=lambda b: "crafting_table" not in str(b)),
-              "break", max_secs=12.0)
+        # still on it. Break by POSITION (table_pos), because a placed table's
+        # id won't OCR — so the id-based break would see "nothing" and leave it.
+        bk = BreakLookedAt(expect_pos=table_pos)
+        drive(bk, "break", max_secs=14.0)
+        print(f"[table] table reclaimed: {bk.broke}")
         return 0 if okc else 1
     finally:
         _stop()

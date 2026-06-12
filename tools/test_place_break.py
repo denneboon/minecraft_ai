@@ -170,6 +170,23 @@ def main() -> int:
     bl2 = BreakLookedAt(avoid=lambda b: b == "minecraft:chest")
     r = bl2.tick(SkillContext(looking_at=_la((0, 64, 1), block_id="minecraft:chest")))
     (ok if r.status == SkillStatus.FAILED else bad)("refuses to break a protected block")
+    # expect_pos mode: break a known voxel by POSITION even when its id won't
+    # OCR (looking_at is None) — confirmed via the raw targeted coords; DONE
+    # once the crosshair drops to the block below (pos changes).
+    blp = BreakLookedAt(expect_pos=(0, 64, 1))
+    # table present (id unreadable -> looking_at None, raw coords point at it)
+    rp = blp.tick(SkillContext(looking_at=None, targeted_pos=(0, 64, 1)))
+    (ok if rp.action.interact == "attack" and rp.status == SkillStatus.RUNNING else bad)(
+        "expect_pos: attacks an unreadable block by raw coords")
+    # now broken -> crosshair drops to the grass below (0,63,1)
+    donep = None
+    for _ in range(5):
+        donep = blp.tick(SkillContext(looking_at=_la((0, 63, 1), block_id="minecraft:grass_block"),
+                                      targeted_pos=(0, 63, 1)))
+        if donep.status == SkillStatus.DONE:
+            break
+    (ok if donep.status == SkillStatus.DONE and blp.broke else bad)(
+        f"expect_pos: DONE+broke once the voxel is gone ({donep.status}, broke={blp.broke})")
 
     print("\n" + ("ALL PLACE/BREAK TESTS PASSED" if not _fails
                   else f"{_fails} CHECK(S) FAILED"))

@@ -1159,18 +1159,28 @@ class PlaceBlock(Skill):
 
 
 class BreakLookedAt(Skill):
-    """Break whatever block is under the crosshair (hold attack until F3 no
-    longer reports a block there). Used to reclaim a just-placed block — e.g.
-    the bot breaks its OWN crafting table after using it, before moving the
-    crosshair. ``avoid(block_id)->bool`` refuses to break protected blocks."""
+    """Break the block under the crosshair (hold attack until F3 no longer
+    reports it there). Used to reclaim a just-placed block — e.g. the bot
+    breaks its OWN crafting table after using it, before moving the crosshair.
+
+    Two modes:
+      * id-based (default): break whatever block F3 names under the crosshair;
+        ``avoid(block_id)->bool`` refuses protected blocks. Needs a readable id.
+      * ``expect_pos`` (a Voxel): break the block at THAT exact position,
+        identified by POSITION not id — present while ``looking_at.pos`` OR the
+        raw F3 ``targeted_pos`` equals it, gone once neither does (the crosshair
+        drops to the block below). This is essential for a freshly-placed
+        crafting table, whose id OCRs to garble so ``looking_at`` is None and
+        the id-based path wrongly reports "nothing to break"."""
     name = "break_looked_at"
 
     def __init__(self, *, tool_role=None, max_ticks: int = 160,
-                 gone_ticks: int = 3, avoid=None):
+                 gone_ticks: int = 3, avoid=None, expect_pos=None):
         self.tool_role = tool_role
         self.max_ticks = max_ticks
         self.gone_ticks = gone_ticks
         self.avoid = avoid
+        self.expect_pos = tuple(expect_pos) if expect_pos is not None else None
         self.reset()
 
     def reset(self):
@@ -1180,10 +1190,44 @@ class BreakLookedAt(Skill):
         self._selected = False
         self.broke = False
 
+    def _select_tool(self, ctx):
+        if self.tool_role and not self._selected and ctx.hotbar is not None:
+            self._selected = True
+            slot = ctx.hotbar.best_slot_for(self.tool_role)
+            if slot is not None:
+                return SkillResult(AgentAction(hotbar=slot), SkillStatus.RUNNING,
+                                   f"break: select {self.tool_role}")
+        return None
+
     def tick(self, ctx: SkillContext) -> SkillResult:
         self._t += 1
         la = ctx.looking_at
+        lpos = getattr(la, "pos", None)
         bid = getattr(la, "block_id", None) if la is not None else None
+
+        # ── position-based mode: break the exact voxel we placed, by POSITION
+        # (its id won't OCR). Present while either signal points at it.
+        if self.expect_pos is not None:
+            present = (lpos == self.expect_pos or ctx.targeted_pos == self.expect_pos)
+            if not present:
+                self._silent += 1
+                if self._silent >= self.gone_ticks:
+                    self.broke = self._attacked
+                    return SkillResult(AgentAction(), SkillStatus.DONE,
+                                       "broke it" if self._attacked else "nothing to break")
+                return SkillResult(AgentAction(interact="attack"),
+                                   SkillStatus.RUNNING, "break: confirming gone")
+            self._silent = 0
+            if self._t > self.max_ticks:
+                return SkillResult(AgentAction(), SkillStatus.FAILED, "break: timed out")
+            sel = self._select_tool(ctx)
+            if sel is not None:
+                return sel
+            self._attacked = True
+            return SkillResult(AgentAction(interact="attack"),
+                               SkillStatus.RUNNING, f"breaking block at {self.expect_pos}")
+
+        # ── id-based mode (default).
         # nothing under the crosshair -> it's gone (or never was)
         if bid in (None, AIR_BLOCK):
             self._silent += 1
@@ -1199,12 +1243,9 @@ class BreakLookedAt(Skill):
                                f"break: refusing {bid}")
         if self._t > self.max_ticks:
             return SkillResult(AgentAction(), SkillStatus.FAILED, "break: timed out")
-        if self.tool_role and not self._selected and ctx.hotbar is not None:
-            self._selected = True
-            slot = ctx.hotbar.best_slot_for(self.tool_role)
-            if slot is not None:
-                return SkillResult(AgentAction(hotbar=slot), SkillStatus.RUNNING,
-                                   f"break: select {self.tool_role}")
+        sel = self._select_tool(ctx)
+        if sel is not None:
+            return sel
         self._attacked = True
         return SkillResult(AgentAction(interact="attack"),
                            SkillStatus.RUNNING, f"breaking {str(bid).split(':')[-1]}")
