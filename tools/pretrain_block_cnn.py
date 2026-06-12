@@ -144,6 +144,10 @@ def main(argv=None) -> int:
     ap.add_argument("--epochs", type=int, default=25)
     ap.add_argument("--max-blocks", type=int, default=0,
                     help="Cap distinct blocks (0 = all block-face textures).")
+    ap.add_argument("--out", type=str, default=None,
+                    help="Model output path (default: the production model "
+                         "data/calibration/block_cnn.pt). Use a separate path "
+                         "to avoid clobbering the live model while experimenting.")
     args = ap.parse_args(argv)
 
     print("=" * 64)
@@ -168,6 +172,7 @@ def main(argv=None) -> int:
         epochs=args.epochs,
         min_samples_per_block=max(2, args.patches // 2),
         max_train_samples=max(20000, len(samples)),
+        **({"model_path": args.out} if args.out else {}),
     )
     rec = CNNBlockRecognizer(_empty_store(), config=cfg, auto_train=False)
     print(f"  training embedding ({args.epochs} epochs)…")

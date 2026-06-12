@@ -109,6 +109,9 @@ def main(argv=None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--min-per-block", type=int, default=6,
                     help="min samples for a block to enter the benchmark")
+    ap.add_argument("--seed", type=int, default=7,
+                    help="train/test split seed — vary it to gauge variance "
+                         "(avoid overfitting a tuning change to one split)")
     ap.add_argument("--augment", action="store_true",
                     help="also show the augmented (lighting/biome/angle) eval")
     ap.add_argument("--log", action="store_true",
@@ -126,7 +129,7 @@ def main(argv=None) -> int:
 
     store = build_world_sample_store()
     alls = store.load_all()
-    train, test, classes = _split(alls, args.min_per_block)
+    train, test, classes = _split(alls, args.min_per_block, seed=args.seed)
     print(f"  store: {len(alls)} samples; split -> train {len(train)}, "
           f"test {len(test)} over {len(classes)} blocks "
           f"(>= {args.min_per_block} samples each)")
