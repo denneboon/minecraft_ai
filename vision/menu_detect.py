@@ -34,6 +34,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Tuple
 
+import time
+
 import cv2
 import numpy as np
 
@@ -93,6 +95,14 @@ class MenuDetectorConfig:
     # background and we want to avoid mistaking a stray bright pixel
     # for a glyph and producing phantom keywords.
     match_threshold: float = 0.88
+
+    # Wall-clock budget (ms) for one detect() sweep. detect() OCRs ~100
+    # full-WIDTH rows top-to-bottom; on a busy/garbled scene every row pays
+    # the glyph-OCR retry cascade and the sweep measured 0.4–2.7s — far too
+    # slow to call even occasionally in a control loop. Rows are scanned
+    # top-first and the pause-menu title/buttons sit in the upper band, so a
+    # budget that stops partway still catches the menu. 0 disables.
+    read_budget_ms: int = 300
 
     keywords: Dict[str, Tuple[str, ...]] = field(
         default_factory=lambda: dict(_MENU_KEYWORDS)
@@ -159,7 +169,18 @@ class MenuDetector:
         last_valid = y1 - band_h
         if scan_rows and scan_rows[-1] < last_valid:
             scan_rows.append(last_valid)
+        # Budget the whole sweep: on a busy/garbled scene each of the ~100
+        # full-width rows pays the glyph-OCR retry cascade and the sweep hit
+        # 0.4–2.7s. begin_read bounds each row's cascade; the deadline below
+        # also stops the ROW loop (otherwise 100 primary decodes alone are
+        # slow). Rows are scanned top-first, where pause-menu text sits, so a
+        # partial sweep still detects the menu.
+        budget_ms = float(getattr(self.cfg, "read_budget_ms", 0) or 0)
+        self._ocr.begin_read(budget_ms / 1000.0)
+        deadline = (time.perf_counter() + budget_ms / 1000.0) if budget_ms > 0 else None
         for y in scan_rows:
+            if deadline is not None and time.perf_counter() > deadline:
+                break
             crop = frame[y:y + band_h, :]
             try:
                 text = self._ocr.recognize_line(crop)
