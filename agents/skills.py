@@ -1094,20 +1094,24 @@ class PlaceBlock(Skill):
             lbid = getattr(la, "block_id", None)
             # Confirm by POSITION: after placing, the crosshair (still aimed at
             # the same view) now hits the new block AT the placement voxel,
-            # whereas before it hit the support block below it. We accept the
-            # raw F3 targeted coords too, because a freshly-placed block's id
-            # often OCRs to garble (so looking_at parses to None) while its
-            # coords stay clean.
-            hit_pos = lpos if (lpos is not None and lbid not in (None, AIR_BLOCK)) \
-                else ctx.targeted_pos
-            if hit_pos == self.placed_at:
+            # whereas before it hit the support block below it. Accept EITHER
+            # signal — the id-recognised looking_at OR the raw F3 targeted
+            # coords — because the placement's IDENTITY is irrelevant here, only
+            # that a block now occupies placed_at. The block recogniser routinely
+            # MISREADS a freshly-placed table (seen live: as birch_leaves) and
+            # F3 OCRs its id to garble, so relying on a correct id would miss a
+            # real placement; the raw targeted coords stay clean.
+            id_hit = (lpos == self.placed_at and lbid not in (None, AIR_BLOCK))
+            raw_hit = (ctx.targeted_pos == self.placed_at)
+            if id_hit or raw_hit:
                 return SkillResult(AgentAction(), SkillStatus.DONE,
                                    f"placed + confirmed at {self.placed_at}")
             # FAST reject: if the crosshair still shows the SUPPORT block (the
             # one we placed against) after a couple ticks, nothing went down —
             # MC rejected it (spot occupied / too close). Don't wait the full
             # verify window; move on to the next view immediately.
-            stale = (hit_pos is not None and hit_pos == self._support)
+            stale = (ctx.targeted_pos == self._support or
+                     (lpos is not None and lpos == self._support))
             if self._verify > self.verify_ticks or (stale and self._verify >= 2):
                 self.placed_at = None
                 if not self._next_view():

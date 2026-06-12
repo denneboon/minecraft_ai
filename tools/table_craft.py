@@ -116,6 +116,7 @@ def main(argv=None) -> int:
 
     def drive(skill, label, max_secs=14.0, debug=False):
         t0 = time.time(); n = 0
+        _last_cam = None; _frozen = 0      # frozen-camera (opened-GUI) detector
         while time.time() - t0 < max_secs:
             frame = capture.get_frame()
             # Don't act on a frozen, paused frame — resume first.
@@ -139,13 +140,37 @@ def main(argv=None) -> int:
             r = skill.tick(ctx)
             _dispatch(r.action)
             n += 1
+            # Frozen-camera guard: if we keep commanding a turn but the view
+            # won't move, the cursor is unlocked because a GUI opened — the
+            # bot right-clicked an EXISTING crafting table (left over from a
+            # prior run) and OPENED it instead of placing. Tap escape to close
+            # it so the scan can continue to clear ground. (No focus loss is
+            # involved, so the gate stays open and inputs are sent but ignored.)
+            if pose is not None and (r.action.look_dx or r.action.look_dy):
+                cam = (round(float(getattr(pose, "yaw", 0.0)), 1),
+                       round(float(getattr(pose, "pitch", 0.0)), 1))
+                if cam == _last_cam:
+                    _frozen += 1
+                    if _frozen >= 8:
+                        if debug:
+                            print(f"[table]  .{label}: camera frozen — closing an "
+                                  f"opened GUI (escape)")
+                        kb.tap("escape"); time.sleep(0.35); _frozen = 0
+                else:
+                    _frozen = 0
+                _last_cam = cam
             if debug and n % 5 == 0:
                 la = wf.looking_at
+                try:
+                    md = menu_detector.detect(frame)
+                    gui = f"open={getattr(md,'open',None)}"
+                except Exception:
+                    gui = "?"
                 print(f"[table]  .{label} t={n} "
                       f"yaw={getattr(pose,'yaw',None)} pitch={getattr(pose,'pitch',None)} "
                       f"look=({r.action.look_dx},{r.action.look_dy}) "
                       f"at={getattr(la,'block_id',None)} tpos={tpos} "
-                      f"| {r.status.value}: {r.info}")
+                      f"gate={gate.allow()} gui[{gui}] | {r.status.value}: {r.info}")
             if r.status in (SkillStatus.DONE, SkillStatus.FAILED, SkillStatus.BLOCKED):
                 _stop()
                 print(f"[table] {label}: {r.status.value} ({r.info})")

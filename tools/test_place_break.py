@@ -118,6 +118,26 @@ def main() -> int:
             break
     (ok if dp.status == SkillStatus.DONE else bad)(
         f"confirms by targeted coords when the id is unreadable ({dp.status})")
+    # MISREAD-id path (the live bug): the recogniser reads the fresh table as
+    # some OTHER valid block at a DIFFERENT pos, but the raw F3 targeted coords
+    # point at placed_at — must still confirm (identity is irrelevant).
+    pbm = PlaceBlock("blocks", pitches=(56.0,), yaw_offs=(0.0,))
+    caim2 = SkillContext(pose=_pose(), looking_at=_la((0, 63, 1), "up"),
+                         world_map=_wm(), hotbar=_hotbar({"blocks": 5}), px_per_deg=6.5)
+    for _ in range(8):
+        if pbm.tick(caim2).action.interact == "use_item":
+            break
+    cmis = SkillContext(pose=_pose(),
+                        looking_at=_la((9, 9, 9), block_id="minecraft:birch_leaves"),
+                        targeted_pos=(0, 64, 1),     # raw F3 still points at placed_at
+                        world_map=_wm(), hotbar=_hotbar({"blocks": 5}), px_per_deg=6.5)
+    dm = None
+    for _ in range(3):
+        dm = pbm.tick(cmis)
+        if dm.status == SkillStatus.DONE:
+            break
+    (ok if dm.status == SkillStatus.DONE else bad)(
+        f"confirms despite a MISREAD id when targeted coords match ({dm.status})")
     # if the block never appears (MC rejected) and there are no other views,
     # it FAILS rather than hanging.
     pbr = PlaceBlock("blocks", pitches=(56.0,), yaw_offs=(0.0,), verify_ticks=2)
