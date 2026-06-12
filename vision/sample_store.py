@@ -156,6 +156,42 @@ class SampleStore:
             self._write_manifest_unlocked()
             return path
 
+    def relabel(self, item_id: str, crop_rgb: np.ndarray) -> int:
+        """Authoritatively (re)label ``crop_rgb`` as ``item_id`` and PURGE the
+        same pixel-crop stored under any OTHER id — the poison-correction path.
+
+        A hover-to-learn mistake saves a crop under the wrong id (e.g. a coal
+        icon under ``mud``); the NN then matches future coal at distance 0 and
+        reports ``mud`` forever. Re-teaching with the tooltip-OCR'd truth must
+        therefore REMOVE the wrong-id copy, not just add a right-id one.
+        Returns the number of conflicting (wrong-id) samples removed."""
+        norm = _normalise_crop(crop_rgb)
+        if norm is None:
+            return 0
+        h = _hash_pixels(norm)
+        keep = _short_id(item_id)
+        removed = 0
+        with self._lock:
+            if self.root.is_dir():
+                for item_dir in self.root.iterdir():
+                    if not item_dir.is_dir() or item_dir.name == keep:
+                        continue
+                    p = item_dir / f"{h}.png"
+                    if p.is_file():
+                        try:
+                            p.unlink(); removed += 1
+                        except OSError:
+                            pass
+                    # drop a now-empty folder so it doesn't linger at count 0
+                    try:
+                        if not any(item_dir.glob("*.png")):
+                            item_dir.rmdir()
+                    except OSError:
+                        pass
+            self._write_manifest_unlocked()
+        self.save(item_id, crop_rgb)        # ensure the correct-id copy exists
+        return removed
+
     # ------------------------------------------------------------------
     # Readers
     # ------------------------------------------------------------------
