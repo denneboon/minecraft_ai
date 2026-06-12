@@ -182,6 +182,16 @@ class OCRConfig:
     # GlyphOCRConfig.bright_method.
     bright_method:   str   = "adaptive"
 
+    # Wall-clock budget (ms) for ONE full F3 read. The glyph OCR's retry
+    # cascade (alt binarisations + sub-crops) explodes on a busy/garbled
+    # forest scene — a whole panel measured ~3.7 s vs ~86 ms on a clean
+    # panel — because every line fails and pays the full cascade. With a
+    # budget the primary (cheap) decode of every line always runs, and the
+    # retries only run while under budget; past it, lines return their
+    # primary decode. 250 ms caps a worst-case busy read at ~4 Hz instead of
+    # ~0.3 Hz. 0 disables the budget.
+    read_budget_ms:  int   = 250
+
     # Tesseract fallback toggle.
     enable_tesseract_fallback: bool = True
 
@@ -511,6 +521,10 @@ class F3Reader:
 
         crops = self._crop_lines(frame)
         if self._glyph_ocr is not None:
+            # Budget the whole multi-line read so a garbled busy scene can't
+            # blow the read up to seconds (the retry cascade is the cost). The
+            # primary decode of each line still runs — pose/xyz keep parsing.
+            self._glyph_ocr.begin_read(float(getattr(self.cfg, "read_budget_ms", 0)) / 1000.0)
             lines = [self._glyph_ocr.recognize_line(c) for c in crops]
             backend = "glyph"
         else:

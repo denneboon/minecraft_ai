@@ -30,6 +30,7 @@ isn't perfectly aligned with the glyph row.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -163,6 +164,27 @@ class GlyphOCR:
 
         self._glyph_h_screen = self.cfg.line_glyph_h_gui_px * scale
 
+        # Optional wall-clock deadline for a multi-line read. The retry
+        # cascades (alternative binarisations + anchored sub-crops) are what
+        # make a GARBLED busy scene explode: every line fails _is_garbled and
+        # pays the full ~10-decode cascade, so a forest F3 read measured ~3.7 s
+        # (vs ~86 ms on a clean panel). The primary decode of each line ALWAYS
+        # runs (cheap, gets pose/xyz even on busy scenes); the retries only run
+        # while under this deadline. None = unlimited (the default for the
+        # inventory/tooltip/menu readers, whose crops are tiny).
+        self._deadline: Optional[float] = None
+
+    def begin_read(self, budget_s: float) -> None:
+        """Start a budgeted multi-line read: the retry cascades in
+        ``recognize_line`` bail once ``budget_s`` of wall-clock elapses, so a
+        busy/garbled scene can't blow the per-read time up to seconds. Call
+        once before a batch of ``recognize_line`` calls. ``budget_s <= 0``
+        clears the budget (unlimited)."""
+        self._deadline = (time.perf_counter() + budget_s) if budget_s and budget_s > 0 else None
+
+    def _past_deadline(self) -> bool:
+        return self._deadline is not None and time.perf_counter() > self._deadline
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -190,6 +212,13 @@ class GlyphOCR:
         # to track the player's block position for jump timing.
         if getattr(self, "fast_mode", False):
             return best
+        # Budget guard: on a busy scene EVERY line is garbled and would run the
+        # full retry cascade below — ~3.7 s for a whole F3 panel. Once the
+        # per-read deadline passes, skip the (expensive) retries and return the
+        # primary decode. Pose/xyz already parse from the primary pass, so the
+        # bot keeps navigating fast instead of "thinking" once every few sec.
+        if self._past_deadline():
+            return best
         # Retry 1: alternative binarisations of the FULL crop.
         for alt in self._alternative_binaries(line_img):
             cand = self._decode_binary(alt)
@@ -197,6 +226,8 @@ class GlyphOCR:
                 best = cand
                 if not self._is_garbled(best):
                     return best
+            if self._past_deadline():
+                return best
         # Retry 2: horizontally-anchored SUB-CROPS. F3 columns are left-
         # or right-aligned, so the empty side of a wide line crop is bare
         # terrain. Over bright sand that empty side produces adaptive
@@ -205,6 +236,8 @@ class GlyphOCR:
         # text side excludes that noise and recovers the line. We try a
         # few widths on each side and keep the cleanest, fullest decode.
         for sub in self._anchored_subcrops(line_img):
+            if self._past_deadline():
+                return best
             cand = self._decode_binary(self._binarize(sub))
             if self._decode_quality(cand) > self._decode_quality(best):
                 best = cand
