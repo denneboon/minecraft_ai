@@ -44,7 +44,11 @@ def _panic():
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--logs", type=int, default=2, help="max logs to chop")
+    ap.add_argument("--logs", type=int, default=2, help="max log columns to chop")
+    ap.add_argument("--want", type=int, default=None,
+                    help="ENSURE this many logs total — checks the inventory "
+                         "first and chops only the DEFICIT (don't gather for "
+                         "no reason). Skips entirely if already stocked.")
     ap.add_argument("--max-steps", type=int, default=700)
     args = ap.parse_args()
 
@@ -122,9 +126,41 @@ def main() -> int:
             try: mouse.right_click()
             except Exception: pass
 
+    # ── Count-aware gathering (--want N): only chop the DEFICIT toward N logs
+    # total. Same logic as crafting's ensure: check a cheap HUD-hotbar glance +
+    # the ledger, open the inventory ONLY if unsure, and skip entirely if
+    # already stocked — so the bot never gathers for no reason.
+    goal_blocks = None
+    if args.want is not None:
+        from vision.inventory import build_inventory_reader
+        from control.inventory_control import InventoryController
+        from agents.inventory_memory import InventoryMemory
+        menu_detector = M.build_menu_detector_default(settings)
+        M.ensure_playing(capture, menu_detector, keyboard)
+        reader = build_inventory_reader(settings, assets=MCAssets.load())
+        try: origin = capture.window_origin()
+        except Exception: origin = (0, 0)
+        memory = InventoryMemory()
+        ctl = InventoryController(mouse, keyboard, reader, hotbar, capture,
+                                  ui_scale=int((settings.get("capture") or {}).get("ui_scale", 2)),
+                                  window_origin=origin, memory=memory)
+        try: ctl.read_hotbar()                       # logs in the hotbar?
+        except Exception: pass
+        if memory.assess_across(log_ids, args.want)[0] != "have":
+            ctl.open_inventory(); ctl.read(stop_when=lambda s: True); ctl.close()
+            time.sleep(0.3)
+        have = memory.count_across(log_ids)
+        goal_blocks = max(0, args.want - have)
+        print(f"[chop] want {args.want} logs total, have {have} -> gather {goal_blocks}")
+        if goal_blocks <= 0:
+            print("[chop] already stocked; nothing to gather."); return 0
+        args.logs = max(args.logs, goal_blocks)      # enough tree-columns cap
+
     fsm = FindAndChopLogs(is_log=is_log, reach=3.5, max_logs=args.logs,
+                          goal_blocks=goal_blocks,
                           tool_role="axe", is_breakable=is_breakable)
-    print(f"[chop] FindAndChopLogs — target {args.logs} log(s). Walks + mines "
+    tgt = f"{goal_blocks} more log(s)" if goal_blocks is not None else f"{args.logs} column(s)"
+    print(f"[chop] FindAndChopLogs — target {tgt}. Walks + mines "
           f"logs only. Panic: Ctrl+Shift+X.")
     status = SkillStatus.RUNNING
     aborted = False

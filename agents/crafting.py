@@ -113,9 +113,19 @@ class Crafter:
         if count <= 0:
             return True, f"need 0 {short}"
         # 1. Believe the memory if it's confident we already have enough.
-        if memory is not None and memory.assess(target_id, count)[0] == "have":
-            return True, (f"already have >={count} {short} "
-                          f"(remembered {memory.count(target_id)}; didn't open)")
+        if memory is not None:
+            if memory.assess(target_id, count)[0] == "have":
+                return True, (f"already have >={count} {short} "
+                              f"(remembered {memory.count(target_id)}; didn't open)")
+            # A cheap HUD-hotbar glance (no inventory open) may already cover it.
+            try:
+                if hasattr(self.ctl, "read_hotbar"):
+                    self.ctl.read_hotbar()
+            except Exception:
+                pass
+            if memory.assess(target_id, count)[0] == "have":
+                return True, (f"already have >={count} {short} "
+                              f"(hotbar has {memory.hotbar_count(target_id)}; didn't open)")
         # 2. Open + verify the real count before crafting anything.
         opened = False
         try:
