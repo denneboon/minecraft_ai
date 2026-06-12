@@ -170,6 +170,38 @@ def test_deterministic():
     (ok if same else bad)("read is deterministic (same frame -> same pose)")
 
 
+def test_read_budget_caps_busy_read():
+    """The read budget (OCRConfig.read_budget_ms) bounds the glyph-OCR retry
+    cascade so a busy/garbled scene can't blow a read up to seconds (it hit
+    ~3.7s live, vs ~86ms clean). Guarantees: a tight budget is never SLOWER
+    than unlimited, and the pose still parses (the primary per-line decode
+    always runs, so xyz survives budgeting)."""
+    import time
+    frame = _load_rgb("f3_desert_busy_bg.png")
+    if frame is None:
+        return
+    reader = build_f3_reader(M._load_yaml(M.SETTINGS_PATH))
+
+    reader.cfg.read_budget_ms = 0          # unlimited -> full cascade
+    reader.read(frame)                     # warm
+    t = time.perf_counter()
+    for _ in range(3):
+        reader.read(frame)
+    slow = (time.perf_counter() - t) / 3
+
+    reader.cfg.read_budget_ms = 50         # tight -> cascade bails early
+    t = time.perf_counter()
+    for _ in range(3):
+        info = reader.read(frame)
+    fast = (time.perf_counter() - t) / 3
+
+    (ok if fast <= slow + 0.010 else bad)(
+        f"tight budget never slower than unlimited ({fast*1000:.0f}ms "
+        f"<= {slow*1000:.0f}ms)")
+    (ok if info.position() is not None else bad)(
+        f"pose still parses under a tight budget -> {info.position()}")
+
+
 def main():
     print("=" * 60)
     print(" vision.ocr F3 hard-background self-test")
@@ -179,6 +211,7 @@ def main():
     test_sign_flip_rejected()
     test_facing_angles_survive_garbled_cardinal()
     test_deterministic()
+    test_read_budget_caps_busy_read()
     print("=" * 60)
     if _fail:
         print(f" {_fail} CHECK(S) FAILED")
