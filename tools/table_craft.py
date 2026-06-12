@@ -52,7 +52,7 @@ TABLE = "minecraft:crafting_table"
 def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
                     reader, hotbar, inspector, actions, gate, cat, assets,
                     ui_scale=2, origin=(0, 0), px_per_deg=6.5, memory=None,
-                    debug=False):
+                    debug=False, f3_worker=None):
     """Place a crafting table, open it, craft ``target`` (3x3), break the table
     back. Components are provided + owned by the CALLER (not started/stopped
     here). Returns ``(ok, message)``."""
@@ -89,19 +89,24 @@ def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
             pass
 
     def drive(skill, label, max_secs=14.0, debug=False):
-        t0 = time.time(); n = 0
+        t0 = time.time(); n = 0; _last_pause = time.time()
         _last_cam = None; _frozen = 0      # frozen-camera (opened-GUI) detector
         while time.time() - t0 < max_secs:
             n += 1
+            now = time.time()
             frame = capture.get_frame()
-            # is_pause_menu is a full-frame OCR; running it every tick crawls the
-            # loop (~2s/tick). Check occasionally — the preflight already put us
-            # in gameplay and a LAN world doesn't pause on focus loss.
-            if menu_detector is not None and n % 15 == 0 \
-                    and menu_detector.is_pause_menu(frame):
-                M.ensure_playing(capture, menu_detector, kb)
-                time.sleep(0.2); continue
-            reading = f3.read(frame)
+            # is_pause_menu is a ~2.4s full-frame OCR; TIME-throttle it (the
+            # preflight already put us in gameplay and a LAN world doesn't pause
+            # on focus loss) so it never crawls the loop.
+            if menu_detector is not None and now - _last_pause > 4.0:
+                _last_pause = now
+                if menu_detector.is_pause_menu(frame):
+                    M.ensure_playing(capture, menu_detector, kb)
+                    time.sleep(0.2); continue
+            # Prefer the background OCR worker (O(1) latest pose) over a ~86 ms
+            # inline read; fall back to inline when no worker was supplied.
+            reading = (f3_worker.latest() if f3_worker is not None
+                       else f3.read(frame))
             wf = wp.update(frame, reading)
             pose = wf.pose
             # Raw targeted-block coords (survive an unreadable block id — a

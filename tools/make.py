@@ -28,7 +28,8 @@ from utils.focus import _find_minecraft_hwnd, activate_minecraft
 from control.input_gate import InputGate
 from control.action_wrapper import ActionWrapper
 from vision.capture import Capture, CaptureConfig
-from vision.ocr import build_f3_reader
+from vision.ocr import build_f3_reader, F3ReaderWorker
+from vision.pose_filter import PoseFilter
 from vision.world import build_world_perception
 from vision.inventory import build_inventory_reader
 from vision.tooltip import build_tooltip_reader
@@ -74,7 +75,17 @@ def main(argv=None) -> int:
     safety.start(); mouse.start(); kb.start(); capture.start(); time.sleep(0.3)
 
     f3 = build_f3_reader(settings)
+    # F3 OCR is ~86 ms/read — far too slow to run inline every control tick
+    # (it capped the loop at ~5 Hz). Run it on a background worker thread (as
+    # main.py does) so the control loop just grabs the latest good pose in O(1)
+    # and ticks at the perception's natural ~11 Hz instead. interval_sec=0 lets
+    # the worker re-read back-to-back; the ~86 ms read time paces it to ~11 Hz.
     wp = build_world_perception(settings)
+    f3w = F3ReaderWorker(f3, capture, pose_filter=PoseFilter(),
+                         interval_sec=float((settings.get("vision", {})
+                                             .get("ocr", {})
+                                             .get("read_interval_sec", 0.0)) or 0.0))
+    f3w.start()
     menu_detector = M.build_menu_detector_default(settings)
     a = MCAssets.load(); cat = Catalog.load(a)
     reader = build_inventory_reader(settings, assets=a)
@@ -105,14 +116,17 @@ def main(argv=None) -> int:
         return bool(bid) and (is_log(bid) or bid in leaf_ids
                               or str(bid).endswith("_leaves"))
 
-    def _dispatch(action):
+    def _dispatch(action, apply_look=True):
         if action.hotbar:
             kb.tap(str(action.hotbar))
-        if action.look_dx or action.look_dy:
+        if apply_look and (action.look_dx or action.look_dy):
             try:
                 # INSTANT relative move (not eased track_target): the treechop
                 # FSM expects its per-tick look correction to land immediately,
                 # else it lags and ends up aimed at a distant log it can't reach.
+                # apply_look is gated to FRESH poses — re-applying the same
+                # relative delta on a stale (unchanged) pose would over-rotate
+                # the camera N times for one real perception update.
                 mouse.move(int(action.look_dx), int(action.look_dy))
             except Exception:
                 pass
@@ -143,37 +157,51 @@ def main(argv=None) -> int:
                               goal_blocks=qty, tool_role="axe",
                               is_breakable=is_breakable)
         budget = 90.0 + 90.0 * qty            # generous: walk to + chop each log
-        t0 = time.time(); last = None; ended = "timeout"; _lost = None; _n = 0
+        t0 = time.time(); last = None; ended = "timeout"; _lost = None
+        last_ts = None; last_tick = 0.0; last_pause = time.time()
         try:
             while time.time() - t0 < budget:
-                _n += 1
-                frame = capture.get_frame()
-                # is_pause_menu is a full-frame OCR — running it EVERY tick made
-                # decisions ~2s each (the standalone treechop is ~0.1s). The gate
-                # handles focus loss; a LAN world doesn't pause on focus loss, so
-                # only check the pause menu occasionally.
-                if menu_detector is not None and _n % 15 == 0 \
-                        and menu_detector.is_pause_menu(frame):
-                    p0 = time.time()
-                    M.ensure_playing(capture, menu_detector, kb)
-                    time.sleep(0.2); t0 += time.time() - p0; continue  # don't burn budget
+                now = time.time()
                 if not gate.allow():              # focus lost: don't act on a
                     _stop()                       # gated/stale frame. Try to GRAB
-                    if _lost is None: _lost = time.time()  # focus back; abort only
+                    if _lost is None: _lost = now          # focus back; abort only
                     try: activate_minecraft()              # if it won't hold.
                     except Exception: pass
-                    if time.time() - _lost > 10.0:
+                    if now - _lost > 10.0:
                         ended = "focus lost (couldn't hold Minecraft foreground)"; break
                     time.sleep(0.3); t0 += 0.3; continue
                 _lost = None
-                wf = wp.update(frame, f3.read(frame))
+                # is_pause_menu is a ~2.4s full-frame OCR — TIME-throttle it (not
+                # tick-throttle: ticks are now ~11 Hz) to once every few seconds.
+                # The gate handles focus loss and a LAN world doesn't pause on it.
+                if menu_detector is not None and now - last_pause > 4.0:
+                    last_pause = now
+                    if menu_detector.is_pause_menu(capture.get_frame()):
+                        p0 = time.time()
+                        M.ensure_playing(capture, menu_detector, kb)
+                        time.sleep(0.2); t0 += time.time() - p0; continue
+
+                # Grab the latest background-OCR'd pose (O(1), no inline OCR).
+                # Tick the FSM once per FRESH pose (~11 Hz) so its look-deltas and
+                # tick-based timeouts run at perception cadence; fall back to a
+                # ~6 Hz forced tick during an F3-garble streak (no fresh pose) so
+                # scan/recovery + timeouts keep advancing.
+                f3info = f3w.latest()
+                ts = getattr(f3info, "timestamp", None) if f3info is not None else None
+                fresh = ts is not None and ts != last_ts
+                if not fresh and (now - last_tick) < 0.15:
+                    time.sleep(0.005); continue
+                last_ts = ts; last_tick = now
+
+                frame = capture.get_frame()
+                wf = wp.update(frame, f3info)
                 pose = wf.pose
                 ctx = SkillContext(pose=pose, world_map=wp.world_map,
                                    looking_at=wf.looking_at, hotbar=hotbar,
                                    px_per_deg=px_per_deg,
                                    dimension=getattr(pose, "dimension", None) if pose else None)
                 r = fsm.tick(ctx)
-                _dispatch(r.action)
+                _dispatch(r.action, apply_look=fresh)
                 if debug and (fsm._state != last):
                     print(f"[make]  gather: {fsm._state} chopped={fsm.chopped} "
                           f"logs={fsm.logs}/{qty} pos={getattr(pose,'x',None)},{getattr(pose,'z',None)} | {r.info}")
@@ -184,7 +212,6 @@ def main(argv=None) -> int:
                 # log actually lands in the inventory before we craft.
                 if r.status in (SkillStatus.DONE, SkillStatus.FAILED):
                     ended = r.status.value; break
-                time.sleep(0.08)
             _stop(); time.sleep(1.2)          # let auto-pickup settle
         finally:
             _stop()
@@ -199,7 +226,7 @@ def main(argv=None) -> int:
             menu_detector=menu_detector, reader=reader, hotbar=hotbar,
             inspector=inspector, actions=actions, gate=gate, cat=cat, assets=a,
             ui_scale=ui_scale, origin=origin, px_per_deg=px_per_deg,
-            memory=memory, debug=debug)
+            memory=memory, debug=debug, f3_worker=f3w)
 
     maker = Maker(ctl, crafter, memory, a, cat,
                   gather_fn=_gather, table_craft_fn=_table_craft, log=print)
@@ -216,6 +243,10 @@ def main(argv=None) -> int:
     finally:
         _stop()
         M.bot_stopped_banner(*result)
+        try:
+            f3w.stop()
+        except Exception:
+            pass
         try:
             if hasattr(mouse, "release_all"):
                 mouse.release_all()
