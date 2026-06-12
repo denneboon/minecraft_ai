@@ -39,7 +39,7 @@ class InventoryController:
     def __init__(self, mouse, keyboard, reader, hotbar, capture, *,
                  ui_scale: int = 2, container: str = "player_inventory",
                  settle: float = 0.16, window_origin: Tuple[int, int] = (0, 0),
-                 inspector=None):
+                 inspector=None, memory=None):
         self._m = mouse
         self._kb = keyboard
         self._reader = reader
@@ -55,6 +55,9 @@ class InventoryController:
         # it hovers slots the recogniser is unsure about and OCRs their
         # tooltip ids (and teaches the recogniser for next time).
         self._inspector = inspector
+        # Optional InventoryMemory: every read of the player inventory feeds it
+        # so the bot can later answer "do I have N of X?" without re-opening.
+        self._memory = memory
         self._rects = None                 # slot_name -> SlotRect (last read)
 
     # ── perception ───────────────────────────────────────────────────
@@ -89,6 +92,16 @@ class InventoryController:
                                              for v in res.values() if v.item_id)))
             except Exception as e:
                 print(f"[inv] hover-resolve failed: {e}")
+        # Feed the inventory ledger. A read of the player inventory sees every
+        # carried slot, so it's a COMPLETE observation; a container view
+        # (crafting table / chest) also shows the player inventory rows, so it
+        # too is complete for "what am I carrying". (The container's own slots
+        # don't start with inv_/hotbar_, so they're ignored by the ledger.)
+        if self._memory is not None and snap is not None:
+            try:
+                self._memory.observe(snap, complete=True)
+            except Exception:
+                pass
         return snap
 
     def _center(self, slot_name: str) -> Tuple[int, int]:

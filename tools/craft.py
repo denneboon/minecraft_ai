@@ -31,16 +31,26 @@ from vision.tooltip import build_tooltip_reader
 from agents.inventory_inspector import InventoryInspector, InspectorConfig
 from control.hotbar import build_hotbar_manager
 from control.inventory_control import InventoryController
-from agents.crafting import Crafter, inventory_counts
+from agents.crafting import Crafter
+from agents.inventory_memory import InventoryMemory
 from knowledge.catalog import Catalog
 from vision.mc_assets import MCAssets
 
 
 def main(argv=None) -> int:
     argv = argv if argv is not None else sys.argv[1:]
-    target = (argv[0] if argv else "oak_planks")
+    pos = [x for x in argv if not x.startswith("-")]
+    target = (pos[0] if pos else "oak_planks")
     if ":" not in target:
         target = "minecraft:" + target
+    # Optional AMOUNT: "craft oak_planks 8" -> ensure we hold >= 8, crafting
+    # only the shortfall (and not even opening if we already have enough).
+    want = 1
+    if len(pos) > 1:
+        try:
+            want = max(1, int(pos[1]))
+        except ValueError:
+            want = 1
 
     wins = _find_minecraft_hwnd()
     if not wins:
@@ -80,9 +90,13 @@ def main(argv=None) -> int:
     except Exception:
         origin = (0, 0)
     print(f"[craft] window origin (desktop top-left): {origin}")
+    # Shared inventory ledger: every read updates it, so the bot can tell it
+    # already has enough WITHOUT re-opening (and won't craft a pile for no
+    # reason). Lives in the controller so all reads here feed it.
+    memory = InventoryMemory()
     ctl = InventoryController(mouse, kb, reader, hotbar, capture,
                               ui_scale=ui_scale, window_origin=origin,
-                              inspector=inspector)
+                              inspector=inspector, memory=memory)
     crafter = Crafter(ctl, a, cat)
     menu_detector = M.build_menu_detector_default(settings)
 
@@ -91,33 +105,13 @@ def main(argv=None) -> int:
         # otherwise every inventory read/action would hit a frozen frame.
         if not M.ensure_playing(capture, menu_detector, kb):
             print("[craft] game is paused and won't resume — click into MC"); return 1
-        print(f"[craft] opening inventory (gui_scale={ui_scale}) — target {target}")
-        ctl.open_inventory()
-        if "--debug" in argv:
-            try:
-                import cv2
-                dbg = capture.get_frame()
-                cv2.imwrite(os.path.join(ROOT, "data", "_craft_debug.png"),
-                            dbg[:, :, ::-1])
-                print(f"[craft] frame {dbg.shape} saved to data/_craft_debug.png")
-            except Exception as e:
-                print(f"[craft] frame dump failed: {e}")
-        # Crafter does a SURGICAL read internally (hovers only until the
-        # recipe is plannable). We don't pre-read here, which would hover the
-        # whole inventory and defeat the point.
-        _static = lambda s: True                  # stop_when=True -> no hovers
-        if "--debug" in argv:
-            snap = ctl.read(stop_when=_static)     # static-only peek for debug
-            for nm, sc in sorted((getattr(snap, "slots", {}) or {}).items()):
-                if getattr(sc, "item", None):
-                    print(f"    {nm:12} {sc.item.split(':')[-1]:18} "
-                          f"conf={getattr(sc,'confidence',0):.2f}")
-        okc, msg = crafter.craft(target)
+        short = target.split(":")[-1]
+        print(f"[craft] ensure >={want} {short} (gui_scale={ui_scale})")
+        # Count-aware: skip entirely if we already hold enough, else open and
+        # craft ONLY the shortfall. ensure manages the inventory screen.
+        okc, msg = crafter.ensure(target, want, memory=memory)
         print(f"[craft] {'OK' if okc else 'FAIL'}: {msg}")
-        time.sleep(0.4)
-        after = inventory_counts(ctl.read(stop_when=_static))   # no-hover check
-        print(f"[craft] now have {target.split(':')[-1]}={after.get(target, 0)}")
-        ctl.close()
+        print(f"[craft] now have {short}={memory.count(target)} (wanted {want})")
         return 0 if okc else 1
     finally:
         try:

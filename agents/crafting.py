@@ -17,21 +17,11 @@ from typing import Dict, List, Optional, Tuple
 
 from knowledge.recipes import plan_step
 from control.inventory_control import grid_slot
+# inventory_counts lives in inventory_memory now (single source of truth for
+# "what am I carrying"); re-exported here so existing importers keep working.
+from agents.inventory_memory import inventory_counts
 
 _STORAGE_PREFIXES = ("inv_", "hotbar_")
-
-
-def inventory_counts(snap) -> Dict[str, int]:
-    """item id -> total count across the main inventory + hotbar."""
-    counts: Dict[str, int] = {}
-    for name, sc in (getattr(snap, "slots", {}) or {}).items():
-        if not name.startswith(_STORAGE_PREFIXES):
-            continue
-        item = getattr(sc, "item", None)
-        if not item:
-            continue
-        counts[item] = counts.get(item, 0) + max(1, int(getattr(sc, "count", 1) or 1))
-    return counts
 
 
 def find_item_slot(snap, item_id: str) -> Optional[str]:
@@ -104,3 +94,64 @@ class Crafter:
         self.ctl.take_result()
         self._clear_grid(width)
         return True, f"crafted {step.result_id.split(':')[-1]} x{step.result_count}"
+
+    def ensure(self, target_id: str, count: int = 1, *, memory=None,
+               manage_screen: bool = True) -> Tuple[bool, str]:
+        """Make sure the inventory holds at least ``count`` of ``target_id``,
+        crafting ONLY the shortfall — never a pile for no reason.
+
+        Cost-aware via ``memory`` (an :class:`InventoryMemory`):
+          1. If memory already shows >= ``count`` (incl. the hotbar), return
+             immediately WITHOUT opening the inventory.
+          2. Otherwise open + read the TRUE count (which also refreshes memory),
+             compute the deficit, and craft exactly that many — re-reading after
+             each craft so the count reflects what the game actually produced.
+
+        ``manage_screen`` opens/closes the inventory itself; set False if the
+        caller already has it open. Returns ``(ok, message)``."""
+        short = target_id.split(":")[-1]
+        if count <= 0:
+            return True, f"need 0 {short}"
+        # 1. Believe the memory if it's confident we already have enough.
+        if memory is not None and memory.assess(target_id, count)[0] == "have":
+            return True, (f"already have >={count} {short} "
+                          f"(remembered {memory.count(target_id)}; didn't open)")
+        # 2. Open + verify the real count before crafting anything.
+        opened = False
+        try:
+            if manage_screen:
+                self.ctl.open_inventory(); opened = True
+
+            def _read():
+                try:
+                    s = self.ctl.read(stop_when=lambda _s: False)  # full read
+                except TypeError:
+                    s = self.ctl.read()
+                if memory is not None:
+                    memory.observe(s)                # keep the ledger fresh
+                return s
+
+            snap = _read()
+            have = inventory_counts(snap).get(target_id, 0)
+            if have >= count:
+                return True, f"already have {have} {short}"
+            # 3. Craft the deficit, re-reading the true count after each craft.
+            safety = (count - have) + 6            # guard against a stuck loop
+            while have < count and safety > 0:
+                ok, msg = self.craft(target_id, snap=snap)
+                if not ok:
+                    return False, f"have {have}/{count} {short}: {msg}"
+                snap = _read()
+                new = inventory_counts(snap).get(target_id, 0)
+                if new <= have:                    # made no progress -> bail
+                    return False, (f"have {have}/{count} {short}: craft didn't "
+                                   f"increase the count ({msg})")
+                have = new
+                safety -= 1
+            return (have >= count), f"have {have}/{count} {short}"
+        finally:
+            if opened:
+                try:
+                    self.ctl.close()
+                except Exception:
+                    pass
