@@ -212,6 +212,36 @@ def test_mine_block(cat):
         if st in (SkillStatus.DONE, SkillStatus.FAILED): break
     (ok if st == SkillStatus.FAILED else bad)(f"aimed at sky -> bounded abandon ({st})")
 
+    # Busy-scene id-garble: F3 can't NAME the block (parse -> looking_at None)
+    # but its raw targeted POSITION is exactly our voxel. Trust position + the
+    # world-map's prior log classification and MINE (don't stall/abandon).
+    sk6 = MineBlock(vox, tool_role=None, is_target=LOG)
+    ctx6 = SkillContext(pose=_pose(yaw=yaw, pitch=pitch),
+                        looking_at=None, targeted_pos=vox)
+    mined6 = False
+    for _ in range(4):
+        if sk6.tick(ctx6).action.interact == "attack":
+            mined6 = True
+    (ok if mined6 else bad)("id unreadable but on-target by position -> mines")
+    ctx6.targeted_pos = (vox[0] + 1, vox[1], vox[2])   # crosshair fell through: log broke
+    st = None
+    for _ in range(6):
+        st = sk6.tick(ctx6).status
+        if st == SkillStatus.DONE: break
+    (ok if st == SkillStatus.DONE and sk6.broke else bad)(
+        f"position-mined log gone -> DONE + counted ({st}, broke={sk6.broke})")
+
+    # SAFETY: a READABLE non-log id at the target still abandons even though
+    # we're on it by position — ONLY an unreadable id trusts position, so the
+    # bot never breaks a (correctly-identified) build/terrain block.
+    sk7 = MineBlock(vox, tool_role=None, is_target=LOG)
+    ctx7 = SkillContext(pose=_pose(yaw=yaw, pitch=pitch),
+                        looking_at=SimpleNamespace(pos=vox, block_id="minecraft:dirt"),
+                        targeted_pos=vox)
+    r = sk7.tick(ctx7)
+    (ok if r.status == SkillStatus.FAILED and not sk7.broke else bad)(
+        f"readable non-log id on-target -> still abandon ({r.status})")
+
     # 3D reach: an out-of-reach (too-high) target -> abandon, never sits
     # clicking; a near one is reachable.
     from agents.skills import block_reach_distance

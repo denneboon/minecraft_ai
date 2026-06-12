@@ -581,9 +581,19 @@ class TreeChopAgent(BaseAgent):
         if pose is None:
             return _emit(_AA())                # wait for a pose this tick
         looking_at = world.looking_at if world is not None else None
+        # Raw targeted-block coords survive a garbled F3 id so MineBlock can
+        # confirm it's on the target log by POSITION when the id is unreadable.
+        tpos = None
+        f3 = getattr(state, "f3", None)
+        if f3 is not None and getattr(f3, "raw_text", None):
+            try:
+                from vision.world.f3_target import targeted_block_pos
+                tpos = targeted_block_pos(f3.raw_text.splitlines())
+            except Exception:
+                tpos = None
         ctx = SkillContext(pose=pose, world_map=self._wp.world_map,
-                           looking_at=looking_at, hotbar=self._hotbar,
-                           px_per_deg=self._px_per_deg,
+                           looking_at=looking_at, targeted_pos=tpos,
+                           hotbar=self._hotbar, px_per_deg=self._px_per_deg,
                            dimension=getattr(pose, "dimension", None))
 
         # Eat-when-hungry: pauses the FSM, stands still, and eats one item

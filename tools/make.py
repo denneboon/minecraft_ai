@@ -41,6 +41,7 @@ from agents.inventory_memory import InventoryMemory
 from agents.maker import Maker
 from agents.treechop import FindAndChopLogs, _full_movement
 from agents.skills import SkillContext, SkillStatus
+from vision.world.f3_target import targeted_block_pos
 from knowledge.catalog import Catalog
 from vision.mc_assets import MCAssets
 from tools.table_craft import run_table_craft
@@ -196,9 +197,18 @@ def main(argv=None) -> int:
                 frame = capture.get_frame()
                 wf = wp.update(frame, f3info)
                 pose = wf.pose
+                # Raw targeted-block coords — survive a garbled F3 id ('?' on
+                # busy forest scenes) so MineBlock can confirm it's aimed on the
+                # target log by POSITION even when the id is unreadable.
+                tpos = None
+                if f3info is not None and getattr(f3info, "raw_text", None):
+                    try:
+                        tpos = targeted_block_pos(f3info.raw_text.splitlines())
+                    except Exception:
+                        tpos = None
                 ctx = SkillContext(pose=pose, world_map=wp.world_map,
-                                   looking_at=wf.looking_at, hotbar=hotbar,
-                                   px_per_deg=px_per_deg,
+                                   looking_at=wf.looking_at, targeted_pos=tpos,
+                                   hotbar=hotbar, px_per_deg=px_per_deg,
                                    dimension=getattr(pose, "dimension", None) if pose else None)
                 r = fsm.tick(ctx)
                 _dispatch(r.action, apply_look=fresh)

@@ -411,6 +411,15 @@ class MineBlock(Skill):
         la_id = getattr(la, "block_id", None) if la is not None else None
         la_pos = tuple(la.pos) if (la is not None and getattr(la, "pos", None) is not None) else None
         on_target = (la_pos == tuple(self.voxel))
+        # Raw F3 targeted-block POSITION survives an UNREADABLE id. On busy
+        # forest scenes F3 reads "Targeted Block: x, y, z" cleanly but garbles
+        # the id to '?', so parse_looking_at_block returns None (it requires a
+        # valid id) and ctx.looking_at is None — losing the fact that the
+        # crosshair IS on our target. ctx.targeted_pos recovers just the coords,
+        # so we can still confirm we're aimed dead-on the voxel we set out to
+        # mine (which the world-map already classified as a log).
+        tpos = tuple(ctx.targeted_pos) if ctx.targeted_pos is not None else None
+        on_target_raw = (tpos == tuple(self.voxel))
 
         def _hold(info):                 # camera FROZEN (no look), click held
             self._mining_ticks += 1
@@ -420,7 +429,11 @@ class MineBlock(Skill):
 
         # ── MINING a log: frozen camera, hold click until the log is gone ──
         if self._mode == "mine_log":
-            if self._is_log(la_id):
+            # "Still on the log" = F3 names a log, OR the id is unreadable but
+            # the raw targeted position is still our exact voxel (the log
+            # hasn't broken — F3 just can't name it). When it breaks the
+            # crosshair falls through and the targeted position changes/clears.
+            if self._is_log(la_id) or (la_id is None and on_target_raw):
                 self._silent = 0
                 return _hold("mining log")
             self._silent += 1
@@ -480,6 +493,16 @@ class MineBlock(Skill):
         if self._is_log(la_id):
             self._mode = "mine_log"; self._silent = 0
             return _hold("log in crosshair -> mining")
+
+        # Id unreadable, but F3's raw POSITION confirms the crosshair is on the
+        # EXACT voxel we set out to mine (the world-map classified it a log, and
+        # the _Aimer has us pointed at it). Trust position + that prior
+        # classification and mine — otherwise busy-scene id-garble (F3 '?')
+        # makes the bot stare at a real log it can't "confirm" and abandon.
+        # A READABLE non-log id still abandons below, so builds stay safe.
+        if la_id is None and on_target_raw:
+            self._mode = "mine_log"; self._silent = 0
+            return _hold("on-target by position (id unreadable) -> mining")
 
         # Otherwise AIM toward the target voxel — the only state that moves.
         eye = _eye(ctx.pose)
