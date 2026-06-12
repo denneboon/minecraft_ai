@@ -172,24 +172,33 @@ class SampleStore:
         keep = _short_id(item_id)
         removed = 0
         with self._lock:
+            # 1. Write the correct-id copy FIRST, bypassing the per-item cap —
+            # a correction must never end up deleting the only copy because the
+            # right-id folder happened to be full.
+            keep_dir = self.root / keep
+            keep_dir.mkdir(parents=True, exist_ok=True)
+            keep_path = keep_dir / f"{h}.png"
+            if not keep_path.is_file():
+                cv2.imwrite(str(keep_path), cv2.cvtColor(norm, cv2.COLOR_RGB2BGR))
+            # 2. Purge the same crop from every OTHER id; only drop a folder we
+            # actually emptied (don't touch dirs we never modified).
             if self.root.is_dir():
                 for item_dir in self.root.iterdir():
                     if not item_dir.is_dir() or item_dir.name == keep:
                         continue
                     p = item_dir / f"{h}.png"
-                    if p.is_file():
-                        try:
-                            p.unlink(); removed += 1
-                        except OSError:
-                            pass
-                    # drop a now-empty folder so it doesn't linger at count 0
+                    if not p.is_file():
+                        continue
+                    try:
+                        p.unlink(); removed += 1
+                    except OSError:
+                        continue
                     try:
                         if not any(item_dir.glob("*.png")):
                             item_dir.rmdir()
                     except OSError:
                         pass
             self._write_manifest_unlocked()
-        self.save(item_id, crop_rgb)        # ensure the correct-id copy exists
         return removed
 
     # ------------------------------------------------------------------

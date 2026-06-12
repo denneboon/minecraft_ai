@@ -206,7 +206,13 @@ class FindAndChopLogs:
         pose = ctx.pose
         if pose is None:
             return SkillResult(AgentAction(), SkillStatus.BLOCKED, "no pose")
-        if self.goal_blocks is not None and self.logs >= self.goal_blocks:
+        # Goal reached -> DONE, BUT never while we're mid-COLLECT: the chop
+        # state increments self.logs the instant the block breaks and hands off
+        # to the 'collect' walk-over; firing DONE here would quit before the
+        # dropped item is picked up (so a single-log gather, goal_blocks=1,
+        # would break a log and end with EMPTY hands). Let collect finish first.
+        if (self.goal_blocks is not None and self.logs >= self.goal_blocks
+                and self._state != "collect"):
             return SkillResult(AgentAction(), SkillStatus.DONE,
                                f"goal reached: {self.logs} blocks gathered")
         if self.chopped >= self.max_logs:

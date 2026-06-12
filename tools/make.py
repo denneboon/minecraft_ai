@@ -148,8 +148,9 @@ def main(argv=None) -> int:
             while time.time() - t0 < budget:
                 frame = capture.get_frame()
                 if menu_detector is not None and menu_detector.is_pause_menu(frame):
+                    p0 = time.time()
                     M.ensure_playing(capture, menu_detector, kb)
-                    time.sleep(0.2); continue
+                    time.sleep(0.2); t0 += time.time() - p0; continue  # don't burn budget
                 if not gate.allow():              # focus lost -> pause, don't burn budget
                     _stop(); time.sleep(0.2); t0 += 0.2; continue
                 wf = wp.update(frame, f3.read(frame))
