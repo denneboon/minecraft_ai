@@ -202,23 +202,15 @@ def main(argv=None) -> int:
     try:
         ctrl_ok, reason = M.ensure_controllable(capture, menu_detector, kb, gate)
         if not ctrl_ok:
-            print("\n" + "#" * 60)
-            print(f"#  CANNOT START — {reason}")
-            print("#" * 60 + "\n")
+            M.bot_cannot_start_banner(reason)
             return 1
-        print("\n" + "=" * 60)
-        print(f"=  ▶ BOT RUNNING — controlling Minecraft. Do NOT click away.")
-        print(f"=    making {count}x {target.split(':')[-1]} (panic stop: Ctrl+Shift+F12)")
-        print("=" * 60 + "\n")
+        M.bot_running_banner(f"making {count}x {target.split(':')[-1]}")
         ok, msg = maker.make(target, count)
         result = ("SUCCESS" if ok else "FAILED", msg)
         return 0 if ok else 1
     finally:
         _stop()
-        print("\n" + "=" * 60)
-        print(f"=  ■ BOT STOPPED ({result[0]}) — {result[1]}")
-        print(f"=    Minecraft is yours again; safe to use your computer.")
-        print("=" * 60 + "\n")
+        M.bot_stopped_banner(*result)
         try:
             if hasattr(mouse, "release_all"):
                 mouse.release_all()

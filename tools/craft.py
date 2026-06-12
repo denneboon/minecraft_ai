@@ -100,21 +100,23 @@ def main(argv=None) -> int:
     crafter = Crafter(ctl, a, cat)
     menu_detector = M.build_menu_detector_default(settings)
 
+    result = ("FAILED", "did not start")
     try:
         # Make sure MC is focused + in gameplay (else input is gated and the
         # capture shows a stale/background frame — every action silently dropped).
         ctrl_ok, reason = M.ensure_controllable(capture, menu_detector, kb, gate)
         if not ctrl_ok:
-            print(f"[craft] CANNOT RUN: {reason}"); return 1
+            M.bot_cannot_start_banner(reason); return 1
         short = target.split(":")[-1]
-        print(f"[craft] ensure >={want} {short} (gui_scale={ui_scale})")
+        M.bot_running_banner(f"ensure {want}x {short}")
         # Count-aware: skip entirely if we already hold enough, else open and
         # craft ONLY the shortfall. ensure manages the inventory screen.
         okc, msg = crafter.ensure(target, want, memory=memory)
-        print(f"[craft] {'OK' if okc else 'FAIL'}: {msg}")
-        print(f"[craft] now have {short}={memory.count(target)} (wanted {want})")
+        result = ("SUCCESS" if okc else "FAILED",
+                  f"{msg}; now have {short}={memory.count(target)} (wanted {want})")
         return 0 if okc else 1
     finally:
+        M.bot_stopped_banner(*result)
         try:
             if hasattr(mouse, "release_all"):
                 mouse.release_all()

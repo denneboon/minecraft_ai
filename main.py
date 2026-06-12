@@ -387,6 +387,30 @@ def ensure_playing(capture, menu_detector, keyboard, *,
         return True
 
 
+def bot_running_banner(text: str) -> None:
+    """Prominent 'the bot is now driving Minecraft' banner so the owner always
+    knows when control is active (and not to click away)."""
+    print("\n" + "=" * 60)
+    print("=  ▶ BOT RUNNING — controlling Minecraft. Do NOT click away.")
+    print(f"=    {text}   (panic stop: Ctrl+Shift+F12)")
+    print("=" * 60 + "\n")
+
+
+def bot_stopped_banner(result: str, text: str) -> None:
+    """Prominent 'the bot is done' banner so the owner knows it's safe to use
+    the computer again."""
+    print("\n" + "=" * 60)
+    print(f"=  ■ BOT STOPPED ({result}) — {text}")
+    print("=    Minecraft is yours again; safe to use your computer.")
+    print("=" * 60 + "\n")
+
+
+def bot_cannot_start_banner(reason: str) -> None:
+    print("\n" + "#" * 60)
+    print(f"#  CANNOT START — {reason}")
+    print("#" * 60 + "\n")
+
+
 def ensure_controllable(capture, menu_detector, keyboard, gate, *,
                         activate: bool = True, focus_timeout: float = 2.5):
     """Make sure the bot can actually SEE and CONTROL Minecraft before a run.

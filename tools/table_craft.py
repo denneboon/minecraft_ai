@@ -283,18 +283,21 @@ def main(argv=None) -> int:
         sample_store=getattr(reader, "sample_store", None),
         config=InspectorConfig(max_resolutions_per_call=24))
     actions = ActionWrapper(kb, mouse, gate=gate)
+    result = ("FAILED", "did not start")
     try:
         ctrl_ok, reason = M.ensure_controllable(capture, menu_detector, kb, gate)
         if not ctrl_ok:
-            print(f"[table] CANNOT RUN: {reason}"); return 1
+            M.bot_cannot_start_banner(reason); return 1
+        M.bot_running_banner(f"table-craft {target.split(':')[-1]}")
         ok, msg = run_table_craft(
             target, capture=capture, mouse=mouse, kb=kb, f3=f3, wp=wp,
             menu_detector=menu_detector, reader=reader, hotbar=hotbar,
             inspector=inspector, actions=actions, gate=gate, cat=cat, assets=a,
             ui_scale=ui_scale, origin=origin, px_per_deg=px_per_deg, debug=debug)
-        print(f"[table] {'OK' if ok else 'FAIL'}: {msg}")
+        result = ("SUCCESS" if ok else "FAILED", msg)
         return 0 if ok else 1
     finally:
+        M.bot_stopped_banner(*result)
         try:
             actions.set_attack(False); actions.release_all_movement()
         except Exception:
