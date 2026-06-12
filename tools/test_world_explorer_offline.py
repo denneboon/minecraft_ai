@@ -53,7 +53,14 @@ def _settings() -> dict:
     """Load real settings.yaml so the test exercises the production
     config the live agent will actually use."""
     with open(ROOT / "config" / "settings.yaml", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+        settings = yaml.safe_load(f) or {}
+    # These sub-tests exercise the COMMIT/EXPLORE pipeline, not the
+    # multi-frame + crosshair-ray confirmation gates (those are covered by
+    # test_world_perception's confirm_gate). Disable them here so a single
+    # synthetic read commits as the pipeline assertions expect.
+    settings.setdefault("vision", {}).setdefault("world", {}).update(
+        {"min_confirm_reads": 1, "ray_consistency_max_dist": 0.0})
+    return settings
 
 
 def _build_agent_sandboxed(settings: dict) -> WorldExplorerAgent:
@@ -190,17 +197,18 @@ def test_perception_commit_and_log() -> None:
     frame = _frame()
 
     # Capture stdout to verify the [F3] dump and [perception] LOGGED prints.
+    # The target (5,64,10) must lie ON the crosshair ray (the bot stands at
+    # x=5.5,z=7.5 looking straight +Z at it) and be read on >=2 fresh frames
+    # — both required now by the multi-frame + ray confirmation gates.
     buf = io.StringIO()
     with redirect_stdout(buf):
-        # First update: F3 sees "Looking at: dirt @ (5, 64, 10)".
-        # We discard the returned WorldFrame — the assertions below
-        # work off the captured stdout + world_map state.
-        wp.update(frame, _f3(
-            x=4.5, y=63.0, z=10.5, yaw=0.0, pitch=10.0,
-            looking_at_id="minecraft:dirt",
-            looking_at_pos=(5, 64, 10),
-            timestamp=1.0,
-        ))
+        for ts in (1.0, 2.0):
+            wp.update(frame, _f3(
+                x=5.5, y=63.0, z=7.5, yaw=0.0, pitch=0.0,
+                looking_at_id="minecraft:dirt",
+                looking_at_pos=(5, 64, 10),
+                timestamp=ts,
+            ))
     out = buf.getvalue()
 
     if "[F3] tick=" not in out:
@@ -213,29 +221,31 @@ def test_perception_commit_and_log() -> None:
     _ok("F3 dump line present")
     _ok("LOGGED heartbeat present")
 
-    # Second update at same voxel: should NOT spam another LOG line.
+    # Another read of the SAME voxel: already confirmed -> must NOT re-LOG.
     buf2 = io.StringIO()
     with redirect_stdout(buf2):
         wp.update(frame, _f3(
-            x=4.5, y=63.0, z=10.5, yaw=1.0, pitch=10.0,
+            x=5.5, y=63.0, z=7.5, yaw=0.0, pitch=0.0,
             looking_at_id="minecraft:dirt",
             looking_at_pos=(5, 64, 10),
-            timestamp=2.0,
+            timestamp=3.0,
         ))
     out2 = buf2.getvalue()
     if "LOGGED" in out2:
         _fail(f"LOGGED fired twice for the same voxel.  out:\n{out2!r}")
     _ok("repeat confirmation of same voxel does NOT re-log")
 
-    # Third update at a new voxel: should LOG.
+    # A NEW voxel (stone at (5,63,11)) on the crosshair ray, read on 2 fresh
+    # frames -> confirms + LOGs.
     buf3 = io.StringIO()
     with redirect_stdout(buf3):
-        wp.update(frame, _f3(
-            x=4.5, y=63.0, z=11.5, yaw=2.0, pitch=10.0,
-            looking_at_id="minecraft:stone",
-            looking_at_pos=(5, 63, 11),
-            timestamp=3.0,
-        ))
+        for ts in (4.0, 5.0):
+            wp.update(frame, _f3(
+                x=5.5, y=63.0, z=9.0, yaw=0.0, pitch=24.0,
+                looking_at_id="minecraft:stone",
+                looking_at_pos=(5, 63, 11),
+                timestamp=ts,
+            ))
     out3 = buf3.getvalue()
     if "LOGGED stone @ (5, 63, 11)" not in out3:
         _fail(f"second voxel did not LOG.  out:\n{out3!r}")

@@ -117,7 +117,7 @@ class WorldPerceptionConfig:
     patch_grid_size: Tuple[int, int] = (24, 14)
 
     # Each patch is this many pixels (square) sampled from the frame.
-    # Smaller → faster + noisier; larger → slower + more representative.
+    # Smaller -> faster + noisier; larger -> slower + more representative.
     # Only used as a fallback when distance_normalized_crops is off or no
     # depth is known.
     patch_size_px: int = 16
@@ -618,7 +618,7 @@ class WorldPerception:
         self._tick += 1
         wf = WorldFrame(tick=self._tick, world_map=self.world_map)
 
-        # Weather recognition — independent of pose (works in a cave →
+        # Weather recognition — independent of pose (works in a cave ->
         # "unknown", or outdoors with F3 off). THROTTLED: weather changes
         # over minutes, so we re-check only every
         # ``weather_check_interval_sec`` and hold the verdict in between.
@@ -921,7 +921,7 @@ class WorldPerception:
                     # Real-time log so we can SEE the agent
                     # self-correcting during a run.
                     print(f"[perception] CORRECTION at {la.pos}: "
-                          f"{prev.source} said {prev.block_id} → F3 says "
+                          f"{prev.source} said {prev.block_id} -> F3 says "
                           f"{la.block_id}")
 
                 if confirmed:
@@ -1066,7 +1066,7 @@ class WorldPerception:
                         "block_light": getattr(f3, "block_light", None),
                     }
                     # F3-read-quality gate: a heavily-garbled panel can yield a
-                    # WRONG-but-valid id (grass→"sand", night→"stone"), which
+                    # WRONG-but-valid id (grass->"sand", night->"stone"), which
                     # would save a mislabelled sample and poison that class. The
                     # map commit above already happened; only the TRAINING
                     # capture is gated. (Verified failure: a forest --walk that
@@ -1091,7 +1091,7 @@ class WorldPerception:
                             metadata=metadata,
                         )
 
-        # 1b. NO targeted block this frame → if pose was fresh AND
+        # 1b. NO targeted block this frame -> if pose was fresh AND
         # the F3 panel didn't have a Targeted-Block line at all (NOT
         # a rejected-as-garbage one), MC's raytrace went the full
         # block_interaction_range and hit nothing. Every voxel along
@@ -2463,7 +2463,8 @@ def build_world_perception(settings: Optional[Dict[str, Any]] = None,
                 "expand_max_voxels_per_tick",
                 "inverse_validate_max_per_tick",
                 "crosshair_arm_half_len_gui",
-                "crosshair_arm_half_thick_gui"):
+                "crosshair_arm_half_thick_gui",
+                "confirm_window", "min_confirm_reads"):
         if key in world_cfg:
             setattr(cfg, key, int(world_cfg[key]))
     # ui_scale lives at top-level capture.* in settings.yaml — pull
@@ -2481,6 +2482,8 @@ def build_world_perception(settings: Optional[Dict[str, Any]] = None,
                 "expand_score_min",
                 "perception_time_budget_ms",
                 "weather_check_interval_sec",
+                "ray_consistency_max_dist", "max_sample_garble_ratio",
+                "occlusion_max_overlap",
                 "inverse_validate_score_min"):
         if key in world_cfg:
             setattr(cfg, key, float(world_cfg[key]))
