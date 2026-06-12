@@ -110,7 +110,10 @@ def main(argv=None) -> int:
             kb.tap(str(action.hotbar))
         if action.look_dx or action.look_dy:
             try:
-                mouse.track_target(int(action.look_dx), int(action.look_dy))
+                # INSTANT relative move (not eased track_target): the treechop
+                # FSM expects its per-tick look correction to land immediately,
+                # else it lags and ends up aimed at a distant log it can't reach.
+                mouse.move(int(action.look_dx), int(action.look_dy))
             except Exception:
                 pass
         if action.interact == "use_item":
@@ -136,16 +139,19 @@ def main(argv=None) -> int:
         if not is_log(item_id):
             print(f"[make] can't gather {item_id.split(':')[-1]} (only logs)")
             return False
-        fsm = FindAndChopLogs(is_log=is_log, reach=3.5, max_logs=max(1, qty),
+        fsm = FindAndChopLogs(is_log=is_log, reach=3.5, max_logs=max(3, qty + 2),
                               goal_blocks=qty, tool_role="axe",
                               is_breakable=is_breakable)
-        t0 = time.time(); last = None
+        budget = 90.0 + 90.0 * qty            # generous: walk to + chop each log
+        t0 = time.time(); last = None; ended = "timeout"
         try:
-            while time.time() - t0 < 12.0 + 25.0 * qty:    # budget scales w/ qty
+            while time.time() - t0 < budget:
                 frame = capture.get_frame()
                 if menu_detector is not None and menu_detector.is_pause_menu(frame):
                     M.ensure_playing(capture, menu_detector, kb)
                     time.sleep(0.2); continue
+                if not gate.allow():              # focus lost -> pause, don't burn budget
+                    _stop(); time.sleep(0.2); t0 += 0.2; continue
                 wf = wp.update(frame, f3.read(frame))
                 pose = wf.pose
                 ctx = SkillContext(pose=pose, world_map=wp.world_map,
@@ -154,18 +160,23 @@ def main(argv=None) -> int:
                                    dimension=getattr(pose, "dimension", None) if pose else None)
                 r = fsm.tick(ctx)
                 _dispatch(r.action)
-                if debug and fsm._state != last:
+                if debug and (fsm._state != last):
                     print(f"[make]  gather: {fsm._state} chopped={fsm.chopped} "
-                          f"logs={fsm.logs}/{qty} | {r.info}")
+                          f"logs={fsm.logs}/{qty} pos={getattr(pose,'x',None)},{getattr(pose,'z',None)} | {r.info}")
                     last = fsm._state
+                # NB: do NOT stop the instant the block breaks — the FSM still
+                # has to WALK OVER the dropped item to collect it (its 'collect'
+                # state). Let it run to DONE (which is after collection), so the
+                # log actually lands in the inventory before we craft.
                 if r.status in (SkillStatus.DONE, SkillStatus.FAILED):
-                    break
-                time.sleep(0.1)
+                    ended = r.status.value; break
+                time.sleep(0.08)
+            _stop(); time.sleep(1.2)          # let auto-pickup settle
         finally:
             _stop()
         got = fsm.logs >= qty
         print(f"[make] gather {item_id.split(':')[-1]}: chopped {fsm.logs}/{qty} "
-              f"({'enough' if got else 'short'})")
+              f"({'enough' if got else 'short'}; ended={ended})")
         return got
 
     def _table_craft(tgt):

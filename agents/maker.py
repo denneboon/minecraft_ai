@@ -55,13 +55,20 @@ class Maker:
         return inventory_counts(snap)
 
     # ------------------------------------------------------------------
-    def make(self, target_id: str, count: int = 1) -> Tuple[bool, str]:
-        """Make ``count`` of ``target_id`` from scratch. Returns (ok, message)."""
+    def make(self, target_id: str, count: int = 1, *, max_rounds: int = 5
+             ) -> Tuple[bool, str]:
+        """Make ``count`` of ``target_id`` from scratch. Returns (ok, message).
+
+        Round-based so it stays robust to reality: each round RE-READS and
+        RE-PLANS, gathers any raw shortfall (then re-plans — important because
+        the species-agnostic gatherer may bring back birch when we'd pencilled
+        in oak), and runs the craft chain. Re-planning means the steps always
+        match what's actually on hand."""
         short = target_id.split(":")[-1]
         if count <= 0:
             return True, f"need 0 {short}"
 
-        # 0. Already have enough? (cheap HUD glance + ledger, no full open.)
+        # Cheap HUD glance + ledger first — skip everything if already stocked.
         try:
             if hasattr(self.ctl, "read_hotbar"):
                 self.ctl.read_hotbar()
@@ -70,52 +77,69 @@ class Maker:
         if self.memory.assess(target_id, count)[0] == "have":
             return True, f"already have >={count} {short}"
 
-        # 1. Accurate read + plan from what's truly on hand.
-        avail = self._read_counts()
-        if avail.get(target_id, 0) >= count:
-            return True, f"already have {avail.get(target_id, 0)} {short}"
-        plan = plan_make(target_id, count, avail, self.assets, self.cat)
-        if plan is None:
-            return False, f"no crafting recipe for {short}"
-        raw, steps = plan
-        raw_summary = ", ".join(f"{k.split(':')[-1]}:{v}" for k, v in raw.items()) or "-"
-        self.log(f"[make] {short}: gather [{raw_summary}], {len(steps)} craft step(s)")
+        last_msg = "no progress"
+        for rnd in range(max_rounds):
+            avail = self._read_counts()
+            if avail.get(target_id, 0) >= count:
+                return True, f"have {avail.get(target_id, 0)}/{count} {short}"
+            plan = plan_make(target_id, count, avail, self.assets, self.cat)
+            if plan is None:
+                return False, f"no crafting recipe for {short}"
+            raw, steps = plan
+            raw_summary = ", ".join(f"{k.split(':')[-1]}:{v}" for k, v in raw.items()) or "-"
+            self.log(f"[make] round {rnd+1}: have-target=0, gather [{raw_summary}], "
+                     f"{len(steps)} craft step(s)")
 
-        # 2. Gather raw materials (logs, …) — only the shortfall.
-        for item, qty in raw.items():
-            if self.gather_fn is None:
-                return False, f"need {qty} {item.split(':')[-1]} but no gather capability"
-            self.log(f"[make] gather {qty} {item.split(':')[-1]}")
-            if not self.gather_fn(item, qty):
-                return False, f"couldn't gather {qty} {item.split(':')[-1]}"
+            # Gather any raw shortfall, then RE-PLAN (loop) from the result.
+            if raw:
+                if self.gather_fn is None:
+                    return False, f"need {raw_summary} but no gather capability"
+                progressed = False
+                for item, qty in raw.items():
+                    self.log(f"[make] gather {qty} {item.split(':')[-1]}")
+                    if self.gather_fn(item, qty):
+                        progressed = True
+                if not progressed:
+                    return False, f"couldn't gather [{raw_summary}]"
+                continue                                  # re-read + re-plan
 
-        # 3. Run the craft steps in order: batch consecutive 2x2 crafts inside
-        # one open inventory; hand each 3x3 step to the table-craft callback.
-        i = 0
-        while i < len(steps):
-            if steps[i].needs_table:
-                if self.table_craft_fn is None:
-                    return False, "a 3x3 recipe needs a table but no table-craft capability"
-                res = steps[i].result_id
-                self.log(f"[make] table-craft {res.split(':')[-1]}")
-                ok, msg = self.table_craft_fn(res)
-                if not ok:
-                    return False, f"table-craft {res.split(':')[-1]}: {msg}"
-                i += 1
-            else:
-                self.ctl.open_inventory()
-                try:
-                    while i < len(steps) and not steps[i].needs_table:
-                        res = steps[i].result_id
-                        ok, msg = self.crafter.craft(res)
-                        self.log(f"[make] craft {res.split(':')[-1]}: {'OK' if ok else 'FAIL'} ({msg})")
-                        if not ok:
-                            return False, f"craft {res.split(':')[-1]}: {msg}"
-                        i += 1
-                finally:
-                    self.ctl.close()
+            # No raw needed -> run the craft chain (2x2 batched; 3x3 via table).
+            i = 0
+            crafted_ok = True
+            while i < len(steps):
+                if steps[i].needs_table:
+                    if self.table_craft_fn is None:
+                        return False, "a 3x3 recipe needs a table but no table-craft capability"
+                    res = steps[i].result_id
+                    self.log(f"[make] table-craft {res.split(':')[-1]}")
+                    ok, msg = self.table_craft_fn(res)
+                    last_msg = msg
+                    if not ok:
+                        crafted_ok = False
+                        self.log(f"[make] table-craft {res.split(':')[-1]} failed: {msg}")
+                        break
+                    i += 1
+                else:
+                    self.ctl.open_inventory()
+                    try:
+                        while i < len(steps) and not steps[i].needs_table:
+                            res = steps[i].result_id
+                            ok, msg = self.crafter.craft(res)
+                            last_msg = msg
+                            self.log(f"[make] craft {res.split(':')[-1]}: "
+                                     f"{'OK' if ok else 'FAIL'} ({msg})")
+                            if not ok:
+                                crafted_ok = False
+                                break
+                            i += 1
+                    finally:
+                        self.ctl.close()
+                    if not crafted_ok:
+                        break
+            if not crafted_ok:
+                return False, f"craft step failed: {last_msg}"
+            # loop: re-read to verify / continue any remaining chain
 
-        # 4. Verify.
         avail = self._read_counts()
         have = avail.get(target_id, 0)
-        return (have >= count), f"have {have}/{count} {short}"
+        return (have >= count), f"have {have}/{count} {short} after {max_rounds} rounds ({last_msg})"
