@@ -101,6 +101,12 @@ class F3Info:
     block_y:     Optional[int]   = None
     block_z:     Optional[int]   = None
     section_rel: Optional[Tuple[int, int, int]] = None
+    # Present only when the FULL F3 screen is open (biome/light are "In
+    # Overlay"): the bot opens F3 occasionally to read this slow-changing
+    # context. None when F3 is closed (the minimal persistent overlay).
+    biome:       Optional[str]   = None
+    sky_light:   Optional[int]   = None
+    block_light: Optional[int]   = None
     timestamp:   float = field(default_factory=time.perf_counter)
     raw_text:    str   = ""
     backend:     str   = "glyph"   # "glyph" or "tesseract"
@@ -238,6 +244,11 @@ _RE_FACING    = re.compile(r'facing[:\s]+(north|south|east|west)\b', re.IGNORECA
 _RE_ANGLES    = re.compile(
     r'(-?\d+\.\d+)[^\d-]{1,6}(-?\d+\.\d+)'
 )
+# Biome (full F3 screen only): "Biome: minecraft:forest"
+_RE_BIOME     = re.compile(r'biome[:\s]+(?:minecraft:)?([a-z_]+)', re.IGNORECASE)
+# "Client Light: 15 (15 sky, 0 block)" -> sky, block
+_RE_LIGHT     = re.compile(r'light[:\s].*?(\d+)\s*sky[,\s]+(\d+)\s*block',
+                           re.IGNORECASE)
 
 _Y_MIN, _Y_MAX = -64, 320
 _XZ_LIMIT      = 30_000_000
@@ -420,6 +431,22 @@ def _parse_lines(lines: List[str]) -> F3Info:
             if mfps:
                 try:
                     info.fps = int(mfps.group(1))
+                except ValueError:
+                    pass
+
+        # Biome (only when the full F3 screen is open): "Biome: minecraft:forest"
+        if info.biome is None:
+            mb = _RE_BIOME.search(line)
+            if mb:
+                info.biome = f"minecraft:{mb.group(1)}"
+
+        # Client Light: "Client Light: 15 (15 sky, 0 block)"
+        if info.sky_light is None:
+            ml = _RE_LIGHT.search(line)
+            if ml:
+                try:
+                    info.sky_light = int(ml.group(1))
+                    info.block_light = int(ml.group(2))
                 except ValueError:
                     pass
 

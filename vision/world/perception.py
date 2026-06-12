@@ -98,6 +98,11 @@ class WorldPerceptionConfig:
 
     # Horizontal FOV in degrees (must match what MC is rendering).
     h_fov_deg: float = 90.0
+    # Whether MC's dynamic FOV effects (sprint/speed widen the FOV) are ON.
+    # The user's minecraft.yaml has them OFF (fov_effects: false) -> FOV is
+    # CONSTANT, so crop scale never shifts and the recogniser stays
+    # self-consistent. When True, set_sprinting() widens the effective FOV.
+    fov_effects: bool = False
 
     # GUI scale the user is running MC at. Used to size the crosshair
     # mask (vanilla crosshair is 15 GUI px regardless of resolution).
@@ -505,6 +510,7 @@ class WorldPerception:
         self._held_item: Optional[str] = None
         self._offhand_item: Optional[str] = None
         self._occlusion_skips = 0
+        self._sprinting = False
         # Per-voxel temporal vote smoother for vision-patch guesses. When
         # the agent looks at the same voxel across frames, voting over the
         # independent guesses is a free ensemble — far more stable than any
@@ -1032,6 +1038,32 @@ class WorldPerception:
                         "weather": (self._last_weather.state
                                     if self._last_weather is not None else None),
                         "source": "f3_looking_at",
+                        # ── Rich context for the recogniser ──────────────
+                        # Which face we're looking at (top/side/bottom look
+                        # very different — grass_block top is green, side is
+                        # dirt+green strip).
+                        "face": self._hit_face(eye, la.pos),
+                        # Day/night proxy: mean brightness of the sky band
+                        # (no F3 needed). The same block looks very different
+                        # lit vs at dusk.
+                        "sky_brightness": self._sky_brightness(frame_rgb),
+                        # Confirmed neighbours (blocks cluster — a trunk is
+                        # logs, ground is grass/dirt) + whether it's a surface
+                        # block (air directly above).
+                        "neighbors": self._confirmed_neighbors(la.pos, pose.dimension),
+                        "is_surface": self._is_surface(la.pos, pose.dimension),
+                        # What the player is holding (the model learns to
+                        # ignore arm/item pixels) + the camera FOV the crop
+                        # was framed at (constant while fov_effects is off).
+                        "held_item": self._held_item,
+                        "offhand_item": self._offhand_item,
+                        "h_fov_deg": self._effective_fov(),
+                        # Biome + light — present only when the bot has the
+                        # full F3 screen open (they're "In Overlay"); None
+                        # otherwise. Slow-changing, so read occasionally.
+                        "biome": getattr(f3, "biome", None),
+                        "sky_light": getattr(f3, "sky_light", None),
+                        "block_light": getattr(f3, "block_light", None),
                     }
                     # F3-read-quality gate: a heavily-garbled panel can yield a
                     # WRONG-but-valid id (grass→"sand", night→"stone"), which
@@ -1637,6 +1669,73 @@ class WorldPerception:
         occludes the bottom-right even when ``main_hand`` is None."""
         self._held_item = main_hand
         self._offhand_item = off_hand
+
+    def set_sprinting(self, sprinting: bool) -> None:
+        """Agent reports sprint state. Only widens the effective FOV when MC's
+        fov_effects are ON (the user has them OFF -> no-op), so crop scale
+        stays constant."""
+        self._sprinting = bool(sprinting)
+
+    def _effective_fov(self) -> float:
+        f = float(self.cfg.h_fov_deg)
+        if self.cfg.fov_effects and self._sprinting:
+            f *= 1.15            # MC sprint widens FOV ~15% (when effects on)
+        return round(f, 2)
+
+    @staticmethod
+    def _hit_face(eye, voxel) -> str:
+        """Which face of ``voxel`` the eye->centre ray enters — the visible
+        face (top/bottom/N/S/E/W). Blocks look very different per face."""
+        dx = (voxel[0] + 0.5) - eye[0]
+        dy = (voxel[1] + 0.5) - eye[1]
+        dz = (voxel[2] + 0.5) - eye[2]
+        ax, ay, az = abs(dx), abs(dy), abs(dz)
+        if ay >= ax and ay >= az:
+            return "top" if dy < 0 else "bottom"
+        if ax >= az:
+            return "east" if dx < 0 else "west"
+        return "north" if dz < 0 else "south"
+
+    @staticmethod
+    def _sky_brightness(frame_rgb) -> int:
+        """Mean brightness of the top sky band — a day/night proxy needing no
+        F3. Same block, very different appearance lit vs at dusk."""
+        if frame_rgb is None or getattr(frame_rgb, "size", 0) == 0:
+            return -1
+        h = frame_rgb.shape[0]
+        return int(frame_rgb[: max(1, h // 8), :, :].mean())
+
+    def _confirmed_neighbors(self, voxel, dimension):
+        """The 6 axis-neighbours' CONFIRMED (looking_at-sourced) block ids, or
+        None where unknown/unconfirmed. Spatial prior: blocks cluster."""
+        out = {}
+        if self.world_map is None:
+            return out
+        x, y, z = voxel
+        for k, v in (("px", (x + 1, y, z)), ("nx", (x - 1, y, z)),
+                     ("py", (x, y + 1, z)), ("ny", (x, y - 1, z)),
+                     ("pz", (x, y, z + 1)), ("nz", (x, y, z - 1))):
+            try:
+                obs = self.world_map.get_block(v, dimension=dimension)
+            except TypeError:
+                obs = self.world_map.get_block(v)
+            out[k] = (obs.block_id if (obs is not None
+                      and getattr(obs, "source", None) == "looking_at") else None)
+        return out
+
+    def _is_surface(self, voxel, dimension):
+        """True if the block directly ABOVE is confirmed air (surface block),
+        False if confirmed solid, None if unknown."""
+        if self.world_map is None:
+            return None
+        try:
+            obs = self.world_map.get_block((voxel[0], voxel[1] + 1, voxel[2]),
+                                           dimension=dimension)
+        except TypeError:
+            obs = self.world_map.get_block((voxel[0], voxel[1] + 1, voxel[2]))
+        if obs is None or getattr(obs, "block_id", None) is None:
+            return None
+        return obs.block_id == "minecraft:air"
 
     def _crop_occluded(self, cx: float, cy: float, cap_px: float,
                        h: int, w: int) -> bool:
