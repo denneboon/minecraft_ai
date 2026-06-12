@@ -203,7 +203,15 @@ class WorldFrame:
 
     tick: int
     pose: Optional[PlayerPose] = None
+    # RAW single-frame F3 read — responsive, but a one-frame OCR slip can
+    # name the wrong block. Use for immediate agent actions (aiming/chopping)
+    # where a misread is a safe no-op.
     looking_at: Optional[LookingAtBlock] = None
+    # CONFIRMED read — only set once the same id passed multi-frame agreement
+    # + crosshair-ray geometry + the catalog/garble gates. This is the
+    # ground-truth signal the CONFIRMED map and training labels use; it never
+    # emits a stray id from a transient garble.
+    looking_at_confirmed: Optional[LookingAtBlock] = None
     visible_blocks: List[BlockObservation] = field(default_factory=list)
     visible_entities: List[EntityObservation] = field(default_factory=list)
     visible_drops: List[ItemDropObservation] = field(default_factory=list)

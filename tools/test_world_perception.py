@@ -744,6 +744,36 @@ def test_garble_sample_gate() -> bool:
     return ok1 and ok2 and ok3
 
 
+def test_multiframe_confirm_gate() -> bool:
+    """The confirmed map + training labels are gated by multi-frame agreement
+    + crosshair-ray geometry: a one-frame OCR slip ("sandstone" amid a run of
+    oak_log) and an off-crosshair coord misread NEVER reach ground truth."""
+    print("\n[20c] Multi-frame + ray confirmation gate")
+    from types import SimpleNamespace
+    from vision.world.perception import WorldPerception, WorldPerceptionConfig
+    from vision.world.map import WorldMap
+    from vision.world.screen_ray import ScreenRay, CameraIntrinsics
+    from vision.world.types import LookingAtBlock
+    cfg = WorldPerceptionConfig()
+    cfg.confirm_window = 5; cfg.min_confirm_reads = 2
+    wp = WorldPerception(config=cfg, world_map=WorldMap())
+    wp._screen_ray = ScreenRay(CameraIntrinsics(960, 540, 70.0))
+    pose = SimpleNamespace(x=0.5, y=64.0, z=0.5, eye_y=65.62, yaw=0.0,
+                           pitch=0.0, dimension="minecraft:overworld")
+    eye = (0.5, 65.62, 0.5)
+    la = lambda b, v: LookingAtBlock(block_id=b, pos=v, face=None, confidence=1.0)
+    vox = (0, 65, 3)                          # on the +Z crosshair ray
+    c1 = wp._confirm_looking_at(la("minecraft:oak_log", vox), pose, eye)
+    c2 = wp._confirm_looking_at(la("minecraft:oak_log", vox), pose, eye)
+    out = wp._confirm_looking_at(la("minecraft:sandstone", vox), pose, eye)
+    off = wp._confirm_looking_at(la("minecraft:oak_log", (8, 65, 3)), pose, eye)
+    (_ok if not c1 else _fail)("1st read is NOT yet confirmed (needs agreement)")
+    (_ok if c2 else _fail)("2nd matching read IS confirmed")
+    (_ok if not out else _fail)("transient 'sandstone' outlier is rejected")
+    (_ok if not off else _fail)("off-crosshair coord misread is rejected (ray)")
+    return (not c1) and c2 and (not out) and (not off)
+
+
 def test_temporal_voter() -> bool:
     """Per-voxel temporal vote smoothing: first sight passes through
     unchanged (single-frame safe), repeated agreement boosts confidence,
@@ -1363,6 +1393,7 @@ def main() -> int:
         ("sprite_skip",     test_sprite_sample_skip()),
         ("dark_gate",       test_dark_sample_gate()),
         ("garble_gate",     test_garble_sample_gate()),
+        ("confirm_gate",    test_multiframe_confirm_gate()),
         ("temporal_vote",   test_temporal_voter()),
         ("sweep_cap",       test_sweep_delta_cap()),
         ("strict_xhair",    test_strict_gate_crosshair_bypass()),

@@ -336,6 +336,22 @@ class WorldPerceptionConfig:
     # poison is 50%+. 0.0 disables.
     max_sample_garble_ratio: float = 0.35
 
+    # MULTI-FRAME CONFIRMATION for the CONFIRMED map + training labels. A
+    # block is only committed/sampled once its id has been read on at least
+    # ``min_confirm_reads`` of the last ``confirm_window`` FRESH F3 reads — so
+    # a single-frame OCR slip ("sandstone" for one tick amid a run of
+    # grass_block) can NEVER reach the confirmed map or the dataset. The raw
+    # per-frame read still flows to the agent for responsive aiming/chopping
+    # (a misread there is a safe no-op). 1 = confirm on first read (disabled).
+    confirm_window: int = 5
+    min_confirm_reads: int = 2
+    # Crosshair-ray geometry gate: the targeted voxel center must lie within
+    # this many blocks of the ray cast from the eye along (yaw,pitch). Catches
+    # a coord-misread that puts the "targeted" block off to the side of where
+    # the crosshair actually points. Lenient (a valid glancing hit is < ~0.9);
+    # this only rejects gross errors. 0 disables.
+    ray_consistency_max_dist: float = 1.5
+
     # Run the entity detector every N ticks (1 = every frame).
     entity_detect_every_n_ticks: int = 4
 
@@ -466,6 +482,11 @@ class WorldPerception:
         self._block_brightness: Dict[str, float] = {}
         self._block_brightness_n: Dict[str, int] = {}
         self._dark_skips = 0
+        # Recent FRESH F3 looking-at ids, for multi-frame confirmation (see
+        # confirm_window / min_confirm_reads). A deque so it self-trims.
+        from collections import deque as _deque
+        self._la_id_history = _deque(maxlen=max(1, self.cfg.confirm_window))
+        self._unconfirmed_skips = 0
         # Per-voxel temporal vote smoother for vision-patch guesses. When
         # the agent looks at the same voxel across frames, voting over the
         # independent guesses is a free ensemble — far more stable than any
@@ -814,7 +835,19 @@ class WorldPerception:
                     target_was_rejected = True
                     la = None
             if la is not None:
-                wf.looking_at = la
+                wf.looking_at = la            # RAW read for responsive actions
+                # Robust gate for ground truth: only commit to the confirmed
+                # map + collect a training sample once the read passes
+                # multi-frame agreement + crosshair-ray geometry. The raw read
+                # above still drives the agent; this protects the dataset/map.
+                confirmed = self._confirm_looking_at(la, pose, eye)
+                wf.looking_at_confirmed = la if confirmed else None
+                if not confirmed:
+                    self._unconfirmed_skips += 1
+                    if self._unconfirmed_skips <= 5:
+                        print(f"[perception] looking_at {la.block_id} not yet "
+                              f"confirmed (multi-frame/ray) — holding off "
+                              f"commit + sample")
 
                 # Curiosity-queue correction signal. The voxel F3 just
                 # confirmed may have been parked in the curiosity queue
@@ -867,30 +900,31 @@ class WorldPerception:
                           f"{prev.source} said {prev.block_id} → F3 says "
                           f"{la.block_id}")
 
-                self._commit(BlockObservation(
-                    pos          = la.pos,
-                    block_id     = la.block_id,
-                    confidence   = la.confidence,
-                    source       = "looking_at",
-                    last_seen_tick = self._tick,
-                    dimension    = pose.dimension,
-                    meta         = {"face": la.face} if la.face else {},
-                ))
-                # Visible LOG line the FIRST time each voxel is
-                # confirmed. Repeated confirmations of the same voxel
-                # are silent so a long stare doesn't spam the console.
-                # The world_map is the authoritative store; this is
-                # purely a user-visible heartbeat.
-                if la.pos not in self._confirmed:
-                    self._n_new_confirmed_this_run += 1
-                    short_id = la.block_id.replace("minecraft:", "")
-                    print(f"[perception] LOGGED {short_id} @ "
-                          f"({la.pos[0]}, {la.pos[1]}, {la.pos[2]})  "
-                          f"[#{self._n_new_confirmed_this_run}]")
-                # Once F3 confirms it, the voxel leaves the curiosity
-                # queue and never re-enters it.
-                self._confirmed.add(la.pos)
-                self._curiosity.pop(la.pos, None)
+                if confirmed:
+                    self._commit(BlockObservation(
+                        pos          = la.pos,
+                        block_id     = la.block_id,
+                        confidence   = la.confidence,
+                        source       = "looking_at",
+                        last_seen_tick = self._tick,
+                        dimension    = pose.dimension,
+                        meta         = {"face": la.face} if la.face else {},
+                    ))
+                    # Visible LOG line the FIRST time each voxel is
+                    # confirmed. Repeated confirmations of the same voxel
+                    # are silent so a long stare doesn't spam the console.
+                    # The world_map is the authoritative store; this is
+                    # purely a user-visible heartbeat.
+                    if la.pos not in self._confirmed:
+                        self._n_new_confirmed_this_run += 1
+                        short_id = la.block_id.replace("minecraft:", "")
+                        print(f"[perception] LOGGED {short_id} @ "
+                              f"({la.pos[0]}, {la.pos[1]}, {la.pos[2]})  "
+                              f"[#{self._n_new_confirmed_this_run}]")
+                    # Once F3 confirms it, the voxel leaves the curiosity
+                    # queue and never re-enters it.
+                    self._confirmed.add(la.pos)
+                    self._curiosity.pop(la.pos, None)
                 # Inverse-rendering expansion: project neighbour
                 # voxels' faces onto the screen, compare actual
                 # pixels to the canonical texture for the same
@@ -920,7 +954,7 @@ class WorldPerception:
                 # between the eye and P MUST be transparent (we saw
                 # through them). This is the strongest "free space"
                 # signal the perception layer can collect.
-                if self.cfg.carve_air_along_sightlines:
+                if confirmed and self.cfg.carve_air_along_sightlines:
                     cleared = self._air_voxels_along(
                         eye=eye, target_voxel=la.pos, sr=sr, pose=pose,
                     )
@@ -947,7 +981,8 @@ class WorldPerception:
                 # a metadata sidecar recording the pose + depth + the
                 # classifier guess (if any) that was wrong — useful
                 # training context for any downstream ML.
-                if (self.cfg.auto_sample_from_looking_at
+                if (confirmed
+                        and self.cfg.auto_sample_from_looking_at
                         and self.sample_store is not None):
                     rejected = wf.diagnostics.get("corrections", [])
                     last_rejected = (rejected[-1].get("was")
@@ -1546,6 +1581,48 @@ class WorldPerception:
         return out
 
     # ── Sample collection (self-improvement) ───────────────────────
+
+    def _ray_consistent(self, la, pose, eye) -> bool:
+        """Does the targeted voxel lie on the crosshair ray? Casts a ray from
+        the eye along (yaw, pitch) and checks the voxel CENTRE is within
+        ``ray_consistency_max_dist`` of it AND in front of the camera. Rejects
+        a coord-misread that places the 'targeted' block off the crosshair."""
+        thr = self.cfg.ray_consistency_max_dist
+        if thr <= 0.0 or pose is None or la is None:
+            return True
+        try:
+            yaw = math.radians(float(pose.yaw))
+            pitch = math.radians(float(pose.pitch))
+        except (TypeError, ValueError):
+            return True                       # no angles -> can't check, allow
+        # MC convention: yaw 0 = +Z, increasing toward -X; pitch + = down.
+        dx = -math.cos(pitch) * math.sin(yaw)
+        dy = -math.sin(pitch)
+        dz = math.cos(pitch) * math.cos(yaw)
+        wx = (la.pos[0] + 0.5) - eye[0]
+        wy = (la.pos[1] + 0.5) - eye[1]
+        wz = (la.pos[2] + 0.5) - eye[2]
+        if (wx * dx + wy * dy + wz * dz) <= 0.0:
+            return False                      # behind the camera
+        # |w x d| with d unit = perpendicular distance from the centre to the ray.
+        crx = wy * dz - wz * dy
+        cry = wz * dx - wx * dz
+        crz = wx * dy - wy * dx
+        perp = math.sqrt(crx * crx + cry * cry + crz * crz)
+        return perp <= thr
+
+    def _confirm_looking_at(self, la, pose, eye) -> bool:
+        """Gate for COMMITTING to the confirmed map + SAMPLING. Requires the
+        targeted voxel to be geometrically on the crosshair ray AND its id to
+        recur across recent fresh reads (multi-frame agreement) — so a single
+        transient OCR slip never reaches ground truth or the dataset."""
+        if not self._ray_consistent(la, pose, eye):
+            return False
+        self._la_id_history.append(la.block_id)
+        need = max(1, int(self.cfg.min_confirm_reads))
+        if need <= 1:
+            return True
+        return self._la_id_history.count(la.block_id) >= need
 
     @staticmethod
     def _f3_garble_ratio(raw: str) -> float:
