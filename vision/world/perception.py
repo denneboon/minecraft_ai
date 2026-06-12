@@ -2336,7 +2336,15 @@ def build_world_perception(settings: Optional[Dict[str, Any]] = None,
                     cnn_recognizer = CNNBlockRecognizer(
                         sample_store, auto_train=True)
             except Exception as e:
-                print(f"[world] CNN recogniser disabled: {e}")
+                # LOUD: without the CNN the world map can only label the block
+                # under the crosshair (F3), not SURVEY the scene — the find
+                # step (mapping logs to walk to) is badly degraded. If this
+                # ever fires in a real run it must be obvious in the log, not a
+                # one-line whisper. (Seen only under a pathological import
+                # order; the normal make.py/main.py order loads it fine.)
+                print("[world] *** WARNING: CNN block recogniser DISABLED "
+                      f"({e}) — falling back to sample-NN; scene-wide block "
+                      "recognition (the find step) will be degraded. ***")
                 cnn_recognizer = None
         if cnn_recognizer is not None:
             from vision.world.cnn_recognizer import TieredBlockClassifier
