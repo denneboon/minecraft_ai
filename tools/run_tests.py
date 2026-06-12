@@ -38,6 +38,7 @@ OFFLINE_TESTS = [
     "test_weather",
     "test_script_runner",
     "test_hotbar",
+    "test_safety",
     "test_skills",
     "test_treechop",
     "test_episode_logger",

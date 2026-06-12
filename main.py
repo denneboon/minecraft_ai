@@ -442,15 +442,24 @@ def ensure_controllable(capture, menu_detector, keyboard, gate, *,
                        "it focused (the bot can't see or control a background window)")
     if gate is not None and not gate.allow():
         return False, "input gate is closed (Minecraft lost focus)"
-    # Normalise to plain gameplay. Escape closes a stuck-open inventory/
-    # container; in normal gameplay Escape opens the pause menu, which
-    # ensure_playing then dismisses — so either way we end up in-game.
-    if keyboard is not None:
+    # Normalise to plain gameplay — but DON'T needlessly pause. The old code
+    # blind-tapped Escape, which in normal gameplay OPENS the Game Menu, then
+    # ensure_playing slowly dismissed it (several ~2.4s is_pause_menu OCRs) — a
+    # ~10s "pause for no reason" at every startup. Instead, look at what's
+    # actually on screen ONCE: only Escape if a menu (pause / stuck inventory /
+    # container) is genuinely open; if we're already in gameplay, do nothing.
+    if keyboard is not None and menu_detector is not None:
         try:
-            keyboard.tap("escape", 0.05); time.sleep(0.3)
+            det = menu_detector.detect(capture.get_frame())
+            menu_open = bool(getattr(det, "open", False))
         except Exception:
-            pass
-    ensure_playing(capture, menu_detector, keyboard)
+            menu_open = False
+        if menu_open:
+            try:
+                keyboard.tap("escape", 0.05); time.sleep(0.3)
+            except Exception:
+                pass
+            ensure_playing(capture, menu_detector, keyboard)
     return True, "controllable"
 
 

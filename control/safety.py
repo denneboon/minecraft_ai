@@ -32,6 +32,20 @@ else:
 from utils.focus import _find_minecraft_hwnd
 
 
+# Collapse pynput's left/right modifier variants to a generic name so a
+# configured combo like ``<ctrl>+<shift>+<f12>`` matches what pynput actually
+# reports when those keys are pressed (``<ctrl_l>``, ``<shift_l>``, …).
+# Without this the emergency-stop hotkey silently never fires.
+_MOD_BASES = ("ctrl", "shift", "alt", "cmd")
+
+
+def _norm_key_name(name: str) -> str:
+    s = str(name)
+    inner = s[1:-1] if s.startswith("<") and s.endswith(">") else s
+    for base in _MOD_BASES:
+        if inner in (base, f"{base}_l", f"{base}_r", f"{base}_gr"):
+            return f"<{base}>"
+    return s
 
 
 
@@ -238,29 +252,32 @@ class Safety:
 
 
     def _hotkey_loop(self):
-        combo = set(self.cfg.emergency_hotkey)
+        combo = set(_norm_key_name(k) for k in self.cfg.emergency_hotkey)
         pressed = set()
 
-        def on_press(key):
+        def _name(key):
             # ``key.char`` exists for character keys but is missing on
             # ``Key.shift`` / ``Key.f12`` / etc., which raise
             # AttributeError. We use the named form for those so the
             # emergency-hotkey combo (e.g. ``<ctrl>+<shift>+<f12>``)
-            # matches the registered combo string.
+            # matches the registered combo string. CRITICAL: pynput
+            # reports the LEFT/RIGHT variant of modifiers (Ctrl ->
+            # ``Key.ctrl_l`` -> ``<ctrl_l>``), which would NEVER match a
+            # configured ``<ctrl>`` — so the panic combo silently never
+            # fired. ``_norm_key_name`` collapses ctrl_l/ctrl_r/shift_l/…
+            # to the generic ``<ctrl>``/``<shift>`` the config uses.
             try:
-                name = key.char.lower()
+                return key.char.lower()
             except AttributeError:
-                name = f"<{str(key).replace('Key.', '')}>"
-            pressed.add(name)
+                return _norm_key_name(f"<{str(key).replace('Key.', '')}>")
+
+        def on_press(key):
+            pressed.add(_name(key))
             if combo.issubset(pressed):
                 self._trigger_emergency_stop("Emergency hotkey")
 
         def on_release(key):
-            try:
-                name = key.char.lower()
-            except AttributeError:
-                name = f"<{str(key).replace('Key.', '')}>"
-            pressed.discard(name)
+            pressed.discard(_name(key))
 
         listener = pynput_keyboard.Listener(on_press=on_press, on_release=on_release)
         self._hotkey_listener = listener

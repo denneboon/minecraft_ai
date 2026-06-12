@@ -163,15 +163,18 @@ def main(argv=None) -> int:
         try:
             while time.time() - t0 < budget:
                 now = time.time()
-                if not gate.allow():              # focus lost: don't act on a
-                    _stop()                       # gated/stale frame. Try to GRAB
-                    if _lost is None: _lost = now          # focus back; abort only
-                    try: activate_minecraft()              # if it won't hold.
-                    except Exception: pass
-                    if now - _lost > 10.0:
-                        ended = "focus lost (couldn't hold Minecraft foreground)"; break
-                    time.sleep(0.3); t0 += 0.3; continue
-                _lost = None
+                if not gate.allow():              # MC not foreground: input is
+                    _stop()                       # gated. RESPECT the user — do
+                    if _lost is None:             # NOT steal focus back (that
+                        _lost = now               # "kept tabbing me to MC"). Pause
+                        print("[make] Minecraft lost focus — pausing. Click "
+                              "Minecraft to resume, or Ctrl+Shift+F12 to stop.")
+                    if now - _lost > 60.0:        # gave up waiting -> end cleanly
+                        ended = "focus lost (Minecraft not refocused within 60s)"; break
+                    time.sleep(0.2); t0 += 0.2; continue   # don't burn budget
+                if _lost is not None:
+                    print("[make] Minecraft refocused — resuming.")
+                    _lost = None
                 # is_pause_menu is a ~2.4s full-frame OCR — TIME-throttle it (not
                 # tick-throttle: ticks are now ~11 Hz) to once every few seconds.
                 # The gate handles focus loss and a LAN world doesn't pause on it.
