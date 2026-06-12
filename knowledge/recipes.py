@@ -176,6 +176,9 @@ class CraftStep:
     times: int = 1                   # how many times to run this craft
 
 
+_TABLE = "minecraft:crafting_table"
+
+
 def _have(available: Dict[str, int], item: str) -> int:
     return int(available.get(item, 0))
 
@@ -271,7 +274,8 @@ def plan_make(target_id: str, count: int, available: Dict[str, int],
         3x3 ones) to run once the raw materials + intermediates are present.
 
     Returns ``None`` only if the target itself has no crafting recipe."""
-    if recipe_for(target_id, assets, cat) is None:
+    target_rec = recipe_for(target_id, assets, cat)
+    if target_rec is None:
         return None
     avail = dict(available)
     raw: Dict[str, int] = {}
@@ -307,6 +311,13 @@ def plan_make(target_id: str, count: int, available: Dict[str, int],
                                    not rec.fits_2x2, cell_items))
             avail[item] = _have(avail, item) + rec.result_count
         return _have(avail, item) >= qty
+
+    # A 3x3 target is crafted on a placed crafting table (which is reclaimed
+    # afterwards), so we need ONE table on hand — plan it first if absent, so
+    # its planks/logs are part of the gather/craft plan. The table itself is
+    # 2x2-craftable, so this doesn't loop.
+    if count > 0 and not target_rec.fits_2x2 and _have(avail, _TABLE) < 1:
+        _ensure(_TABLE, 1, max_depth)
 
     if _ensure(target_id, count, max_depth):
         return raw, steps
