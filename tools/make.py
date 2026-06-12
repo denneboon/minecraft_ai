@@ -143,7 +143,7 @@ def main(argv=None) -> int:
                               goal_blocks=qty, tool_role="axe",
                               is_breakable=is_breakable)
         budget = 90.0 + 90.0 * qty            # generous: walk to + chop each log
-        t0 = time.time(); last = None; ended = "timeout"
+        t0 = time.time(); last = None; ended = "timeout"; _lost = None
         try:
             while time.time() - t0 < budget:
                 frame = capture.get_frame()
@@ -151,8 +151,14 @@ def main(argv=None) -> int:
                     p0 = time.time()
                     M.ensure_playing(capture, menu_detector, kb)
                     time.sleep(0.2); t0 += time.time() - p0; continue  # don't burn budget
-                if not gate.allow():              # focus lost -> pause, don't burn budget
-                    _stop(); time.sleep(0.2); t0 += 0.2; continue
+                if not gate.allow():              # focus lost: don't act on a
+                    _stop()                       # gated/stale frame; ABORT if it
+                    if _lost is None: _lost = time.time()  # stays lost (don't flail)
+                    if time.time() - _lost > 6.0:
+                        ended = "focus lost"; break
+                    time.sleep(0.2); t0 += 0.2; continue
+                _lost = None
+                wf = wp.update(frame, f3.read(frame))
                 wf = wp.update(frame, f3.read(frame))
                 pose = wf.pose
                 ctx = SkillContext(pose=pose, world_map=wp.world_map,
@@ -191,8 +197,10 @@ def main(argv=None) -> int:
     maker = Maker(ctl, crafter, memory, a, cat,
                   gather_fn=_gather, table_craft_fn=_table_craft, log=print)
     try:
-        if not M.ensure_playing(capture, menu_detector, kb):
-            print("[make] game is paused — click into MC"); return 1
+        ctrl_ok, reason = M.ensure_controllable(capture, menu_detector, kb, gate)
+        if not ctrl_ok:
+            print(f"[make] CANNOT RUN: {reason}"); return 1
+        print(f"[make] Minecraft is focused + in gameplay ({reason})")
         print(f"[make] === make {count} {target.split(':')[-1]} ===")
         ok, msg = maker.make(target, count)
         print(f"[make] {'SUCCESS' if ok else 'FAILED'}: {msg}")

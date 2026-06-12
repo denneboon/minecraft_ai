@@ -101,10 +101,11 @@ def main(argv=None) -> int:
     menu_detector = M.build_menu_detector_default(settings)
 
     try:
-        # Resume if the game is paused (singleplayer pauses on focus loss);
-        # otherwise every inventory read/action would hit a frozen frame.
-        if not M.ensure_playing(capture, menu_detector, kb):
-            print("[craft] game is paused and won't resume — click into MC"); return 1
+        # Make sure MC is focused + in gameplay (else input is gated and the
+        # capture shows a stale/background frame — every action silently dropped).
+        ctrl_ok, reason = M.ensure_controllable(capture, menu_detector, kb, gate)
+        if not ctrl_ok:
+            print(f"[craft] CANNOT RUN: {reason}"); return 1
         short = target.split(":")[-1]
         print(f"[craft] ensure >={want} {short} (gui_scale={ui_scale})")
         # Count-aware: skip entirely if we already hold enough, else open and

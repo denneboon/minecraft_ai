@@ -387,6 +387,49 @@ def ensure_playing(capture, menu_detector, keyboard, *,
         return True
 
 
+def ensure_controllable(capture, menu_detector, keyboard, gate, *,
+                        activate: bool = True, focus_timeout: float = 2.5):
+    """Make sure the bot can actually SEE and CONTROL Minecraft before a run.
+
+    The capture is a SCREEN-REGION grab and input is GATED to when MC is the
+    foreground window — so if MC is backgrounded (you're in another app), the
+    bot reads whatever's on top (or a stale frame) and every action is silently
+    dropped. A prior gated run can even leave the inventory stuck open. This
+    preflight: focuses MC, waits for it to actually be foreground with the input
+    gate OPEN, then normalises to gameplay (closes a stuck-open inventory/
+    container and any pause menu). Returns ``(ok, reason)``; callers should
+    ABORT on ``(False, …)`` with the reason rather than flailing on a dead frame.
+    """
+    from utils.focus import (activate_minecraft, _find_minecraft_hwnd,
+                             _is_foreground)
+    wins = _find_minecraft_hwnd()
+    if not wins:
+        return False, "Minecraft window not found (is the GAME, not just the launcher, open?)"
+    hwnd = wins[0][0]
+    if activate:
+        activate_minecraft()
+    t0 = time.time()
+    while time.time() - t0 < focus_timeout:
+        if _is_foreground(hwnd) and (gate is None or gate.allow()):
+            break
+        time.sleep(0.1)
+    if not _is_foreground(hwnd):
+        return False, ("Minecraft is not the foreground window — focus it and keep "
+                       "it focused (the bot can't see or control a background window)")
+    if gate is not None and not gate.allow():
+        return False, "input gate is closed (Minecraft lost focus)"
+    # Normalise to plain gameplay. Escape closes a stuck-open inventory/
+    # container; in normal gameplay Escape opens the pause menu, which
+    # ensure_playing then dismisses — so either way we end up in-game.
+    if keyboard is not None:
+        try:
+            keyboard.tap("escape", 0.05); time.sleep(0.3)
+        except Exception:
+            pass
+    ensure_playing(capture, menu_detector, keyboard)
+    return True, "controllable"
+
+
 # ---------------------------------------------------------------------------
 # Test sequence (smoke-test every subsystem before the real agent runs)
 # ---------------------------------------------------------------------------

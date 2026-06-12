@@ -284,6 +284,9 @@ def main(argv=None) -> int:
         config=InspectorConfig(max_resolutions_per_call=24))
     actions = ActionWrapper(kb, mouse, gate=gate)
     try:
+        ctrl_ok, reason = M.ensure_controllable(capture, menu_detector, kb, gate)
+        if not ctrl_ok:
+            print(f"[table] CANNOT RUN: {reason}"); return 1
         ok, msg = run_table_craft(
             target, capture=capture, mouse=mouse, kb=kb, f3=f3, wp=wp,
             menu_detector=menu_detector, reader=reader, hotbar=hotbar,
