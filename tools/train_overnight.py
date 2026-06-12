@@ -190,6 +190,7 @@ def main(argv=None) -> int:
     step = 0
     saved_this_ckpt = 0
     focus_paused = False
+    focus_lost_at = 0.0
     errors = 0
     patch_dir = None
     steps_since_relocate = 0
@@ -296,18 +297,29 @@ def main(argv=None) -> int:
             # Pause cleanly if MC isn't focused (gate closed) — don't spin.
             if not safety.allow_input():
                 if not focus_paused:
-                    log("input gate CLOSED (MC not focused) — pausing; will "
-                        "resume when MC is foreground.")
                     focus_paused = True
-                # Unattended runs: gently try to bring MC back to the
-                # foreground every ~20s so a transient focus loss (a popup,
-                # an alt-tab) doesn't stall training for the whole night.
-                if _now() - last_reactivate > 20.0:
+                    focus_lost_at = _now()
+                    log("input gate CLOSED (MC not focused) — pausing. Will "
+                        "briefly try to recover a TRANSIENT blip, then YIELD "
+                        "(won't keep grabbing focus back from you), and stop "
+                        "the run if MC stays unfocused.")
+                lost_for = _now() - focus_lost_at
+                # Recover only a TRANSIENT loss (first ~45s): a couple of gentle
+                # re-activations cover a popup / momentary alt-tab. After that,
+                # RESPECT whoever is using the computer — STOP grabbing focus
+                # back (this is the "stop tabbing me to Minecraft" fix). If MC
+                # stays unfocused for a few minutes, the user is back at their
+                # PC, so end the run cleanly instead of fighting forever.
+                if lost_for < 45.0 and _now() - last_reactivate > 20.0:
                     last_reactivate = _now()
                     try:
                         activate_minecraft()
                     except Exception:
                         pass
+                if lost_for > 240.0:
+                    log("MC unfocused for >4 min — assuming you're back; "
+                        "stopping the training run cleanly.")
+                    break
                 write_status({"paused": True})
                 time.sleep(3.0)
                 continue
