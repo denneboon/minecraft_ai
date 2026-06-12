@@ -79,6 +79,28 @@ def main() -> int:
     (ok if R.plan_craft("minecraft:stick", {"minecraft:cobblestone": 9}, a, cat) is None
      else bad)("no wood -> can't plan sticks -> None")
 
+    # 6b. tag recursion: wooden_tool_materials -> #planks -> plank items.
+    (ok if len(cat.items_in_tag("minecraft:wooden_tool_materials")) >= 4 else bad)(
+        "nested item tag resolves (wooden_tool_materials -> planks)")
+
+    # 7. plan_make: separate raw-to-gather from craft steps, full from scratch.
+    print("\n[7] plan_make (gather raw + craft chain)")
+    made = R.plan_make("minecraft:wooden_pickaxe", 1, {}, a, cat)
+    (ok if made is not None else bad)("wooden_pickaxe from nothing -> a plan")
+    if made is not None:
+        raw, steps = made
+        logs = sum(v for k, v in raw.items() if k.endswith("_log"))
+        (ok if logs >= 1 else bad)(f"plans to gather logs ({ {k.split(':')[-1]: v for k, v in raw.items()} })")
+        pick = [s for s in steps if s.result_id.endswith("wooden_pickaxe")]
+        (ok if pick and pick[0].needs_table else bad)("final pickaxe step is a 3x3 table craft")
+        if pick:
+            cells = set(v.split(":")[-1] for v in pick[0].cell_items.values())
+            (ok if any("plank" in c for c in cells) and "stick" in cells else bad)(
+                f"pickaxe cells include planks + sticks ({sorted(cells)})")
+    haveit = R.plan_make("minecraft:wooden_pickaxe", 1,
+                         {"minecraft:wooden_pickaxe": 1}, a, cat)
+    (ok if haveit == ({}, []) else bad)(f"already have it -> empty plan ({haveit})")
+
     print("\n" + ("ALL RECIPE TESTS PASSED" if not _fails
                   else f"{_fails} CHECK(S) FAILED"))
     return 0 if not _fails else 1

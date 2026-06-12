@@ -253,3 +253,61 @@ def plan_craft(target_id: str, available: Dict[str, int], assets, cat,
     if _ensure(target_id, 1, max_depth, steps):
         return steps
     return None
+
+
+def plan_make(target_id: str, count: int, available: Dict[str, int],
+              assets, cat, max_depth: int = 6
+              ) -> Optional[Tuple[Dict[str, int], List[CraftStep]]]:
+    """Plan to MAKE ``count`` of ``target_id`` from scratch, separating what
+    must be GATHERED from what must be CRAFTED.
+
+    Like :func:`plan_craft`, but when an ingredient has no crafting recipe (a
+    raw material — logs, cobblestone, …) and isn't on hand, it records the
+    shortfall as something to GATHER instead of failing. Returns
+    ``(raw_to_gather, steps)``:
+
+      * ``raw_to_gather``: ``{raw_item_id: qty}`` to acquire in the world first,
+      * ``steps``: the ordered crafts (deps first; ``needs_table`` flags the
+        3x3 ones) to run once the raw materials + intermediates are present.
+
+    Returns ``None`` only if the target itself has no crafting recipe."""
+    if recipe_for(target_id, assets, cat) is None:
+        return None
+    avail = dict(available)
+    raw: Dict[str, int] = {}
+    steps: List[CraftStep] = []
+
+    def _ensure(item: str, qty: int, depth: int) -> bool:
+        if _have(avail, item) >= qty:
+            return True
+        short = qty - _have(avail, item)
+        rec = recipe_for(item, assets, cat)
+        if rec is None or depth <= 0:
+            # raw material (or recursion bottomed out) -> gather it
+            raw[item] = raw.get(item, 0) + short
+            avail[item] = _have(avail, item) + short        # assume acquired
+            return True
+        per = max(1, rec.result_count)
+        runs = -(-short // per)                              # ceil div
+        placements = rec.placements()
+        for _ in range(runs):
+            cell_items: Dict[Tuple[int, int], str] = {}
+            for (rc, opts) in placements:
+                got = next((o for o in sorted(opts, key=lambda o: -_have(avail, o))
+                            if _have(avail, o) > 0), None)
+                if got is None:
+                    # make/gather the first acceptable option, then use it
+                    opt = opts[0]
+                    if not _ensure(opt, 1, depth - 1) or _have(avail, opt) <= 0:
+                        return False
+                    got = opt
+                cell_items[rc] = got
+                avail[got] = _have(avail, got) - 1
+            steps.append(CraftStep(rec.result_id, rec.result_count,
+                                   not rec.fits_2x2, cell_items))
+            avail[item] = _have(avail, item) + rec.result_count
+        return _have(avail, item) >= qty
+
+    if _ensure(target_id, count, max_depth):
+        return raw, steps
+    return None

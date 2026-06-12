@@ -261,23 +261,48 @@ class Catalog:
     def vehicles(self) -> List[EntityInfo]:
         return [e for e in self.entities().values() if e.category == "vehicle"]
 
-    def blocks_in_tag(self, tag: str) -> List[BlockInfo]:
-        """Return every block matching ``minecraft:block/<tag>``."""
-        members = self.assets.tag("block", tag) or []
-        out = []
-        for ident in members:
-            b = self.block(ident)
-            if b is not None:
-                out.append(b)
+    def blocks_in_tag(self, tag: str, _seen=None) -> List[BlockInfo]:
+        """Every block in ``minecraft:block/<tag>``, recursing into nested
+        ``#tag`` references (a tag whose member list includes another tag)."""
+        if _seen is None:
+            _seen = set()
+        t = tag[1:] if tag.startswith("#") else tag
+        if t in _seen:
+            return []
+        _seen.add(t)
+        out, ids = [], set()
+        for ident in (self.assets.tag("block", t) or []):
+            if isinstance(ident, str) and ident.startswith("#"):
+                for b in self.blocks_in_tag(ident, _seen):
+                    if b.id not in ids:
+                        ids.add(b.id); out.append(b)
+            else:
+                b = self.block(ident)
+                if b is not None and b.id not in ids:
+                    ids.add(b.id); out.append(b)
         return out
 
-    def items_in_tag(self, tag: str) -> List[ItemInfo]:
-        members = self.assets.tag("item", tag) or []
-        out = []
-        for ident in members:
-            it = self.item(ident)
-            if it is not None:
-                out.append(it)
+    def items_in_tag(self, tag: str, _seen=None) -> List[ItemInfo]:
+        """Every item in ``minecraft:item/<tag>``, recursing into nested
+        ``#tag`` references — e.g. ``wooden_tool_materials`` is just
+        ``["#minecraft:planks"]``, which must expand to the plank items so a
+        wooden-tool recipe's plank cells resolve."""
+        if _seen is None:
+            _seen = set()
+        t = tag[1:] if tag.startswith("#") else tag
+        if t in _seen:
+            return []
+        _seen.add(t)
+        out, ids = [], set()
+        for ident in (self.assets.tag("item", t) or []):
+            if isinstance(ident, str) and ident.startswith("#"):
+                for it in self.items_in_tag(ident, _seen):
+                    if it.id not in ids:
+                        ids.add(it.id); out.append(it)
+            else:
+                it = self.item(ident)
+                if it is not None and it.id not in ids:
+                    ids.add(it.id); out.append(it)
         return out
 
     # ── Internals ───────────────────────────────────────────────────
