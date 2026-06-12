@@ -78,10 +78,26 @@ class Maker:
             return True, f"already have >={count} {short}"
 
         last_msg = "no progress"
+        prev_state = None
+        stuck_rounds = 0
         for rnd in range(max_rounds):
             avail = self._read_counts()
             if avail.get(target_id, 0) >= count:
                 return True, f"have {avail.get(target_id, 0)}/{count} {short}"
+            # No-progress guard: tolerate a transient hiccup (a craft that
+            # failed WITHOUT consuming leaves inventory unchanged, and a retry
+            # may well work) but abort if NOTHING changes for two rounds in a
+            # row — a genuine blocker (missing ingredient, persistently failing
+            # step) won't fix itself, so don't burn the remaining rounds. A
+            # partially-done chain DID change inventory, so it keeps retrying.
+            state = tuple(sorted(avail.items()))
+            if prev_state is not None and state == prev_state:
+                stuck_rounds += 1
+                if stuck_rounds >= 2:
+                    return False, f"stuck — no progress for 2 rounds ({last_msg})"
+            else:
+                stuck_rounds = 0
+            prev_state = state
             plan = plan_make(target_id, count, avail, self.assets, self.cat)
             if plan is None:
                 return False, f"no crafting recipe for {short}"
@@ -137,7 +153,16 @@ class Maker:
                     if not crafted_ok:
                         break
             if not crafted_ok:
-                return False, f"craft step failed: {last_msg}"
+                # Don't hard-abort on a (possibly transient) craft hiccup —
+                # an inventory misread or slot-timing glitch can fail one step.
+                # Fall through to the next round: it re-reads the REAL
+                # inventory and re-plans, so a partially-done chain resumes
+                # from exactly where it is. The no-progress guard at the top
+                # aborts if a round genuinely changes nothing, so this can't
+                # spin. Bounded by max_rounds either way.
+                self.log(f"[make] craft step failed ({last_msg}); re-reading + "
+                         f"re-planning (round {rnd+1}/{max_rounds})")
+                continue
             # loop: re-read to verify / continue any remaining chain
 
         avail = self._read_counts()

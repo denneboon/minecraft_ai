@@ -127,6 +127,52 @@ def main() -> int:
     (ok if okc and not any(e.startswith("table:") for e in w.events) else bad)(
         f"crafts planks, no table needed ({msg})")
 
+    # 5. Transient craft hiccup -> the round loop re-reads + re-plans and
+    #    still completes (resilience: a one-off failure must not abort the make).
+    print("\n[5] transient craft failure -> retries and succeeds")
+    class _FlakyCrafter(_Crafter):
+        def __init__(self, world, assets, cat, fail_on, times):
+            super().__init__(world, assets, cat)
+            self._fail_on = fail_on; self._left = times
+        def craft(self, result_id, *, snap=None):
+            if result_id == self._fail_on and self._left > 0:
+                self._left -= 1
+                self.w.events.append(f"craftFAIL:{result_id.split(':')[-1]}")
+                return False, "transient glitch"
+            return super().craft(result_id, snap=snap)
+    w = _World()
+    mem = InventoryMemory(); ctl = _Ctl(w)
+    # Fail the stick craft once; the partial chain (planks/table made) changes
+    # inventory, so the no-progress guard lets it retry and finish.
+    flaky = _FlakyCrafter(w, a, cat, fail_on="minecraft:stick", times=1)
+    mk = Maker(ctl, flaky, mem, a, cat, gather_fn=_gather_fn(w),
+               table_craft_fn=_table_fn(w), log=lambda m: None)
+    okc, msg = mk.make(PICK, 1)
+    (ok if okc and w.counts.get(PICK, 0) >= 1 else bad)(
+        f"recovers from a transient craft failure ({msg})")
+    (ok if any(e.startswith("craftFAIL:") for e in w.events) else bad)(
+        "a craft did fail at least once (the retry path was exercised)")
+
+    # 6. Persistent blocker (a step that ALWAYS fails without consuming) ->
+    #    aborts in bounded rounds via the no-progress guard, never hangs.
+    print("\n[6] persistent craft failure -> bounded abort, no hang")
+    class _StuckCrafter(_Crafter):
+        def craft(self, result_id, *, snap=None):
+            if result_id == "minecraft:oak_planks":
+                self.w.events.append("craftFAIL:oak_planks")
+                return False, "always fails"      # never consumes/produces
+            return super().craft(result_id, snap=snap)
+    w = _World({"minecraft:oak_log": 5})       # has logs, but planks never craft
+    mem = InventoryMemory(); ctl = _Ctl(w)
+    mk = Maker(ctl, _StuckCrafter(w, a, cat), mem, a, cat,
+               gather_fn=_gather_fn(w), table_craft_fn=_table_fn(w),
+               log=lambda m: None)
+    okc, msg = mk.make(PICK, 1)
+    (ok if (not okc) and w.counts.get(PICK, 0) == 0 else bad)(
+        f"fails cleanly without hanging ({msg})")
+    (ok if "stuck" in msg or "round" in msg.lower() else bad)(
+        f"reports a bounded give-up ({msg})")
+
     print("\n" + ("ALL MAKER TESTS PASSED" if not _fails
                   else f"{_fails} CHECK(S) FAILED"))
     return 0 if not _fails else 1
