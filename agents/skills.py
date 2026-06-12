@@ -387,6 +387,7 @@ class MineBlock(Skill):
         self._silent = 0               # F3-gap ticks while frozen+mining
         self._await_ticks = 0          # aimed-but-F3-silent ticks (acquisition)
         self._clear_ticks = 0          # ticks spent clearing occluding leaves
+        self._aim_ticks = 0            # consecutive ticks trying to aim/acquire
         self.broke = False             # did a LOG actually break? (for counting)
 
     def reset(self):
@@ -396,6 +397,7 @@ class MineBlock(Skill):
         self._silent = 0
         self._await_ticks = 0
         self._clear_ticks = 0
+        self._aim_ticks = 0            # ticks spent trying to aim/acquire a log
         self.broke = False
 
     def _is_log(self, bid) -> bool:
@@ -449,6 +451,14 @@ class MineBlock(Skill):
         eye = _eye(ctx.pose)
         if eye is None:
             return SkillResult(AgentAction(), SkillStatus.BLOCKED, "no pose")
+        # ACQUISITION timeout — the aim phase (unlike mining) was uncapped, so a
+        # mis-located/phantom target or garbled F3 left the bot "aiming" at
+        # nothing for ~20s. Bail after ~5s so the FSM re-scans / walks to a real
+        # tree instead of staring off to the side doing nothing.
+        self._aim_ticks += 1
+        if self._aim_ticks > 50:
+            return SkillResult(AgentAction(), SkillStatus.FAILED,
+                               "couldn't engage a log (aim/F3 unreliable) — abandon")
         # Out of reach? Don't aim/clear-leaves at a block we can't touch (a
         # too-high canopy log) — abandon so the FSM walks closer or skips it.
         if block_reach_distance(eye, self.voxel) > self.max_reach:
@@ -464,7 +474,7 @@ class MineBlock(Skill):
 
         # THE MOMENT F3 shows a LOG under the crosshair: LATCH -> freeze + mine.
         if self._is_log(la_id):
-            self._mode = "mine_log"; self._silent = 0
+            self._mode = "mine_log"; self._silent = 0; self._aim_ticks = 0
             return _hold("log in crosshair -> mining")
 
         # Otherwise AIM toward the target voxel — the only state that moves.
@@ -482,7 +492,8 @@ class MineBlock(Skill):
                 return SkillResult(AgentAction(), SkillStatus.FAILED,
                                    f"target is {la_id}, not a log — abandon")
             if self._is_pass(la_id):     # a leaf occluding the target log
-                self._mode = "clear_leaf"; self._silent = 0; self._clear_ticks = 0
+                self._mode = "clear_leaf"; self._silent = 0
+                self._clear_ticks = 0; self._aim_ticks = 0
                 return _hold("leaf occludes target -> clearing")
             return SkillResult(AgentAction(), SkillStatus.FAILED,
                                f"{la_id} blocks the target — abandon")
