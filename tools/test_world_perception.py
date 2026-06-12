@@ -774,6 +774,28 @@ def test_multiframe_confirm_gate() -> bool:
     return (not c1) and c2 and (not out) and (not off)
 
 
+def test_held_item_occlusion() -> bool:
+    """A crop overlapping the held-item / hand / hotbar HUD region is rejected
+    so the recogniser never trains on arm/item pixels; the offhand region only
+    counts when an offhand item is held."""
+    print("\n[20d] Held-item / HUD occlusion gate")
+    from vision.world.perception import WorldPerception, WorldPerceptionConfig
+    from vision.world.map import WorldMap
+    wp = WorldPerception(config=WorldPerceptionConfig(), world_map=WorldMap())
+    h, w = 1094, 1920
+    centre_ok = not wp._crop_occluded(w * 0.5, h * 0.5, 80, h, w)
+    in_hand = wp._crop_occluded(w * 0.82, h * 0.86, 120, h, w)
+    # offhand (bottom-left) only excluded when an offhand item is held
+    off_before = wp._crop_occluded(w * 0.12, h * 0.86, 120, h, w)
+    wp.set_held_item(main_hand="minecraft:oak_log", off_hand="minecraft:torch")
+    off_after = wp._crop_occluded(w * 0.12, h * 0.86, 120, h, w)
+    (_ok if centre_ok else _fail)("a centred crop is NOT flagged")
+    (_ok if in_hand else _fail)("a crop in the bottom-right hand IS flagged")
+    (_ok if (not off_before) and off_after else _fail)(
+        "offhand region flagged only when an offhand item is held")
+    return centre_ok and in_hand and (not off_before) and off_after
+
+
 def test_temporal_voter() -> bool:
     """Per-voxel temporal vote smoothing: first sight passes through
     unchanged (single-frame safe), repeated agreement boosts confidence,
@@ -1394,6 +1416,7 @@ def main() -> int:
         ("dark_gate",       test_dark_sample_gate()),
         ("garble_gate",     test_garble_sample_gate()),
         ("confirm_gate",    test_multiframe_confirm_gate()),
+        ("held_occlusion",  test_held_item_occlusion()),
         ("temporal_vote",   test_temporal_voter()),
         ("sweep_cap",       test_sweep_delta_cap()),
         ("strict_xhair",    test_strict_gate_crosshair_bypass()),

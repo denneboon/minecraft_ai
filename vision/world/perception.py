@@ -352,6 +352,19 @@ class WorldPerceptionConfig:
     # this only rejects gross errors. 0 disables.
     ray_consistency_max_dist: float = 1.5
 
+    # HUD / held-item occlusion. The held item or bare arm renders over the
+    # bottom-right of the view (even empty-handed), an offhand item over the
+    # bottom-left, and the hotbar + health/hunger bars over the bottom-centre —
+    # so a crop overlapping any of them is contaminated by HUD, not the block.
+    # Boxes are (x0,y0,x1,y1) as SCREEN FRACTIONS. A crosshair/sweep patch that
+    # overlaps one past ``occlusion_max_overlap`` of its own area is skipped.
+    # The main-hand + hotbar boxes are always active; the offhand box only when
+    # an offhand item is held (set via set_held_item).
+    hud_occlusion_boxes: tuple = ((0.60, 0.66, 1.0, 1.0),    # held item / arm
+                                  (0.30, 0.82, 0.70, 1.0))   # hotbar + bars
+    offhand_occlusion_box: tuple = (0.0, 0.66, 0.40, 1.0)
+    occlusion_max_overlap: float = 0.12
+
     # Run the entity detector every N ticks (1 = every frame).
     entity_detect_every_n_ticks: int = 4
 
@@ -487,6 +500,11 @@ class WorldPerception:
         from collections import deque as _deque
         self._la_id_history = _deque(maxlen=max(1, self.cfg.confirm_window))
         self._unconfirmed_skips = 0
+        # Held items (for occlusion + sample-context). Set by the agent via
+        # set_held_item; None = unknown/empty (the arm still occludes).
+        self._held_item: Optional[str] = None
+        self._offhand_item: Optional[str] = None
+        self._occlusion_skips = 0
         # Per-voxel temporal vote smoother for vision-patch guesses. When
         # the agent looks at the same voxel across frames, voting over the
         # independent guesses is a free ensemble — far more stable than any
@@ -1611,6 +1629,33 @@ class WorldPerception:
         perp = math.sqrt(crx * crx + cry * cry + crz * crz)
         return perp <= thr
 
+    def set_held_item(self, main_hand: Optional[str] = None,
+                      off_hand: Optional[str] = None) -> None:
+        """Tell perception what the player is holding. Used to (a) skip crops
+        the held item / offhand occludes, and (b) record the held item in each
+        sample's context so the model can learn to ignore it. The bare ARM
+        occludes the bottom-right even when ``main_hand`` is None."""
+        self._held_item = main_hand
+        self._offhand_item = off_hand
+
+    def _crop_occluded(self, cx: float, cy: float, cap_px: float,
+                       h: int, w: int) -> bool:
+        """Does a crop of size ``cap_px`` centred at (cx,cy) overlap a HUD /
+        held-item region by more than ``occlusion_max_overlap`` of its area?"""
+        half = cap_px / 2.0
+        x0, y0, x1, y1 = cx - half, cy - half, cx + half, cy + half
+        carea = max(1.0, (x1 - x0) * (y1 - y0))
+        boxes = list(self.cfg.hud_occlusion_boxes)
+        if self._offhand_item:
+            boxes.append(self.cfg.offhand_occlusion_box)
+        for (fx0, fy0, fx1, fy1) in boxes:
+            ix0 = max(x0, fx0 * w); iy0 = max(y0, fy0 * h)
+            ix1 = min(x1, fx1 * w); iy1 = min(y1, fy1 * h)
+            if ix1 > ix0 and iy1 > iy0:
+                if (ix1 - ix0) * (iy1 - iy0) / carea > self.cfg.occlusion_max_overlap:
+                    return True
+        return False
+
     def _confirm_looking_at(self, la, pose, eye) -> bool:
         """Gate for COMMITTING to the confirmed map + SAMPLING. Requires the
         targeted voxel to be geometrically on the crosshair ray AND its id to
@@ -1675,6 +1720,17 @@ class WorldPerception:
         # distance-normalised crops, so prototypes and queries share scale.
         dist = (metadata or {}).get("distance_blocks")
         cap_px = self._apparent_crop_px(intr, dist)
+        # Held-item / HUD occlusion: a close block makes a big crop that can
+        # reach the bottom-right arm/item or the hotbar — don't train on a
+        # patch contaminated by HUD pixels.
+        h, w = frame_rgb.shape[:2]
+        if self._crop_occluded(intr.cx, intr.cy, cap_px, h, w):
+            self._occlusion_skips += 1
+            if self._occlusion_skips <= 3:
+                print(f"[perception] skip sample {block_id} (crop overlaps "
+                      f"held-item/HUD region — would train on occlusion)")
+            self._last_sample_at[(block_id, voxel)] = self._tick
+            return
         patch = self._crop_patch(frame_rgb,
                                  int(intr.cx), int(intr.cy), cap_px)
         if patch is None:
@@ -1822,6 +1878,14 @@ class WorldPerception:
              int(round(rw * sx)), int(round(rh * sy)))
             for (rx, ry, rw, rh) in (self.cfg.exclude_rects or ())
         )
+        # exclude_rects covers the main hand + hotbar; add the OFFHAND region
+        # (bottom-left) only when an offhand item is actually held.
+        if self._offhand_item:
+            fh, fw = frame_rgb.shape[:2]
+            ox0, oy0, ox1, oy1 = self.cfg.offhand_occlusion_box
+            excludes = excludes + ((int(ox0 * fw), int(oy0 * fh),
+                                    int((ox1 - ox0) * fw),
+                                    int((oy1 - oy0) * fh)),)
         # Shared per-update wall-clock deadline. The per-patch
         # ``block_classifier.classify`` (sample-NN) is the single most
         # expensive perception op and scales with the sample dataset, so
