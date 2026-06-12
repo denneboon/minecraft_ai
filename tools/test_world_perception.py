@@ -718,6 +718,32 @@ def test_dark_sample_gate() -> bool:
     return True
 
 
+def test_garble_sample_gate() -> bool:
+    """A heavily-garbled F3 read must NOT label a training sample — a mangled
+    panel can yield a wrong-but-valid id (grass→"sand", night→"stone") that
+    poisons that class (verified live: a --walk run into night/swamp filled
+    gravel/stone/sand with dark/green mislabelled patches). Gate on the '?'
+    ratio of the raw F3 text."""
+    print("\n[20b] F3-garble training-sample gate")
+    from vision.world.perception import WorldPerception, WorldPerceptionConfig
+    gr = WorldPerception._f3_garble_ratio
+    thr = WorldPerceptionConfig().max_sample_garble_ratio
+    clean = ("Targeted Block: 0, 70, -34 | XYZ: 3.2 / 69.0 / -37.6 | "
+             "minecraft:oak_log | Block: 3 69 -39 | axis: y | "
+             "#minecraft:logs | #minecraft:mineable/axe | ? ? ? ?")
+    garbled = ("? ?? ???. ? ? ???? ? ?? . ? ????? | XYZ: 3.2 / 69 / -37 | "
+               "? ? ? ?? ? ?? ? | ?????? ? . ? ?? ? ? ? ? | "
+               "? ? ?? ?? ` ? . ? ?? | ' ????????? ? ?? ? ? ?? ?")
+    cgr, ggr = gr(clean), gr(garbled)
+    ok1 = cgr < thr
+    ok2 = ggr > thr
+    ok3 = gr("") == 0.0
+    (_ok if ok1 else _fail)(f"clean read passes the gate ({cgr:.0%} < {thr:.0%})")
+    (_ok if ok2 else _fail)(f"garbled read is gated out ({ggr:.0%} > {thr:.0%})")
+    (_ok if ok3 else _fail)("empty read -> 0 ratio (no spurious gating)")
+    return ok1 and ok2 and ok3
+
+
 def test_temporal_voter() -> bool:
     """Per-voxel temporal vote smoothing: first sight passes through
     unchanged (single-frame safe), repeated agreement boosts confidence,
@@ -1336,6 +1362,7 @@ def main() -> int:
         ("blockid_gate",    test_block_id_validator_gate()),
         ("sprite_skip",     test_sprite_sample_skip()),
         ("dark_gate",       test_dark_sample_gate()),
+        ("garble_gate",     test_garble_sample_gate()),
         ("temporal_vote",   test_temporal_voter()),
         ("sweep_cap",       test_sweep_delta_cap()),
         ("strict_xhair",    test_strict_gate_crosshair_bypass()),

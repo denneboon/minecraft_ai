@@ -325,6 +325,17 @@ class WorldPerceptionConfig:
     dark_sample_factor: float = 0.7
     dark_sample_min_history: int = 8
 
+    # F3-read-quality gate for TRAINING SAMPLES. On a garbled scene (night,
+    # busy foliage) the F3 panel OCR is mostly '?', and parse_looking_at_block
+    # can still latch a WRONG-but-valid block id from a mangled line — so a
+    # green-grass / dark-night patch gets saved labelled "sand"/"stone"/etc.,
+    # poisoning those classes. If the fraction of '?' in the raw F3 text
+    # exceeds this, the read is too unreliable to LABEL a sample (the map
+    # commit is separate and unaffected). A clean read is ~0% '?'; a legit
+    # busy daytime read with garbled #tag lines is ~15-20%; night/misread
+    # poison is 50%+. 0.0 disables.
+    max_sample_garble_ratio: float = 0.35
+
     # Run the entity detector every N ticks (1 = every frame).
     entity_detect_every_n_ticks: int = 4
 
@@ -969,13 +980,31 @@ class WorldPerception:
                                     if self._last_weather is not None else None),
                         "source": "f3_looking_at",
                     }
-                    self._maybe_save_crosshair_sample(
-                        frame_rgb=frame_rgb,
-                        sr=sr,
-                        block_id=la.block_id,
-                        voxel=la.pos,
-                        metadata=metadata,
-                    )
+                    # F3-read-quality gate: a heavily-garbled panel can yield a
+                    # WRONG-but-valid id (grass→"sand", night→"stone"), which
+                    # would save a mislabelled sample and poison that class. The
+                    # map commit above already happened; only the TRAINING
+                    # capture is gated. (Verified failure: a forest --walk that
+                    # wandered into night/swamp filled gravel/stone/sand with
+                    # dark/green mislabelled patches.)
+                    _gr = self.cfg.max_sample_garble_ratio
+                    _raw = getattr(f3, "raw_text", "") or ""
+                    _ratio = self._f3_garble_ratio(_raw)
+                    _garbled = _gr > 0.0 and bool(_raw) and _ratio > _gr
+                    if _garbled:
+                        self._garble_skips = getattr(self, "_garble_skips", 0) + 1
+                        if self._garble_skips <= 3:
+                            print(f"[perception] skip sample {la.block_id} "
+                                  f"(F3 garbled {_ratio:.0%} > {_gr:.0%} — id "
+                                  f"unreliable, would risk a mislabel)")
+                    else:
+                        self._maybe_save_crosshair_sample(
+                            frame_rgb=frame_rgb,
+                            sr=sr,
+                            block_id=la.block_id,
+                            voxel=la.pos,
+                            metadata=metadata,
+                        )
 
         # 1b. NO targeted block this frame → if pose was fresh AND
         # the F3 panel didn't have a Targeted-Block line at all (NOT
@@ -1517,6 +1546,14 @@ class WorldPerception:
         return out
 
     # ── Sample collection (self-improvement) ───────────────────────
+
+    @staticmethod
+    def _f3_garble_ratio(raw: str) -> float:
+        """Fraction of '?' (unrecognised glyphs) in an F3 raw read — the
+        unreliability signal used to gate TRAINING-sample labelling. ~0 on a
+        clean read, ~0.15-0.20 on a legit busy daytime read (garbled #tag
+        lines), 0.5+ on night/heavily-garbled reads that can mislabel."""
+        return (raw.count("?") / len(raw)) if raw else 0.0
 
     def _maybe_save_crosshair_sample(self,
                                      *,
