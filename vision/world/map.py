@@ -160,7 +160,42 @@ class WorldMap:
                   pos: Tuple[int, int, int],
                   dimension: Optional[str] = None,
                   ) -> Optional[BlockObservation]:
+        """BELIEF map: the best observation at ``pos`` from ANY source
+        (F3-confirmed OR a CNN/NN guess). Use when you want the fullest
+        picture and can tolerate a guess being wrong."""
         return self._store(dimension).blocks.get(pos)
+
+    # ── The two maps: CONFIRMED (ground truth) vs BELIEF (incl. guesses) ──
+    # The belief map is ``get_block`` / ``iter_blocks`` above. The confirmed
+    # map is the same store filtered to F3 "looking_at" observations — the
+    # only source the multi-frame + ray + catalog gates guarantee is real.
+    _CONFIRMED_SOURCES = ("looking_at", "ray_clear_air")
+
+    def get_confirmed(self,
+                      pos: Tuple[int, int, int],
+                      dimension: Optional[str] = None,
+                      ) -> Optional[BlockObservation]:
+        """CONFIRMED map: the observation at ``pos`` ONLY if it was F3
+        looking-at-confirmed (or carved air along a confirmed sightline) —
+        i.e. ground truth. Returns None for guessed/extrapolated voxels, so a
+        caller that must never act on a guess (build-safety, label export) can
+        rely on it. Never emits a stray block from a CNN/NN guess."""
+        obs = self._store(dimension).blocks.get(pos)
+        if obs is not None and getattr(obs, "source", None) in self._CONFIRMED_SOURCES:
+            return obs
+        return None
+
+    def iter_confirmed(self,
+                       dimension: Optional[str] = None,
+                       *, include_air: bool = False) -> Iterable[BlockObservation]:
+        """Every CONFIRMED (looking_at) observation — the ground-truth map.
+        Air (carved sightlines) is excluded unless ``include_air``."""
+        for o in self._store(dimension).blocks.values():
+            if getattr(o, "source", None) not in self._CONFIRMED_SOURCES:
+                continue
+            if (not include_air) and o.block_id == AIR_BLOCK:
+                continue
+            yield o
 
     def block_count(self, dimension: Optional[str] = None) -> int:
         return len(self._store(dimension).blocks)

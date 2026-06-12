@@ -796,6 +796,36 @@ def test_held_item_occlusion() -> bool:
     return centre_ok and in_hand and (not off_before) and off_after
 
 
+def test_two_map_api() -> bool:
+    """Two maps: get_block/iter_blocks = BELIEF (any source, incl. guesses);
+    get_confirmed/iter_confirmed = ground truth (F3 looking_at only). A CNN
+    guess must appear in belief but NEVER in confirmed."""
+    print("\n[20e] Confirmed vs belief two-map API")
+    from vision.world.map import WorldMap
+    from vision.world.types import BlockObservation
+    m = WorldMap()
+    m.update_block(BlockObservation(pos=(0, 64, 0), block_id="minecraft:oak_log",
+                                    confidence=1.0, source="looking_at",
+                                    last_seen_tick=1))
+    m.update_block(BlockObservation(pos=(1, 64, 0), block_id="minecraft:stone",
+                                    confidence=0.6, source="vision_patch",
+                                    last_seen_tick=1))
+    belief_guess = m.get_block((1, 64, 0))
+    conf_guess = m.get_confirmed((1, 64, 0))
+    conf_real = m.get_confirmed((0, 64, 0))
+    names = sorted(o.block_id for o in m.iter_confirmed())
+    (_ok if belief_guess and belief_guess.block_id == "minecraft:stone" else _fail)(
+        "belief map includes the CNN guess")
+    (_ok if conf_guess is None else _fail)(
+        "confirmed map EXCLUDES the guess (never a stray id)")
+    (_ok if conf_real and conf_real.block_id == "minecraft:oak_log" else _fail)(
+        "confirmed map keeps the F3-confirmed block")
+    (_ok if names == ["minecraft:oak_log"] else _fail)(
+        f"iter_confirmed yields only ground truth ({names})")
+    return (belief_guess is not None and conf_guess is None
+            and conf_real is not None and names == ["minecraft:oak_log"])
+
+
 def test_temporal_voter() -> bool:
     """Per-voxel temporal vote smoothing: first sight passes through
     unchanged (single-frame safe), repeated agreement boosts confidence,
@@ -1417,6 +1447,7 @@ def main() -> int:
         ("garble_gate",     test_garble_sample_gate()),
         ("confirm_gate",    test_multiframe_confirm_gate()),
         ("held_occlusion",  test_held_item_occlusion()),
+        ("two_map_api",     test_two_map_api()),
         ("temporal_vote",   test_temporal_voter()),
         ("sweep_cap",       test_sweep_delta_cap()),
         ("strict_xhair",    test_strict_gate_crosshair_bypass()),
