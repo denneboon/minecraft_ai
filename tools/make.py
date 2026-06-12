@@ -198,17 +198,27 @@ def main(argv=None) -> int:
 
     maker = Maker(ctl, crafter, memory, a, cat,
                   gather_fn=_gather, table_craft_fn=_table_craft, log=print)
+    result = ("FAILED", "did not start")
     try:
         ctrl_ok, reason = M.ensure_controllable(capture, menu_detector, kb, gate)
         if not ctrl_ok:
-            print(f"[make] CANNOT RUN: {reason}"); return 1
-        print(f"[make] Minecraft is focused + in gameplay ({reason})")
-        print(f"[make] === make {count} {target.split(':')[-1]} ===")
+            print("\n" + "#" * 60)
+            print(f"#  CANNOT START — {reason}")
+            print("#" * 60 + "\n")
+            return 1
+        print("\n" + "=" * 60)
+        print(f"=  ▶ BOT RUNNING — controlling Minecraft. Do NOT click away.")
+        print(f"=    making {count}x {target.split(':')[-1]} (panic stop: Ctrl+Shift+F12)")
+        print("=" * 60 + "\n")
         ok, msg = maker.make(target, count)
-        print(f"[make] {'SUCCESS' if ok else 'FAILED'}: {msg}")
+        result = ("SUCCESS" if ok else "FAILED", msg)
         return 0 if ok else 1
     finally:
         _stop()
+        print("\n" + "=" * 60)
+        print(f"=  ■ BOT STOPPED ({result[0]}) — {result[1]}")
+        print(f"=    Minecraft is yours again; safe to use your computer.")
+        print("=" * 60 + "\n")
         try:
             if hasattr(mouse, "release_all"):
                 mouse.release_all()
