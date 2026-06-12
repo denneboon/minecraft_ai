@@ -566,10 +566,19 @@ class ItemRecognizer:
                 blocks.add(k[len("block.minecraft."):])
         return items, blocks
 
-    def recognize(self, crop_rgb: np.ndarray) -> SlotContent:
+    def recognize(self, crop_rgb: np.ndarray,
+                  *, expect_slot_bg: bool = True) -> SlotContent:
         """
         Identify the item in a single slot crop. The crop is resized to
         16×16 internally so any input size is fine.
+
+        ``expect_slot_bg`` (default True) assumes the slot's TRANSPARENT areas
+        are the inventory's grey background, and penalises a crop whose
+        transparent area isn't grey (negative evidence — catches a small
+        template winning by luck). Set it FALSE for the GAMEPLAY HUD hotbar,
+        where the semi-transparent slots show the WORLD behind them: there the
+        grey assumption is wrong and the penalty would force every slot to
+        abstain, so we judge on the item-pixel (positive) match alone.
         """
         if crop_rgb is None or crop_rgb.size == 0:
             return SlotContent()
@@ -611,19 +620,23 @@ class ItemRecognizer:
         # those pixels are far from slot-grey, so we add the gap to the
         # score. The furnace template (which covers the same ~200 px)
         # adds zero negative penalty and wins outright.
-        bg = np.array(self._SLOT_BG_RGB, dtype=np.int32)
-        bg_diff = np.abs(small.astype(np.int32) - bg[None, None, :]
-                        ).mean(axis=2)              # (16, 16)
-        # Pixels close to background = no negative evidence.
-        bg_violation = np.maximum(0.0, bg_diff - self._BG_TOLERANCE_MAE)  # (16, 16)
-        neg_mask = (~self._tpl_mask).astype(np.float32)  # (N, 16, 16)
-        n_neg_pixels = neg_mask.reshape(len(self._templates), -1).sum(axis=1)
-        n_neg_pixels = np.maximum(n_neg_pixels, 1.0)
-        neg_sum = (bg_violation[None, ...] * neg_mask
-                  ).reshape(len(self._templates), -1).sum(axis=1)
-        neg_score = neg_sum / n_neg_pixels
-
-        scores = pos_score + self._NEG_EVIDENCE_WEIGHT * neg_score
+        if expect_slot_bg:
+            bg = np.array(self._SLOT_BG_RGB, dtype=np.int32)
+            bg_diff = np.abs(small.astype(np.int32) - bg[None, None, :]
+                            ).mean(axis=2)              # (16, 16)
+            # Pixels close to background = no negative evidence.
+            bg_violation = np.maximum(0.0, bg_diff - self._BG_TOLERANCE_MAE)  # (16,16)
+            neg_mask = (~self._tpl_mask).astype(np.float32)  # (N, 16, 16)
+            n_neg_pixels = neg_mask.reshape(len(self._templates), -1).sum(axis=1)
+            n_neg_pixels = np.maximum(n_neg_pixels, 1.0)
+            neg_sum = (bg_violation[None, ...] * neg_mask
+                      ).reshape(len(self._templates), -1).sum(axis=1)
+            neg_score = neg_sum / n_neg_pixels
+            scores = pos_score + self._NEG_EVIDENCE_WEIGHT * neg_score
+        else:
+            # HUD: the transparent area is the world, not slot-grey — judge on
+            # the item-pixel match alone (the mask already ignores background).
+            scores = pos_score.copy()
 
         # Residual small-mask penalty for templates with so few pixels
         # that even the positive score isn't very meaningful.
@@ -1172,22 +1185,29 @@ class InventoryReader:
 
         return snap
 
-    def _recognize_slot(self, name: str, crop: np.ndarray) -> SlotContent:
+    def _recognize_slot(self, name: str, crop: np.ndarray,
+                        *, expect_slot_bg: bool = True,
+                        use_sample: bool = True) -> SlotContent:
         """Identify one slot crop: placeholder -> real-sample NN -> synthetic
         template, then count/durability/glint. Shared by the container read
-        and the HUD-hotbar read."""
+        and the HUD-hotbar read.
+
+        For the HUD (``expect_slot_bg=False``), the sample NN is skipped
+        (``use_sample=False``): it matches over the WHOLE crop, so the world
+        background behind the semi-transparent slot would dominate its distance;
+        the alpha-masked template match (which ignores background) is used."""
         # 1. Short-circuit on placeholder slots (armour, off-hand, brewing).
         if self.empty_slot.is_empty(name, crop):
             return SlotContent(source="placeholder")
         # 2. NN match against real captured samples — these describe Mojang's
         # actual renderer output, beating synthetic templates for code-rendered
         # icons (shulkers, banners, chests, potions…).
-        content = self.sample_recog.recognize(crop)
+        content = self.sample_recog.recognize(crop) if use_sample else None
         if content is not None:
             content.source = "sample"
         else:
             # 3. Synthetic templates — flat items + cube blocks; else unknown.
-            content = self.recognizer.recognize(crop)
+            content = self.recognizer.recognize(crop, expect_slot_bg=expect_slot_bg)
             if content.is_empty:
                 content.source = "empty"
             elif content.item is None:
@@ -1213,7 +1233,8 @@ class InventoryReader:
         )
         for name, slot in hud_hotbar_rects(frame_rgb.shape, self.ui_scale).items():
             crop = frame_rgb[slot.y:slot.y + slot.h, slot.x:slot.x + slot.w]
-            snap.slots[name] = self._recognize_slot(name, crop)
+            snap.slots[name] = self._recognize_slot(
+                name, crop, expect_slot_bg=False, use_sample=False)
         return snap
 
     # ------------------------------------------------------------------

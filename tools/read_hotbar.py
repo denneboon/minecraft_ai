@@ -72,8 +72,19 @@ def main(argv=None) -> int:
         for i in range(9):
             it = hotbar.item_in_slot(i + 1)
             print(f"    slot {i+1}: {it.split(':')[-1] if it else '(empty)'}")
+        # 1b. RAW visual HUD recognition (no layout relabel) — does the
+        # bg-off masked template match identify items over the world background?
+        frame = capture.get_frame()
+        raw = reader.read_hud_hotbar(frame)
+        print("[hotbar] RAW visual HUD recognition (no relabel):")
+        for i in range(9):
+            sc = raw.slots.get(f"hotbar_{i}")
+            it = getattr(sc, "item", None)
+            print(f"    slot {i+1}: {str(it).split(':')[-1] if it else '(unknown/empty)':16} "
+                  f"src={getattr(sc,'source','')} conf={getattr(sc,'confidence',0):.2f} "
+                  f"x{getattr(sc,'count',0)} 2nd={str(getattr(sc,'second',None)).split(':')[-1]}")
         # 2. Now read the HUD live (inventory CLOSED) — counts without opening.
-        print("[hotbar] reading HUD live (inventory CLOSED):")
+        print("[hotbar] reading HUD live (relabelled + counts):")
         snap = ctl.read_hotbar()
         for i in range(9):
             sc = snap.slots.get(f"hotbar_{i}")
