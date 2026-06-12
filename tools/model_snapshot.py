@@ -68,6 +68,18 @@ def _snapshots():
     return out
 
 
+def _model_vocab(pt: Path) -> int:
+    """How many block classes a snapshot model actually knows (its real
+    vocabulary), read straight from the checkpoint — authoritative even when
+    the sidecar benchmark is missing or stale. 0 on any error."""
+    try:
+        import torch
+        ck = torch.load(pt, map_location="cpu", weights_only=False)
+        return len(ck.get("classes") or [])
+    except Exception:
+        return 0
+
+
 def cmd_save(note: str) -> int:
     if not MODEL_PATH.is_file():
         print(f"[snapshot] no model at {MODEL_PATH} — train one first.")
@@ -83,6 +95,8 @@ def cmd_save(note: str) -> int:
         "benchmark_clean_acc": bench.get("cnn_clean_acc"),
         "benchmark_aug_acc": bench.get("cnn_aug_acc"),
         "benchmark_n_samples": bench.get("n_samples"),
+        "benchmark_n_blocks": bench.get("n_blocks"),
+        "n_vocab": _model_vocab(dst),     # the model's REAL vocabulary size
         "benchmark_ts": bench.get("ts"),
     }
     dst.with_suffix(".json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
@@ -107,8 +121,9 @@ def cmd_list() -> int:
     for pt, m in snaps:
         acc = m.get("benchmark_clean_acc")
         accs = f"{acc:.0%}" if isinstance(acc, (int, float)) else "  ?"
-        print(f"  {pt.name}  clean={accs}  n={m.get('benchmark_n_samples','?')}  "
-              f"{m.get('note','')}")
+        nv = m.get("n_vocab") or _model_vocab(pt)
+        print(f"  {pt.name}  clean={accs}  vocab={nv}  "
+              f"n={m.get('benchmark_n_samples','?')}  {m.get('note','')}")
     return 0
 
 
@@ -118,11 +133,28 @@ def cmd_restore(which: str) -> int:
         print("[snapshot] none to restore.")
         return 1
     if which == "best":
-        scored = [(m.get("benchmark_clean_acc") or -1.0, pt) for pt, m in snaps]
-        scored.sort(reverse=True)
-        target = scored[0][1]
-        print(f"[snapshot] best clean-acc snapshot: {target.name} "
-              f"({scored[0][0]:.0%})")
+        # COVERAGE-AWARE best: raw clean-acc alone wrongly favours a SMALL
+        # vocabulary — fewer/easier classes confuse less, so a 5-block 0.93
+        # model beats a 9-block 0.89 one the agent actually needs (a real
+        # footgun that happened). Among snapshots within 5% of the top
+        # accuracy, pick the one that knows the MOST blocks.
+        def _acc(m):
+            a = m.get("benchmark_clean_acc")
+            return a if isinstance(a, (int, float)) else None
+        accs = [a for a in (_acc(m) for _, m in snaps) if a is not None]
+        top = max(accs) if accs else None
+        if top is None:
+            target = snaps[-1][0]         # no benchmarks -> newest
+            print(f"[snapshot] no benchmarked snapshots; newest: {target.name}")
+        else:
+            near = [(pt, m) for pt, m in snaps
+                    if _acc(m) is not None and _acc(m) >= top - 0.05]
+            near.sort(key=lambda pm: (pm[1].get("n_vocab") or _model_vocab(pm[0]),
+                                      _acc(pm[1])), reverse=True)
+            target, tm = near[0]
+            tv = tm.get("n_vocab") or _model_vocab(target)
+            print(f"[snapshot] best (coverage-aware): {target.name} "
+                  f"(clean {_acc(tm):.0%}, {tv} blocks; vs top acc {top:.0%})")
     else:
         match = [pt for pt, _ in snaps if pt.name == which or pt.stem == which]
         if not match:
