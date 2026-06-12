@@ -196,6 +196,7 @@ def main(argv=None) -> int:
     steps_since_relocate = 0
     relocate_idx = 0
     last_safe_pos = None        # last spot we walked freely from (walkable)
+    safe_history = []           # recent walkable spots, to escape edge-traps
     edge_stuck = 0              # consecutive cornered (edge-blocked) relocations
 
     def _relocate():
@@ -206,7 +207,7 @@ def main(argv=None) -> int:
         retreats to the last spot it could walk from instead of spinning."""
         from agents.skills import WalkToward, SkillContext, SkillStatus
         from agents.treechop import _full_movement
-        nonlocal relocate_idx, last_safe_pos, edge_stuck
+        nonlocal relocate_idx, last_safe_pos, edge_stuck, safe_history
         relocate_idx += 1
         frame = capture.get_frame(); f3 = f3_reader.read(frame)
         wf = wp.update(frame, f3)
@@ -218,13 +219,22 @@ def main(argv=None) -> int:
             last_safe_pos = here                # run start = walkable fallback
         retreating = edge_stuck >= 3
         if retreating:
-            # Cornered at an edge — go back to known walkable ground rather
-            # than keep facing fresh drops.
-            goal = (int(math.floor(last_safe_pos[0])),
-                    int(math.floor(last_safe_pos[1])),
-                    int(math.floor(last_safe_pos[2])))
+            # Cornered at an edge — escape to the FARTHEST known-walkable spot
+            # (best way out of an edge-trap / peninsula / swamp inlet), not
+            # just the last one which is often right at the same edge cluster.
+            cur = (p.x, p.y, p.z)
+            cand = safe_history or ([last_safe_pos] if last_safe_pos else [here])
+            target = max(cand, key=lambda s: (s[0] - cur[0]) ** 2
+                                             + (s[2] - cur[2]) ** 2)
+            goal = (int(math.floor(target[0])),
+                    int(math.floor(target[1])),
+                    int(math.floor(target[2])))
             edge_stuck = 0
-            log(f"cornered ({relocate_idx}) — retreating to {goal}")
+            # Drop it so a repeat corner heads for a DIFFERENT escape, not the
+            # same one over and over.
+            if target in safe_history:
+                safe_history.remove(target)
+            log(f"cornered ({relocate_idx}) — escaping to farthest safe {goal}")
         else:
             hdg = math.radians(float(p.yaw) + relocate_idx * 73.0)   # fan headings
             goal = (int(math.floor(p.x + args.walk_dist * (-math.sin(hdg)))),
@@ -265,6 +275,9 @@ def main(argv=None) -> int:
         # was good ground; a string of edge-blocked ones means we're cornered.
         if moved > 5:
             last_safe_pos = here
+            safe_history.append(here)
+            if len(safe_history) > 10:
+                safe_history.pop(0)
             edge_stuck = 0
         elif "edge" in reason:
             edge_stuck += 1
