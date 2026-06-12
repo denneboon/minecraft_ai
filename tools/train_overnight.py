@@ -68,6 +68,7 @@ try:
 except Exception:
     _USER32 = None
 _VK_CONTROL, _VK_SHIFT, _VK_X, _VK_END, _VK_PAUSE = 0x11, 0x10, 0x58, 0x23, 0x13
+_VK_F12 = 0x7B
 
 
 def _panic() -> bool:
@@ -76,7 +77,12 @@ def _panic() -> bool:
     try:
         g = _USER32.GetAsyncKeyState
         d = lambda vk: (g(vk) & 0x8000) != 0
-        return (d(_VK_CONTROL) and d(_VK_SHIFT) and d(_VK_X)) or d(_VK_END) or d(_VK_PAUSE)
+        ctrl_shift = d(_VK_CONTROL) and d(_VK_SHIFT)
+        # Ctrl+Shift+F12 is the SAME panic combo as make.py/the safety
+        # controller, so one key stops everything. Ctrl+Shift+X / End / Pause
+        # kept for back-compat.
+        return ((ctrl_shift and (d(_VK_F12) or d(_VK_X)))
+                or d(_VK_END) or d(_VK_PAUSE))
     except Exception:
         return False
 
@@ -307,34 +313,25 @@ def main(argv=None) -> int:
             if _panic():
                 log("PANIC — stopping."); break
 
-            # Pause cleanly if MC isn't focused (gate closed) — don't spin.
+            # MC not focused (gate closed): you tabbed away. RESPECT it
+            # immediately — do NOT grab focus back (that was the "it tabs me
+            # to Minecraft / won't stop" complaint). The bot is already inert
+            # (input is gated), so it's effectively stopped the instant you
+            # tab away. If focus comes back on its own within a few seconds
+            # (a momentary blip) we resume; otherwise we EXIT promptly so the
+            # run is truly over and your computer is yours.
             if not safety.allow_input():
                 if not focus_paused:
                     focus_paused = True
                     focus_lost_at = _now()
-                    log("input gate CLOSED (MC not focused) — pausing. Will "
-                        "briefly try to recover a TRANSIENT blip, then YIELD "
-                        "(won't keep grabbing focus back from you), and stop "
-                        "the run if MC stays unfocused.")
-                lost_for = _now() - focus_lost_at
-                # Recover only a TRANSIENT loss (first ~45s): a couple of gentle
-                # re-activations cover a popup / momentary alt-tab. After that,
-                # RESPECT whoever is using the computer — STOP grabbing focus
-                # back (this is the "stop tabbing me to Minecraft" fix). If MC
-                # stays unfocused for a few minutes, the user is back at their
-                # PC, so end the run cleanly instead of fighting forever.
-                if lost_for < 45.0 and _now() - last_reactivate > 20.0:
-                    last_reactivate = _now()
-                    try:
-                        activate_minecraft()
-                    except Exception:
-                        pass
-                if lost_for > 240.0:
-                    log("MC unfocused for >4 min — assuming you're back; "
-                        "stopping the training run cleanly.")
+                    log("MC lost focus — STOPPED controlling the game (not "
+                        "grabbing focus back). Exiting if you stay away ~15s. "
+                        "Panic any time: Ctrl+Shift+F12 / Ctrl+Shift+X / End.")
+                if _now() - focus_lost_at > 15.0:
+                    log("MC unfocused ~15s — you're back; ending the run cleanly.")
                     break
                 write_status({"paused": True})
-                time.sleep(3.0)
+                time.sleep(1.0)
                 continue
             if focus_paused:
                 log("MC focused again — resuming.")
