@@ -92,9 +92,13 @@ def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
         t0 = time.time(); n = 0
         _last_cam = None; _frozen = 0      # frozen-camera (opened-GUI) detector
         while time.time() - t0 < max_secs:
+            n += 1
             frame = capture.get_frame()
-            # Don't act on a frozen, paused frame — resume first.
-            if menu_detector is not None and menu_detector.is_pause_menu(frame):
+            # is_pause_menu is a full-frame OCR; running it every tick crawls the
+            # loop (~2s/tick). Check occasionally — the preflight already put us
+            # in gameplay and a LAN world doesn't pause on focus loss.
+            if menu_detector is not None and n % 15 == 0 \
+                    and menu_detector.is_pause_menu(frame):
                 M.ensure_playing(capture, menu_detector, kb)
                 time.sleep(0.2); continue
             reading = f3.read(frame)
@@ -113,7 +117,6 @@ def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
                                dimension=getattr(pose, "dimension", None) if pose else None)
             r = skill.tick(ctx)
             _dispatch(r.action)
-            n += 1
             # Frozen-camera guard: if we keep commanding a turn but the view
             # won't move, the cursor is unlocked because a GUI opened — the bot
             # right-clicked an EXISTING crafting table (left over from a prior

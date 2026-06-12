@@ -143,11 +143,17 @@ def main(argv=None) -> int:
                               goal_blocks=qty, tool_role="axe",
                               is_breakable=is_breakable)
         budget = 90.0 + 90.0 * qty            # generous: walk to + chop each log
-        t0 = time.time(); last = None; ended = "timeout"; _lost = None
+        t0 = time.time(); last = None; ended = "timeout"; _lost = None; _n = 0
         try:
             while time.time() - t0 < budget:
+                _n += 1
                 frame = capture.get_frame()
-                if menu_detector is not None and menu_detector.is_pause_menu(frame):
+                # is_pause_menu is a full-frame OCR — running it EVERY tick made
+                # decisions ~2s each (the standalone treechop is ~0.1s). The gate
+                # handles focus loss; a LAN world doesn't pause on focus loss, so
+                # only check the pause menu occasionally.
+                if menu_detector is not None and _n % 15 == 0 \
+                        and menu_detector.is_pause_menu(frame):
                     p0 = time.time()
                     M.ensure_playing(capture, menu_detector, kb)
                     time.sleep(0.2); t0 += time.time() - p0; continue  # don't burn budget
@@ -160,7 +166,6 @@ def main(argv=None) -> int:
                         ended = "focus lost (couldn't hold Minecraft foreground)"; break
                     time.sleep(0.3); t0 += 0.3; continue
                 _lost = None
-                wf = wp.update(frame, f3.read(frame))
                 wf = wp.update(frame, f3.read(frame))
                 pose = wf.pose
                 ctx = SkillContext(pose=pose, world_map=wp.world_map,

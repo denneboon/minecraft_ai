@@ -411,8 +411,12 @@ class FindAndChopLogs:
                 if base is not None:
                     for dy in range(0, mined + 2):
                         self._blacklist.add((base[0], base[1] + dy, base[2]))
-                self._sub = WalkToward(base, arrive_dist=1.4, stuck_window=8,
-                                       jump_after=10 ** 9)
+                # Collect: walk to the broken log's EXACT x,z column (rounded
+                # coords match) so the drop, which falls straight down, is in
+                # pickup range. Small arrive_dist fallback if the column is
+                # unreachable; stuck-detection ends it either way.
+                self._sub = WalkToward(base, arrive_dist=0.6, arrive_on_column=True,
+                                       stuck_window=8, jump_after=10 ** 9)
                 self._state = "collect"
                 return SkillResult(r.action, SkillStatus.RUNNING,
                                    f"chopped {mined} log(s); collecting")

@@ -473,8 +473,12 @@ class MineBlock(Skill):
                                    f"select {self.tool_role} slot {slot}")
 
         # THE MOMENT F3 shows a LOG under the crosshair: LATCH -> freeze + mine.
+        # NB: do NOT reset _aim_ticks here — a crosshair that just FLICKERS onto
+        # a log (edge-of-reach jitter) would keep resetting it and never time
+        # out. _aim_ticks counts TOTAL aim-phase ticks this MineBlock; a real
+        # mine sits in mine_log (not aiming) so it never approaches the cap.
         if self._is_log(la_id):
-            self._mode = "mine_log"; self._silent = 0; self._aim_ticks = 0
+            self._mode = "mine_log"; self._silent = 0
             return _hold("log in crosshair -> mining")
 
         # Otherwise AIM toward the target voxel — the only state that moves.
@@ -492,8 +496,7 @@ class MineBlock(Skill):
                 return SkillResult(AgentAction(), SkillStatus.FAILED,
                                    f"target is {la_id}, not a log — abandon")
             if self._is_pass(la_id):     # a leaf occluding the target log
-                self._mode = "clear_leaf"; self._silent = 0
-                self._clear_ticks = 0; self._aim_ticks = 0
+                self._mode = "clear_leaf"; self._silent = 0; self._clear_ticks = 0
                 return _hold("leaf occludes target -> clearing")
             return SkillResult(AgentAction(), SkillStatus.FAILED,
                                f"{la_id} blocks the target — abandon")
@@ -660,9 +663,15 @@ class WalkToward(Skill):
     def __init__(self, target: Voxel, arrive_dist: float = 1.6,
                  face_tol_deg: float = 14.0, stuck_window: int = 18,
                  min_progress: float = 0.12, avoid_fall: bool = True,
-                 sprint: bool = True, jump_after: int = 4):
+                 sprint: bool = True, jump_after: int = 4,
+                 arrive_on_column: bool = False):
         self.target = tuple(target)
         self.arrive_dist = arrive_dist
+        # When True, "arrived" means the player's ROUNDED (floor) x,z equal the
+        # target's x,z — i.e. standing in the target block's column. Used to
+        # COLLECT a broken block's drop: walk onto its exact x,z so the item
+        # (which falls straight down) is within pickup range.
+        self.arrive_on_column = arrive_on_column
         self.face_tol = face_tol_deg
         self.stuck_window = stuck_window
         self.min_progress = min_progress
@@ -721,6 +730,12 @@ class WalkToward(Skill):
         tx, tz = self.target[0] + 0.5, self.target[2] + 0.5
         dx, dz = tx - px, tz - pz
         dist = math.hypot(dx, dz)
+        # Arrived when standing in the target's column (rounded x,z match) — the
+        # tight goal used for item collection — or within arrive_dist otherwise.
+        if self.arrive_on_column and int(math.floor(px)) == self.target[0] \
+                and int(math.floor(pz)) == self.target[2]:
+            return SkillResult(AgentAction(movement={"forward": False}),
+                               SkillStatus.DONE, "arrived on column")
         if dist <= self.arrive_dist:
             return SkillResult(AgentAction(movement={"forward": False}),
                                SkillStatus.DONE, f"arrived (d={dist:.1f})")
