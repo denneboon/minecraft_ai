@@ -72,6 +72,8 @@ def main(argv=None) -> int:
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--gap-threshold", type=int, default=6,
                     help="flag (block x condition) train cells below this count")
+    ap.add_argument("--no-balance", action="store_true",
+                    help="disable class-balanced loss (to A/B it)")
     args = ap.parse_args(argv)
 
     print("=" * 68)
@@ -89,7 +91,8 @@ def main(argv=None) -> int:
         print("  not enough data — collect more (train_curriculum)."); return 0
 
     fs = ContextFeatureSet()
-    cfg = ContextFusionConfig(epochs=args.epochs, visual_width=args.visual_width)
+    cfg = ContextFusionConfig(epochs=args.epochs, visual_width=args.visual_width,
+                              class_balanced=not args.no_balance)
     rec = ContextFusionRecognizer(store, config=cfg, feature_set=fs)
     print(f"  training fusion (width={args.visual_width}, epochs={args.epochs})…")
     rec.train_now(samples=train)

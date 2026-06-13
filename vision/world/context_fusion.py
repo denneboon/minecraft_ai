@@ -70,6 +70,11 @@ class ContextFusionConfig:
     min_blocks_to_train: int = 2
     max_train_samples: int = 20000
     augment: bool = True
+    # Class-balanced loss: weight cross-entropy by (gently) inverse class
+    # frequency so rare blocks (e.g. sand=3 vs grass=299) aren't drowned out.
+    # sqrt-inverse-freq, clamped, so tiny classes don't destabilise training.
+    class_balanced: bool = True
+    class_weight_clamp: float = 4.0
     model_path: str = _DEFAULT_MODEL_PATH
     seed: int = 1234
 
@@ -194,6 +199,15 @@ class ContextFusionRecognizer:
         model.train()
         opt = torch.optim.Adam(model.parameters(), lr=self.cfg.lr,
                                weight_decay=self.cfg.weight_decay)
+        # Class-balanced loss weights: sqrt(mean_count / count), clamped, so
+        # rare blocks get more gradient without tiny classes blowing up.
+        loss_weight = None
+        if self.cfg.class_balanced:
+            cnts = np.array([counts[b] for b in classes], dtype=np.float32)
+            w = np.sqrt(cnts.mean() / np.clip(cnts, 1, None))
+            w = np.clip(w, 1.0 / self.cfg.class_weight_clamp,
+                        self.cfg.class_weight_clamp)
+            loss_weight = torch.from_numpy(w.astype(np.float32)).to(self._device)
         # Pre-encode context once per sample (cheap, deterministic).
         meta = [getattr(s, "metadata", None) for s in sel]
         ctx_all = np.stack([self.features.encode(m) for m in meta]).astype(np.float32)
@@ -213,7 +227,7 @@ class ContextFusionRecognizer:
                 cb = torch.from_numpy(ctx_all[bi]).to(self._device)
                 yb = torch.from_numpy(y_all[bi]).to(self._device)
                 opt.zero_grad()
-                loss = F.cross_entropy(model(pb, cb), yb)
+                loss = F.cross_entropy(model(pb, cb), yb, weight=loss_weight)
                 loss.backward()
                 opt.step()
 
