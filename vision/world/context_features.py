@@ -99,7 +99,11 @@ class ContextFeature:
 
 def _f_face(m):
     v = m.get("face")
-    return _onehot(v, _FACES), v is not None
+    # Accept BOTH face-naming schemes: _hit_face emits top/bottom (the vocab),
+    # but F3 'direction=' / inverse-renderer use up/down — normalise so a future
+    # caller passing the F3 name doesn't silently encode as "missing".
+    norm = {"up": "top", "down": "bottom"}.get(v, v)
+    return _onehot(norm, _FACES), v is not None
 
 def _f_weather(m):
     v = m.get("weather")

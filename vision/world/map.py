@@ -314,8 +314,12 @@ class WorldMap:
         # to drop enough to hit ``target`` but never more than half
         # the store in a single eviction so a temporary overshoot
         # doesn't decimate good observations.
-        n_drop_target = len(store.blocks) - target
-        n_drop = max(1, min(n_drop_target, len(store.blocks) // 2))
+        # Drop exactly enough to reach ``target`` (worst entries first). The
+        # previous half-the-store cap could leave the store ABOVE ``cap`` after
+        # a big overshoot — the bound wasn't actually guaranteed. Dropping to
+        # target in one pass restores it; the O(n log n) sort dominates cost
+        # either way, so the cap bought nothing.
+        n_drop = max(1, len(store.blocks) - target)
         items = sorted(
             store.blocks.items(),
             key=lambda kv: (kv[1].confidence, kv[1].last_seen_tick),

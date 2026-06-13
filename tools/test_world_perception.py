@@ -774,6 +774,34 @@ def test_multiframe_confirm_gate() -> bool:
     return (not c1) and c2 and (not out) and (not off)
 
 
+def test_confirm_voxel_keyed() -> bool:
+    """Multi-frame agreement is keyed by VOXEL: reads of the same id at a
+    DIFFERENT voxel (panning across two grass_block voxels) must NOT
+    cross-confirm — agreement means 'same id at the same place'."""
+    print("\n[20e] Confirmation is voxel-keyed (no cross-voxel agreement)")
+    from types import SimpleNamespace
+    from vision.world.perception import WorldPerception, WorldPerceptionConfig
+    from vision.world.map import WorldMap
+    from vision.world.screen_ray import ScreenRay, CameraIntrinsics
+    from vision.world.types import LookingAtBlock
+    cfg = WorldPerceptionConfig()
+    cfg.confirm_window = 5; cfg.min_confirm_reads = 2
+    wp = WorldPerception(config=cfg, world_map=WorldMap())
+    wp._screen_ray = ScreenRay(CameraIntrinsics(960, 540, 70.0))
+    pose = SimpleNamespace(x=0.5, y=64.0, z=0.5, eye_y=65.62, yaw=0.0,
+                           pitch=0.0, dimension="minecraft:overworld")
+    eye = (0.5, 65.62, 0.5)
+    la = lambda b, v: LookingAtBlock(block_id=b, pos=v, face=None, confidence=1.0)
+    # Two grass voxels both ON the +Z crosshair ray but 3 blocks apart.
+    a = wp._confirm_looking_at(la("minecraft:grass_block", (0, 65, 3)), pose, eye)
+    b1 = wp._confirm_looking_at(la("minecraft:grass_block", (0, 65, 6)), pose, eye)
+    b2 = wp._confirm_looking_at(la("minecraft:grass_block", (0, 65, 6)), pose, eye)
+    (_ok if not a else _fail)("voxel A 1st read not confirmed")
+    (_ok if not b1 else _fail)("voxel B does NOT inherit A's read (no cross-confirm)")
+    (_ok if b2 else _fail)("voxel B confirms on its OWN 2nd read")
+    return (not a) and (not b1) and b2
+
+
 def test_held_item_occlusion() -> bool:
     """A crop overlapping the held-item / hand / hotbar HUD region is rejected
     so the recogniser never trains on arm/item pixels; the offhand region only
@@ -1446,6 +1474,7 @@ def main() -> int:
         ("dark_gate",       test_dark_sample_gate()),
         ("garble_gate",     test_garble_sample_gate()),
         ("confirm_gate",    test_multiframe_confirm_gate()),
+        ("confirm_voxel",   test_confirm_voxel_keyed()),
         ("held_occlusion",  test_held_item_occlusion()),
         ("two_map_api",     test_two_map_api()),
         ("temporal_vote",   test_temporal_voter()),

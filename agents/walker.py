@@ -247,6 +247,16 @@ class WalkerController:
                   f"non-finite; falling back to 6.5 to keep the "
                   f"yaw P-controller alive.")
             self.cfg.mouse_per_degree = 6.5
+        # Invariant: arrived_tolerance MUST be >= waypoint_tolerance, or the
+        # walker can pass the goal (within waypoint_tolerance) without ever
+        # registering ARRIVED -> "walks past the goal forever". The defaults
+        # honour this, but YAML can override either independently, so clamp.
+        if self.cfg.arrived_tolerance < self.cfg.waypoint_tolerance:
+            print(f"[pathwalker][WARN] arrived_tolerance "
+                  f"{self.cfg.arrived_tolerance} < waypoint_tolerance "
+                  f"{self.cfg.waypoint_tolerance}; raising it to match so "
+                  f"arrival can register.")
+            self.cfg.arrived_tolerance = self.cfg.waypoint_tolerance
         # Failed-target cooldown table. Mirrors the pattern in
         # ``world_explorer``: when a plan to ``goal`` fails the goal
         # goes here with the tick we gave up. Repeated ``set_target``

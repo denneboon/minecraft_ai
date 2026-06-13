@@ -1897,11 +1897,22 @@ class WorldPerception:
         transient OCR slip never reaches ground truth or the dataset."""
         if not self._ray_consistent(la, pose, eye):
             return False
-        self._la_id_history.append(la.block_id)
+        # Key agreement by VOXEL, not just id: otherwise reads of the same id at
+        # DIFFERENT voxels (panning across two grass_block voxels, or an
+        # intermittent stone->grass->stone sweep) could cross-confirm. We match
+        # within the ray tolerance so per-frame OCR coordinate jitter on the
+        # SAME block still accrues agreement (exact-match would starve sampling).
+        self._la_id_history.append((tuple(la.pos), la.block_id))
         need = max(1, int(self.cfg.min_confirm_reads))
         if need <= 1:
             return True
-        return self._la_id_history.count(la.block_id) >= need
+        tol = float(self.cfg.ray_consistency_max_dist) or 1.5
+        cx, cy, cz = la.pos
+        agree = sum(1 for (px, py, pz), b in self._la_id_history
+                    if b == la.block_id
+                    and abs(px - cx) <= tol and abs(py - cy) <= tol
+                    and abs(pz - cz) <= tol)
+        return agree >= need
 
     @staticmethod
     def _f3_garble_ratio(raw: str) -> float:

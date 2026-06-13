@@ -54,7 +54,7 @@ def _norm_key_name(name: str) -> str:
 class SafetyConfig:
     minecraft_title_query: str = "minecraft"
     check_focus_interval: float = 0.075
-    emergency_hotkey: tuple = ("<ctrl>", "<shift>", "x")
+    emergency_hotkey: tuple = ("<ctrl>", "<shift>", "<f12>")
     log_actions: bool = True
     log_focus_events: bool = True
     allow_run_without_focus: bool = False
