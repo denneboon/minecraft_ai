@@ -79,6 +79,11 @@ class StoredWorldSample:
     block_id: str                       # ``"minecraft:stone"``
     path: Path
     rgb: np.ndarray                     # SAMPLE_SIZE x SAMPLE_SIZE x 3 uint8
+    # The .json sidecar (face, biome, light, neighbours, …) when loaded with
+    # ``with_metadata=True`` — the context the fusion recogniser conditions on.
+    # None when not loaded or absent (older samples), which the fusion model
+    # handles gracefully (encodes to "missing").
+    metadata: Optional[Dict[str, object]] = None
 
 
 def _short_id(block_id: str) -> str:
@@ -259,7 +264,8 @@ class WorldSampleStore:
 
     # ── Readers ───────────────────────────────────────────────────
 
-    def load_all(self, skip_paths: Optional[set] = None
+    def load_all(self, skip_paths: Optional[set] = None,
+                 *, with_metadata: bool = False
                  ) -> List[StoredWorldSample]:
         """Load samples on disk into memory. Corrupt PNGs are
         skipped, but a non-zero corruption count is surfaced once per
@@ -292,8 +298,17 @@ class WorldSampleStore:
                 if rgb.shape[:2] != (SAMPLE_SIZE, SAMPLE_SIZE):
                     rgb = cv2.resize(rgb, (SAMPLE_SIZE, SAMPLE_SIZE),
                                      interpolation=cv2.INTER_AREA)
+                meta = None
+                if with_metadata:
+                    side = p.with_suffix(".json")
+                    if side.is_file():
+                        try:
+                            meta = json.loads(side.read_text(encoding="utf-8"))
+                        except Exception:
+                            meta = None
                 out.append(StoredWorldSample(block_id=block_id, path=p,
-                                             rgb=rgb.astype(np.uint8)))
+                                             rgb=rgb.astype(np.uint8),
+                                             metadata=meta))
         if n_corrupt:
             print(f"[sample_store][WARN] skipped {n_corrupt} corrupt PNG(s) "
                   f"under {self.root}. Loaded {len(out)} valid samples.")
