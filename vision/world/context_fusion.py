@@ -141,6 +141,10 @@ class ContextFusionRecognizer:
         self.cfg = config or ContextFusionConfig()
         self.features = feature_set or ContextFeatureSet()
         self.store = sample_store
+        # Use the GPU when present (the whole point of training on a big PC);
+        # falls back to CPU transparently. Set once at construction.
+        self._device = (torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                        if _TORCH_OK else None)
         self._model = None
         self._classes: List[str] = []
         self._proto: Dict[str, np.ndarray] = {}      # class -> mean embedding
@@ -186,7 +190,7 @@ class ContextFusionRecognizer:
         from vision.world.cnn_recognizer import _augment  # reuse the same aug
 
         ctx_dim = self._ctx_dim()
-        model = _FusionNet(self.cfg, ctx_dim, len(classes))
+        model = _FusionNet(self.cfg, ctx_dim, len(classes)).to(self._device)
         model.train()
         opt = torch.optim.Adam(model.parameters(), lr=self.cfg.lr,
                                weight_decay=self.cfg.weight_decay)
@@ -205,9 +209,9 @@ class ContextFusionRecognizer:
                 for j in bi:
                     rgb = _augment(sel[j].rgb, rng) if self.cfg.augment else sel[j].rgb
                     patches.append(self._prep_patch(rgb))
-                pb = torch.stack(patches)
-                cb = torch.from_numpy(ctx_all[bi])
-                yb = torch.from_numpy(y_all[bi])
+                pb = torch.stack(patches).to(self._device)
+                cb = torch.from_numpy(ctx_all[bi]).to(self._device)
+                yb = torch.from_numpy(y_all[bi]).to(self._device)
                 opt.zero_grad()
                 loss = F.cross_entropy(model(pb, cb), yb)
                 loss.backward()
@@ -219,8 +223,9 @@ class ContextFusionRecognizer:
         embs = []
         with torch.no_grad():
             for i in range(0, n, 256):
-                pb = torch.stack([self._prep_patch(sel[j].rgb) for j in range(i, min(i + 256, n))])
-                cb = torch.from_numpy(ctx_all[i: i + 256])
+                pb = torch.stack([self._prep_patch(sel[j].rgb)
+                                  for j in range(i, min(i + 256, n))]).to(self._device)
+                cb = torch.from_numpy(ctx_all[i: i + 256]).to(self._device)
                 embs.append(model.embed(pb, cb).cpu().numpy())
         E = np.concatenate(embs).astype(np.float32)
         self._emb = E
@@ -247,8 +252,9 @@ class ContextFusionRecognizer:
         if not (_TORCH_OK and self._trained and self._model is not None and self._proto):
             return None, 0.0
         with torch.no_grad():
-            pb = self._prep_patch(patch_rgb).unsqueeze(0)
-            cb = torch.from_numpy(self.features.encode(metadata).reshape(1, -1))
+            pb = self._prep_patch(patch_rgb).unsqueeze(0).to(self._device)
+            cb = torch.from_numpy(
+                self.features.encode(metadata).reshape(1, -1)).to(self._device)
             e = self._model.embed(pb, cb).cpu().numpy()[0]
         # cosine to each prototype
         best_id, best, second = None, -1.0, -1.0
@@ -263,8 +269,9 @@ class ContextFusionRecognizer:
         return best_id, best
 
     def status(self) -> str:
+        dev = str(self._device) if self._device is not None else "none"
         return (f"fusion(trained={self._trained}, blocks={len(self._classes)}, "
-                f"ctx={self._ctx_dim()}, {self._note})")
+                f"ctx={self._ctx_dim()}, device={dev}, {self._note})")
 
     # ── persistence (versioned) ──────────────────────────────────────────
     def _save(self) -> None:
@@ -297,7 +304,8 @@ class ContextFusionRecognizer:
                 return False
             classes = ck["classes"]
             model = _FusionNet(self.cfg, self._ctx_dim(), len(classes))
-            model.load_state_dict(ck["state_dict"]); model.eval()
+            model.load_state_dict(ck["state_dict"])
+            model.to(self._device); model.eval()
             self._model = model
             self._classes = classes
             self._proto = {k: np.asarray(v, dtype=np.float32)
