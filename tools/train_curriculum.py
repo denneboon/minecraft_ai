@@ -310,6 +310,29 @@ def main(argv=None) -> int:
         log("MC focused again — resuming.")
         return True
 
+    # Pitch control via MC's clamp as an absolute reference. Relative mouse
+    # moves DRIFT (the old sine-wave sweep crept until it stared at the
+    # ground), so before a scan we slam the view down until MC clamps at pitch
+    # +90 (straight down) — a KNOWN angle — then move precise degree-deltas
+    # from there. Convention: +dy looks DOWN, -dy looks UP; +90 down, -90 up.
+    px_per_deg = float(M._get(settings, "agent.mouse_per_degree", 6.5) or 6.5)
+
+    def look_straight_down():
+        try:
+            mouse.move(0, int(200 * px_per_deg))   # over-move -> clamps at +90
+        except Exception:
+            pass
+        time.sleep(0.18)
+        return 90.0
+
+    def set_pitch(cur, target):
+        try:
+            mouse.move(0, int((target - cur) * px_per_deg))   # +dy = down
+        except Exception:
+            pass
+        time.sleep(0.12)
+        return float(target)
+
     def roam_and_verify():
         """Teleport to a fresh surface spot and confirm it's a clean, on-land,
         not-submerged view. Returns (ok, biome). Sampling stays SUPPRESSED
@@ -339,8 +362,10 @@ def main(argv=None) -> int:
                 wp.update(frame, f3)             # pose/map only (suppressed)
                 biome = getattr(f3, "biome", None) or biome
                 time.sleep(0.2)
-            # Judge submersion (settled + loaded), 2-of-3 fresh frames, so a
-            # loading-screen sky frame can't read as 'underwater'.
+            # Judge submersion by looking STRAIGHT DOWN — the lower-centre band
+            # is then the block beneath us (ground vs water), with no sky to
+            # confuse it. 2-of-3 fresh frames.
+            look_straight_down()
             time.sleep(0.3)
             bad = sum(int(is_corrupted_view(capture.get_frame()))
                       for _ in range(3)) >= 2
@@ -354,37 +379,54 @@ def main(argv=None) -> int:
                 return False, biome          # current spot is bad, can't move
         return False, biome
 
+    # Structured RASTER scan: at each pitch band, do a full 360° yaw spin,
+    # sampling all the way round. Bands go level -> all the way up, then below
+    # level -> all the way down, so the WHOLE sphere is covered evenly instead
+    # of the old sine-wave sweep that drifted into the ground. Pitch is reset to
+    # a known angle each scan (look_straight_down), so it never creeps.
+    PITCH_BANDS = [0, -20, -40, -60, -80, 20, 40, 60, 80]   # 0=level, -up, +down
+    YAW_STEP_DEG = 18                                        # 20 samples / 360°
+
     def sample_segment(label_weather, label_time, seconds):
-        """Sweep the camera collecting samples labelled (weather,time) for
+        """Raster-scan the sphere collecting samples labelled (weather,time) for
         `seconds`. Returns "done", "stop" (panic/focus → end run), or "reroam"
-        (the view went corrupted/submerged → leave this spot before drowning)."""
+        (submerged/lava → leave before drowning)."""
         nonlocal next_ckpt
         wp.set_environment(weather=label_weather, time_of_day=label_time)
         wp.set_suppress_sampling(False)
         t0 = time.time()
-        step = 0
+        n_steps = max(1, int(round(360.0 / YAW_STEP_DEG)))
         while time.time() - t0 < seconds and time.time() < deadline:
             if not wait_focus("segment"):
                 return "stop"
-            try:
-                dy = int(20 * np.sin(step * 0.4))
-                mouse.move(args.pan, dy)
-                time.sleep(args.settle)
-                frame = capture.get_frame()
-                if is_corrupted_view(frame):
-                    # The spot turned submerged/lava — don't sit (would drown
-                    # on peaceful) and don't bank junk: bail and re-roam.
-                    wp.set_suppress_sampling(True)
-                    log("  segment view went submerged/lava — leaving to re-roam")
-                    return "reroam"
-                f3 = f3_reader.read(frame)
-                wp.update(frame, f3)                 # collects + self-teaches
-                step += 1
-            except Exception as e:
-                log(f"segment step error: {e!r}")
-                time.sleep(0.2)
-            if time.time() >= next_ckpt:
-                _checkpoint()
+            cur = look_straight_down()                # known reference: +90
+            for band in PITCH_BANDS:
+                if time.time() - t0 >= seconds or time.time() >= deadline:
+                    break
+                if not wait_focus("segment"):
+                    return "stop"
+                cur = set_pitch(cur, band)            # absolute pitch for this band
+                # Submersion is only judged on DOWN bands, where the lower-centre
+                # is the ground beneath us (looking up at sky would false-trip).
+                check_submerged = band >= 40
+                for _ in range(n_steps):
+                    if time.time() - t0 >= seconds or time.time() >= deadline:
+                        break
+                    try:
+                        mouse.move(int(YAW_STEP_DEG * px_per_deg), 0)   # yaw only
+                        time.sleep(args.settle)
+                        frame = capture.get_frame()
+                        if check_submerged and is_corrupted_view(frame):
+                            wp.set_suppress_sampling(True)
+                            log("  segment view submerged/lava — re-roaming")
+                            return "reroam"
+                        f3 = f3_reader.read(frame)
+                        wp.update(frame, f3)            # collects + self-teaches
+                    except Exception as e:
+                        log(f"segment step error: {e!r}")
+                        time.sleep(0.2)
+                    if time.time() >= next_ckpt:
+                        _checkpoint()
         return "done"
 
     def _checkpoint():
