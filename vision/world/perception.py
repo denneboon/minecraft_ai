@@ -564,6 +564,11 @@ class WorldPerception:
         # "not commanded" -> fall back to the live readers.
         self._env_weather: Optional[str] = None
         self._env_time_of_day: Optional[str] = None
+        # When True, perception still tracks pose/map but saves NO training
+        # samples. The curriculum trainer sets this during teleport/transit and
+        # whenever the view is corrupted (submerged, mid-fall) so a bad moment
+        # can never poison the dataset. See set_suppress_sampling.
+        self._suppress_sampling: bool = False
         self._tick             = 0
         self._screen_ray:      Optional[ScreenRay] = None
         self._last_frame_shape: Optional[Tuple[int, int]] = None
@@ -1055,6 +1060,7 @@ class WorldPerception:
                 # training context for any downstream ML.
                 if (confirmed
                         and self.cfg.auto_sample_from_looking_at
+                        and not self._suppress_sampling
                         and self.sample_store is not None):
                     rejected = wf.diagnostics.get("corrections", [])
                     last_rejected = (rejected[-1].get("was")
@@ -1817,6 +1823,13 @@ class WorldPerception:
             self._env_weather = weather or None
         if time_of_day is not None:
             self._env_time_of_day = time_of_day or None
+
+    def set_suppress_sampling(self, suppress: bool) -> None:
+        """Pause/resume TRAINING-sample capture without affecting pose/map
+        tracking. The curriculum trainer suppresses during teleport/transit and
+        whenever the view is corrupted (submerged, mid-fall) so a bad frame
+        never becomes a labelled sample."""
+        self._suppress_sampling = bool(suppress)
 
     @staticmethod
     def _sky_brightness(frame_rgb) -> int:

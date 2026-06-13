@@ -70,6 +70,22 @@ forest ~64% "rain"):
   `trust_weather` (default off). **Snow is silent in MC → not caption-readable;
   use the commanded label.**
 
+## Diverse data collection (the curriculum trainer)
+`tools/train_curriculum.py` is the autonomous, command-driven way to bank a
+DIVERSE dataset (the old `train_overnight.py` only saw one spot). Cheats must be
+on. It makes the bot unkillable with infinite, **particle-free** effects
+(resistance V / fire+water breathing / slow-fall / saturation / regen /
+invisibility — NEVER night_vision, it'd wreck night lighting), **roams** with
+`/spreadplayers`, and at each stop cycles `/weather` + `/time`, labelling every
+sample with that ground truth via `set_environment`. Corruption guards (the
+point): sampling is **suppressed** during transit and on any submerged/lava
+colour-cast frame (`is_corrupted_view`), and a rain/thunder label is kept only
+when the **subtitle reader confirms** precipitation is actually falling (so
+commanding rain in a dry desert or a silent snowy biome can't mislabel a
+clear-looking scene). Same focus/panic contract as `train_overnight`; restores
+clear/day on exit. `train_overnight.py --weather/--time` remains the manual
+single-state path (still the one for snow: stand in a cold biome).
+
 ## Two-machine workflow
 Laptop collects data + runs the live bot; a GPU PC trains. `tools/sync.py`
 moves the gitignored data by a single zip (`export-samples`/`import-samples`
