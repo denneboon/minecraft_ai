@@ -80,6 +80,7 @@ class Maker:
         last_msg = "no progress"
         prev_state = None
         stuck_rounds = 0
+        gather_fails: dict = {}     # raw item -> consecutive rounds it failed
         for rnd in range(max_rounds):
             avail = self._read_counts()
             if avail.get(target_id, 0) >= count:
@@ -115,6 +116,17 @@ class Maker:
                     self.log(f"[make] gather {qty} {item.split(':')[-1]}")
                     if self.gather_fn(item, qty):
                         progressed = True
+                        gather_fails.pop(item, None)
+                    else:
+                        # Per-item failure counter: a partial gather that keeps
+                        # nudging OTHER items' counts changes `state` and resets
+                        # stuck_rounds, masking a persistently un-gatherable
+                        # item. Abort on one that fails several rounds running.
+                        gather_fails[item] = gather_fails.get(item, 0) + 1
+                        if gather_fails[item] >= 3:
+                            return False, (f"can't gather "
+                                           f"{item.split(':')[-1]} "
+                                           f"(failed {gather_fails[item]} rounds)")
                 if not progressed:
                     return False, f"couldn't gather [{raw_summary}]"
                 continue                                  # re-read + re-plan
