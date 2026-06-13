@@ -74,6 +74,10 @@ def main(argv=None) -> int:
                     help="flag (block x condition) train cells below this count")
     ap.add_argument("--no-balance", action="store_true",
                     help="disable class-balanced loss (to A/B it)")
+    ap.add_argument("--log", action="store_true",
+                    help="append overall + per-condition acc to "
+                         "data/metrics/fusion_history.jsonl (track over the "
+                         "collection campaign)")
     args = ap.parse_args(argv)
 
     print("=" * 68)
@@ -153,6 +157,29 @@ def main(argv=None) -> int:
     print("=" * 68)
     print("  -> collect the thin cells (train_curriculum reaches biomes by /weather"
           " + roaming); re-run to confirm the gap closed.")
+
+    if args.log:
+        import json, time
+        from vision.world.metrics import default_metrics_root
+        cond_summary = {
+            k: {v: round(c / t, 3) for v, (c, t) in d.items() if t}
+            for k, d in cond_acc.items()
+        }
+        rec_log = {
+            "ts": time.strftime("%Y-%m-%d_%H-%M-%S"),
+            "n_samples": len(alls), "n_blocks": len(classes),
+            "overall_acc": round(acc, 4),
+            "visual_width": args.visual_width,
+            "class_balanced": (not args.no_balance),
+            "per_block": {_short(b): round(c / max(1, t), 3)
+                          for b, (c, t) in per_block.items()},
+            "per_condition": cond_summary,
+        }
+        root = default_metrics_root(); root.mkdir(parents=True, exist_ok=True)
+        with (root / "fusion_history.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec_log, sort_keys=True) + "\n")
+        print(f"  logged -> {root / 'fusion_history.jsonl'} "
+              f"(acc {acc:.1%}, {len(alls)} samples) — track quality as data grows")
     return 0
 
 
