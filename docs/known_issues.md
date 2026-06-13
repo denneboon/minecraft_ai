@@ -34,6 +34,33 @@ plank/stick/table count math).
   yields a confidently-wrong ledger entry. Fix: only relabel when the HUD count
   is consistent with the remembered item; else mark "unknown".
 
+## Live recogniser / perception (touch the running self-teach — validate live)
+
+- **`vision/world/cnn_recognizer.py` incremental embeds can mix embedding
+  spaces (HIGH, low-frequency).** `reload_incremental` → `_embed_into_index`
+  embeds new samples with the *current* model and appends to `self._emb`; if a
+  background retrain publishes a new model + rebuilds in between, appended
+  old-space vectors mix with new-space ones, making cosine sims meaningless for
+  those rows until the next full `_rebuild_index`. Self-healing but transiently
+  noisy. Fix: capture model identity at embed time and, if it changed, mark the
+  index dirty for a rebuild instead of appending. **Needs care** — it's the
+  live self-teaching path; validate that the rebuild cadence isn't thrashed.
+- **`vision/world/cnn_recognizer.py` texture-proto retrain thrash (MED).** If a
+  real train bails (fewer than `min_blocks_to_train` trainable classes) it
+  doesn't clear `_texture_proto`, so every `reload`/`reload_incremental`
+  re-triggers a background train thread that bails again — CPU thrash in the
+  cold-start (few-blocks) case. Fix: gate the texture-proto trigger in
+  `_maybe_kickoff_training` on having ≥ `min_blocks_to_train` real classes
+  (already computed nearby). Low impact once the store has enough blocks.
+- **`vision/pose_filter.py` force-accept after `max_hold_seconds` (MED).** After
+  a sustained reject streak the next read is accepted with only the hard
+  y/pitch caps, no velocity check — an in-range-but-wrong XYZ jump can become
+  the new ground truth ("teleport the eye"). The naive fix (velocity-check it)
+  BREAKS the intended recovery after a long legitimate blind gap (the player
+  really did move far). Correct fix: require N consecutive *mutually
+  consistent* reads before re-trusting, rather than force-accepting one.
+  Validate against busy/garbled scenes.
+
 ## Knowledge / catalog (latent, not on the craft path)
 
 - **`knowledge/catalog.py` `_tag_index` is one-level but `items_in_tag`
