@@ -263,7 +263,10 @@ class WorldSampleStore:
                         self._meta_warn_emitted = True
                         print(f"[sample_store][WARN] metadata sidecar "
                               f"write failed for {meta_path.name}: {e!r}")
-            counts[short] = n + 1
+            # Re-read the count (eviction above may have lowered it) rather
+            # than using the pre-eviction ``n`` — ``n + 1`` overshot after an
+            # evict, drifting the cached count above the real file count.
+            counts[short] = counts.get(short, 0) + 1
             self._saves_since_manifest += 1
             if self._saves_since_manifest >= self._manifest_every:
                 self._saves_since_manifest = 0

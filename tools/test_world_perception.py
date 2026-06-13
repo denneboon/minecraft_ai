@@ -302,6 +302,40 @@ def test_world_perception() -> bool:
     return True
 
 
+def test_sample_store_evict_dedup() -> bool:
+    """At the per-block cap, a DUPLICATE capture must be rejected WITHOUT
+    evicting (the old order evicted-then-found-duplicate, a net loss); a NEW
+    capture evicts the oldest and stays at the cap."""
+    print("\n[6b] Sample store: dedup-at-cap does not evict")
+    import tempfile
+    from pathlib import Path
+    from vision.world.sample_store import (
+        WorldSampleStore, WorldSampleStoreConfig, SAMPLE_SIZE)
+
+    def mk(v):
+        p = np.zeros((SAMPLE_SIZE, SAMPLE_SIZE, 3), dtype=np.uint8)
+        p[..., 0] = v; p[..., 1] = (v * 2) % 256
+        return p
+
+    with tempfile.TemporaryDirectory() as td:
+        store = WorldSampleStore(
+            Path(td), config=WorldSampleStoreConfig(max_samples_per_block=3))
+        bid = "minecraft:stone"
+        for v in (40, 90, 150):
+            store.save(bid, mk(v))
+        at_cap = store.total_samples() == 3
+        dup = store.save(bid, mk(90))            # duplicate at cap
+        held = store.total_samples() == 3         # must NOT have dropped to 2
+        fresh = store.save(bid, mk(210))          # new at cap -> evict oldest
+        still_cap = store.total_samples() == 3
+        (_ok if at_cap else _fail)("filled the block to its cap (3)")
+        (_ok if (dup is None and held) else _fail)(
+            "duplicate at cap is rejected WITHOUT eviction (no data loss)")
+        (_ok if (fresh is not None and still_cap) else _fail)(
+            "a NEW capture at cap evicts the oldest and stays at cap")
+        return at_cap and dup is None and held and fresh is not None and still_cap
+
+
 def test_sample_store_and_recognizer() -> bool:
     print("\n[6] Sample store + recognizer + map renderer")
     import tempfile
@@ -1475,6 +1509,7 @@ def main() -> int:
         ("garble_gate",     test_garble_sample_gate()),
         ("confirm_gate",    test_multiframe_confirm_gate()),
         ("confirm_voxel",   test_confirm_voxel_keyed()),
+        ("evict_dedup",     test_sample_store_evict_dedup()),
         ("held_occlusion",  test_held_item_occlusion()),
         ("two_map_api",     test_two_map_api()),
         ("temporal_vote",   test_temporal_voter()),
