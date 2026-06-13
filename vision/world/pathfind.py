@@ -29,20 +29,21 @@ The WorldMap stores only OBSERVED voxels. Anything else returns
 ``get_block() == None``. We expose a configurable policy on how to
 treat unknown space:
 
-  * ``"passable"`` (default) — treat unknown as air. Lets the
-    pathfinder route through unobserved space in open biomes. The
-    walker must validate progress as it goes; if it hits an actual
-    solid block, replan.
-  * ``"blocking"`` — treat unknown as solid. The pathfinder only
-    routes through observed-passable space. Safer indoors / in caves
-    but useless until the AI has scanned the area.
-  * ``"ground_only"`` — unknown is passable EXCEPT for the cell
-    directly under a candidate standable position, which must be a
-    known solid. Compromise: lets us walk through air we haven't
-    looked at, but won't blindly step off cliffs into unknowns.
+  * ``"ground_only"`` (DEFAULT) — unknown is passable EXCEPT for the
+    cell directly under a candidate standable position, which must be a
+    known solid. Compromise: lets us walk through air we haven't looked
+    at, but won't blindly step (or descend) off into unknowns — the
+    walker handles small unexpected drops it meets during execution.
+  * ``"passable"`` — treat unknown as air, AND optimistically as ground
+    under a step. Lets the pathfinder route through (and descend into)
+    unobserved space in open biomes; the walker validates as it goes and
+    replans if it hits an actual solid. ``NavigateTo`` uses this.
+  * ``"blocking"`` — treat unknown as solid. The pathfinder only routes
+    through observed-passable space. Safer indoors / in caves but
+    useless until the AI has scanned the area.
 
-The default ``passable`` matches the open-biome reality the AI
-currently operates in.
+The default ``ground_only`` is the conservative middle ground; callers
+that want to plan through/into unobserved terrain pass ``passable``.
 """
 
 from __future__ import annotations
