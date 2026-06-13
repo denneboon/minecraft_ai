@@ -388,7 +388,7 @@ class MCAssets:
         if not base.is_dir():
             raise RuntimeError(
                 f"No assets cache at {base}. Run "
-                f"`python -m vision.mc_assets --extract` to create it."
+                f"`python -m vision.mc_assets --jar <path-to-minecraft.jar>` to create it."
             )
         if version is None:
             versions = [d.name for d in base.iterdir()
@@ -396,7 +396,7 @@ class MCAssets:
             if not versions:
                 raise RuntimeError(
                     f"No extracted versions in {base}. Run "
-                    f"`python -m vision.mc_assets --extract`."
+                    f"`python -m vision.mc_assets --jar <path-to-minecraft.jar>`."
                 )
             version = sorted(versions, key=_version_key, reverse=True)[0]
         root = base / version

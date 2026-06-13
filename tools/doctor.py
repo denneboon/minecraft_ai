@@ -62,7 +62,8 @@ def main() -> int:
         _p("PASS" if cuda else "WARN",
            f"PyTorch {torch.__version__}",
            f"CUDA available: {cuda} ({name})"
-           if cuda else "CPU-only - install the CUDA build to train on the GPU")
+           if cuda else "CPU-only - fine (training just slower). Only an NVIDIA "
+                        "GPU + the cu1xx torch build enables CUDA; AMD/none stays CPU")
     except Exception as e:
         _p("FAIL", "PyTorch missing", repr(e))
 
