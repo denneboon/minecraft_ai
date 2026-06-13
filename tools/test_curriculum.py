@@ -80,11 +80,16 @@ def test_resolve_label() -> bool:
     checks = [
         ("clear", "clear", "minecraft:desert", "clear"),
         ("rain", "rain", "minecraft:plains", "rain"),
+        # rain biome + NO subtitle (Show Subtitles off) must STILL label rain —
+        # the biome is enough; this is the bug that skipped all rain before.
+        ("rain", "clear", "minecraft:plains", "rain"),
         ("rain", "clear", "minecraft:snowy_plains", "snow"),
         ("rain", "clear", "minecraft:desert", None),
-        ("rain", "clear", None, None),                 # unknown biome -> safe skip
+        ("rain", "clear", None, None),                 # unknown + no caption -> skip
+        ("rain", "rain", None, "rain"),                # unknown biome, caption confirms
+        ("thunder", "clear", "minecraft:plains", "thunder"),
         ("thunder", "thunder", "minecraft:plains", "thunder"),
-        ("thunder", "rain", "minecraft:plains", "thunder"),
+        ("thunder", "clear", "minecraft:snowy_plains", "snow"),
         ("thunder", "clear", "minecraft:desert", None),
     ]
     ok = True

@@ -138,22 +138,27 @@ def is_corrupted_view(frame) -> bool:
 
 
 def resolve_label(weather_cmd, subtitle_state, biome):
-    """Decide the TRUSTED weather label for a commanded state, given what the
-    subtitle reader actually saw + the biome. Returns the label or None
-    ("don't sample this segment", e.g. rain commanded in a dry biome where
-    nothing falls)."""
+    """Decide the TRUSTED weather label for a commanded state. The BIOME (read
+    reliably from F3) is the primary signal: on the surface, commanding rain in
+    a rain biome rains, in a snowy biome falls as SILENT snow, and in a dry
+    biome (desert/savanna/badlands) nothing falls. The subtitle reader is an
+    extra confirmation, used to decide UNKNOWN biomes (and it's fine if "Show
+    Subtitles" is off — biome alone covers known biomes). Returns the label, or
+    None = "don't sample this segment" (nothing would fall / can't tell)."""
     if weather_cmd == "clear":
         return "clear"            # clear looks clear in every biome
-    if weather_cmd == "thunder":
-        if subtitle_state in ("thunder", "rain"):
-            return "thunder"      # caption confirms precipitation + it's a storm
-        return None               # nothing fell (dry biome) -> don't mislabel
-    if weather_cmd == "rain":
-        if subtitle_state in ("rain", "thunder"):
-            return "rain"         # confirmed falling rain
-        if biome_precip(biome) == "snow":
-            return "snow"         # snowy biome: precip falls as SILENT snow
-        return None               # dry biome / unconfirmed -> skip (no poison)
+    if weather_cmd not in ("rain", "thunder"):
+        return None
+    precip = biome_precip(biome)
+    if precip == "snow":
+        return "snow"             # snowy biome: silent snow (thunder or not)
+    if precip == "none":
+        return None               # dry biome: nothing falls -> never mislabel
+    if precip == "rain":
+        return "thunder" if weather_cmd == "thunder" else "rain"
+    # Unknown biome: fall back to the subtitle confirmation.
+    if subtitle_state in ("rain", "thunder"):
+        return "thunder" if weather_cmd == "thunder" else "rain"
     return None
 
 
@@ -184,6 +189,12 @@ def main(argv=None) -> int:
     ap.add_argument("--per-block-cap", type=int, default=260)
     ap.add_argument("--no-roam", action="store_true",
                     help="stay put (only cycle weather/time here)")
+    ap.add_argument("--idle-exit-sec", type=float, default=180.0,
+                    help="end the run after MC stays UNFOCUSED this long. While "
+                         "unfocused it just pauses (never grabs focus back); a "
+                         "brief tab-away blip resumes. Generous (3 min) so the "
+                         "startup hand-off + quick checks don't kill a long "
+                         "unattended run.")
     ap.add_argument("--time-day", default="noon",
                     help="/time set arg used for the 'day' label (default noon)")
     ap.add_argument("--time-night", default="midnight",
@@ -282,9 +293,10 @@ def main(argv=None) -> int:
             return True
         lost = time.time()
         log(f"MC lost focus{(' ('+reason+')') if reason else ''} — stopped "
-            f"controlling (not grabbing focus). Exiting if away ~15s.")
+            f"controlling (not grabbing focus). Exiting if away "
+            f"~{args.idle_exit_sec:.0f}s.")
         while not safety.allow_input():
-            if _panic() or time.time() - lost > 15.0:
+            if _panic() or time.time() - lost > args.idle_exit_sec:
                 return False
             write_status({"paused": True}); time.sleep(1.0)
         log("MC focused again — resuming.")
@@ -415,7 +427,7 @@ def main(argv=None) -> int:
                     break
                 tset = args.time_day if tlabel == "day" else args.time_night
                 cmd(f"/time set {tset}", wait=0.3)
-                cmd(f"/weather {wcmd}", wait=3.0)     # let it fade in
+                cmd(f"/weather {wcmd}", wait=5.0)     # let it fully fade in
                 sub = "clear"
                 reader = getattr(wp, "subtitle_weather_reader", None)
                 if reader is not None and wcmd != "clear":
