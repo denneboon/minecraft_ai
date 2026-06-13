@@ -302,6 +302,17 @@ class ContextFusionRecognizer:
                 self._note = ("feature-set mismatch: model was trained with a "
                               "different context set; retrain")
                 return False
+            # Rebuild the net from the architecture the checkpoint was TRAINED
+            # with (visual_width, embed_dim, …), not the current defaults —
+            # otherwise a non-default --visual-width model fails state_dict load.
+            import dataclasses as _dc
+            saved_cfg = ck.get("cfg") or {}
+            if saved_cfg:
+                known = {f.name for f in _dc.fields(ContextFusionConfig)}
+                prev_path = self.cfg.model_path
+                self.cfg = ContextFusionConfig(
+                    **{k: v for k, v in saved_cfg.items() if k in known})
+                self.cfg.model_path = prev_path
             classes = ck["classes"]
             model = _FusionNet(self.cfg, self._ctx_dim(), len(classes))
             model.load_state_dict(ck["state_dict"])

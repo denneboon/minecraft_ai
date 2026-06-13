@@ -60,8 +60,11 @@ def test_biome_precip() -> bool:
 def test_corrupted_view() -> bool:
     print("\n[2] is_corrupted_view (submerged / lava cast)")
     underwater = is_corrupted_view(_frame((40, 75, 140)))
-    lava = is_corrupted_view(_frame((185, 95, 50)))
+    lava = is_corrupted_view(_frame((205, 70, 25)))       # real lava: blue-starved
     normal = is_corrupted_view(_frame((95, 115, 80)))     # grassy/brown scene
+    # Orange BADLANDS / red-sand terrain keeps blue ≈80 — must NOT read as lava
+    # (the false positive that made the bot flee every orange biome).
+    badlands_ok = not is_corrupted_view(_frame((155, 100, 82)))
     # A real outdoor view: bright blue sky fills the UPPER frame, terrain the
     # lower. The detector samples only the lower-centre band, so this must NOT
     # trip (the bug that made it re-teleport forever).
@@ -69,10 +72,11 @@ def test_corrupted_view() -> bool:
     sky[: int(sky.shape[0] * 0.55)] = (90, 140, 215)      # bright sky on top
     sky_ok = not is_corrupted_view(sky)
     (_ok if underwater else _fail)("underwater blue cast -> corrupted")
-    (_ok if lava else _fail)("lava orange cast -> corrupted")
+    (_ok if lava else _fail)("blue-starved lava cast -> corrupted")
     (_ok if not normal else _fail)("a normal terrain frame -> NOT corrupted")
+    (_ok if badlands_ok else _fail)("orange badlands terrain -> NOT corrupted")
     (_ok if sky_ok else _fail)("bright sky filling the upper frame -> NOT corrupted")
-    return underwater and lava and (not normal) and sky_ok
+    return underwater and lava and (not normal) and badlands_ok and sky_ok
 
 
 def test_resolve_label() -> bool:

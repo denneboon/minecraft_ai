@@ -89,9 +89,15 @@ def main(argv=None) -> int:
     if len(classes) < 2 or not test:
         print("  not enough data (collect more via train_overnight)."); return 0
 
+    # Resolve the output to an ABSOLUTE path so it lands in the repo's
+    # data/calibration regardless of the CWD it was launched from (a relative
+    # default silently wrote next to wherever you ran it — PC finding).
+    out_path = args.out or ContextFusionConfig().model_path
+    if not os.path.isabs(out_path):
+        out_path = os.path.join(ROOT, out_path)
     cfg = ContextFusionConfig(
         epochs=args.epochs, visual_width=args.visual_width, embed_dim=args.embed_dim,
-        model_path=args.out or ContextFusionConfig().model_path)
+        model_path=out_path)
     rec = ContextFusionRecognizer(store, config=cfg, feature_set=fs)
     print(f"  training (epochs={args.epochs}, visual_width={args.visual_width}, "
           f"embed_dim={args.embed_dim})…")

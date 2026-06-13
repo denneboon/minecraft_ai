@@ -133,7 +133,12 @@ def is_corrupted_view(frame) -> bool:
     r, g, b = (float(patch[..., 0].mean()), float(patch[..., 1].mean()),
                float(patch[..., 2].mean()))
     submerged = (b > r * 1.5 and b > g * 1.15 and b > 55)   # teal: blue>green>red
-    lava = (r > b * 1.8 and r > g * 1.3 and r > 90)         # orange
+    # Lava overlay is BLUE-STARVED orange (b≈10-30); ORANGE TERRAIN (badlands,
+    # red sand, terracotta) keeps blue ≈75-90, so a hard blue cap separates
+    # them. Without this the bot fled every orange biome and banked nothing
+    # there (PC finding). (b<45 + very red-dominant = only a true full-lava
+    # view; the rare case of standing in lava on peaceful.)
+    lava = (r > 130 and b < 45 and r > b * 2.5 and r > g * 1.4)
     return bool(submerged or lava)
 
 
@@ -182,11 +187,14 @@ def main(argv=None) -> int:
                     help="seconds of sampling per (weather,time) segment")
     ap.add_argument("--center", type=int, nargs=2, default=[0, 0],
                     metavar=("X", "Z"), help="/spreadplayers centre")
-    ap.add_argument("--range", type=int, default=6000,
-                    help="/spreadplayers max range from centre (world size)")
+    ap.add_argument("--range", type=int, default=30000,
+                    help="/spreadplayers max range from centre. Wide by default: "
+                         "the spawn belt (~6k) is all grass/dirt/leaves/logs; "
+                         "reaching badlands/deserts/snow needs tens of thousands "
+                         "of blocks (PC finding).")
     ap.add_argument("--pan", type=int, default=34, help="yaw mouse-move per step")
     ap.add_argument("--settle", type=float, default=0.22)
-    ap.add_argument("--per-block-cap", type=int, default=260)
+    ap.add_argument("--per-block-cap", type=int, default=400)
     ap.add_argument("--no-roam", action="store_true",
                     help="stay put (only cycle weather/time here)")
     ap.add_argument("--idle-exit-sec", type=float, default=180.0,
@@ -314,44 +322,37 @@ def main(argv=None) -> int:
             if not args.no_roam:
                 cx, cz = args.center
                 cmd(f"/spreadplayers {cx} {cz} 0 {args.range} false @s", wait=0.4)
-            # Let chunks LOAD before judging anything: right after a teleport
-            # the client shows sky/fog while terrain streams in, so an early
-            # frame is all-sky — not a real view. Wait, then require a STABLE
-            # pose (landed + loaded), and only THEN decide if it's submerged.
+            # Let chunks LOAD before judging: right after a teleport the client
+            # shows sky/fog while terrain streams in, so an early frame is
+            # all-sky — not a real view. Wait, settle, THEN judge.
             time.sleep(2.5)
-            stable = 0
-            last_y = None
+            # Settle ~4s so any fall finishes + terrain renders; read the biome
+            # whenever F3 surfaces it. NOTE: acceptance does NOT require a numeric
+            # pose — on some displays the F3 XYZ lines garble on bright terrain
+            # while the biome line still reads, and demanding a stable pose.y
+            # wrongly rejected those biomes (PC finding). A time-based settle +
+            # the not-submerged check (both display-robust) is enough.
             t0 = time.time()
-            while time.time() - t0 < 7.0:
+            while time.time() - t0 < 4.0:
                 frame = capture.get_frame()
                 f3 = f3_reader.read(frame)
-                wf = wp.update(frame, f3)        # pose/map only (suppressed)
-                if wf.pose is not None:
-                    y = wf.pose.y
-                    if last_y is not None and abs(y - last_y) < 0.1:
-                        stable += 1
-                    else:
-                        stable = 0               # pose jumped -> not settled yet
-                    last_y = y
-                    biome = getattr(f3, "biome", None) or biome
+                wp.update(frame, f3)             # pose/map only (suppressed)
+                biome = getattr(f3, "biome", None) or biome
                 time.sleep(0.2)
-                if stable >= 4:
-                    break
-            # Judge submersion ONLY now (settled + loaded), on a couple of fresh
-            # frames, so a loading-screen sky frame can't read as 'underwater'.
+            # Judge submersion (settled + loaded), 2-of-3 fresh frames, so a
+            # loading-screen sky frame can't read as 'underwater'.
             time.sleep(0.3)
             bad = sum(int(is_corrupted_view(capture.get_frame()))
                       for _ in range(3)) >= 2
-            if not bad and stable >= 3:
+            if not bad:
                 if biome:
                     biome_hits[biome.split(":")[-1]] = \
                         biome_hits.get(biome.split(":")[-1], 0) + 1
                 return True, biome
-            log(f"roam attempt {attempt+1}: "
-                f"{'submerged' if bad else 'no stable pose'} — retrying")
+            log(f"roam attempt {attempt+1}: submerged/lava view — retrying")
             if args.no_roam:
-                break
-        return (not args.no_roam) is False, biome  # no-roam: accept current spot
+                return False, biome          # current spot is bad, can't move
+        return False, biome
 
     def sample_segment(label_weather, label_time, seconds):
         """Sweep the camera collecting samples labelled (weather,time) for
