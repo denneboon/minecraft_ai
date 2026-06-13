@@ -253,16 +253,21 @@ class FindAndChopLogs:
             self._cleared = set()
             self._explore_attempts = 0      # found one -> refresh explore budget
             self._explore_anchor_yaw = None
-            # 3D reach (eye -> block): a too-high canopy log is NOT "in reach"
-            # just because it's horizontally close, so we don't get stuck
-            # clicking at something we can't touch.
-            if block_in_reach(pose, tgt, PLAYER_REACH):
+            # Chop from a COMFORTABLE distance (``self.reach``, ~3.5), not the
+            # 4.5-block reach EDGE: up close the crosshair lands on the target
+            # voxel reliably and F3/recognition read it cleanly (a far, small
+            # block is exactly where aim twitches and the id garbles). 3D reach
+            # (eye -> block) so a too-high canopy log isn't "in reach" just
+            # because it's horizontally close. The opportunistic-chop above
+            # still grabs anything already under the crosshair within full
+            # PLAYER_REACH, so we never walk away from a log we could hit now.
+            if block_in_reach(pose, tgt, self.reach):
                 self._sub = self._make_mine(tgt)
                 self._state = "chop"
                 return SkillResult(AgentAction(), SkillStatus.RUNNING, f"log {tgt} in reach; chopping")
-            # A* route AROUND known gaps/obstacles to within reach of the log,
+            # A* route AROUND known gaps/obstacles to the comfortable distance,
             # following the path with the reactive WalkToward.
-            self._sub = NavigateTo(tgt, arrive_reach=PLAYER_REACH)
+            self._sub = NavigateTo(tgt, arrive_reach=self.reach)
             self._state = "approach"; self._approach_ticks = 0
             return SkillResult(AgentAction(), SkillStatus.RUNNING, f"log {tgt}; navigating")
 
