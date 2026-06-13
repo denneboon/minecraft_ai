@@ -62,14 +62,16 @@ def test_corrupted_view() -> bool:
     underwater = is_corrupted_view(_frame((40, 75, 140)))
     lava = is_corrupted_view(_frame((185, 95, 50)))
     normal = is_corrupted_view(_frame((95, 115, 80)))     # grassy/brown scene
-    # blue SKY band on top, terrain below -> whole-frame mean stays balanced
-    sky = _frame((60, 120, 60))
-    sky[: sky.shape[0] // 8] = (60, 95, 165)
+    # A real outdoor view: bright blue sky fills the UPPER frame, terrain the
+    # lower. The detector samples only the lower-centre band, so this must NOT
+    # trip (the bug that made it re-teleport forever).
+    sky = _frame((70, 130, 70))                           # green terrain
+    sky[: int(sky.shape[0] * 0.55)] = (90, 140, 215)      # bright sky on top
     sky_ok = not is_corrupted_view(sky)
     (_ok if underwater else _fail)("underwater blue cast -> corrupted")
     (_ok if lava else _fail)("lava orange cast -> corrupted")
     (_ok if not normal else _fail)("a normal terrain frame -> NOT corrupted")
-    (_ok if sky_ok else _fail)("a blue sky band alone -> NOT corrupted")
+    (_ok if sky_ok else _fail)("bright sky filling the upper frame -> NOT corrupted")
     return underwater and lava and (not normal) and sky_ok
 
 

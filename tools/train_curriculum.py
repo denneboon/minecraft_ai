@@ -112,17 +112,28 @@ def biome_precip(biome):
 
 
 def is_corrupted_view(frame) -> bool:
-    """True if the frame has a strong global colour cast — the underwater
-    (blue/teal) or lava (orange) full-screen overlay — meaning the view is NOT
-    a clean look at a block and must not be sampled. Whole-frame means, so a
-    blue SKY (only the top band) doesn't trip it; being submerged tints
-    everything."""
+    """True if the view has the underwater (blue/teal) or lava (orange)
+    full-screen overlay — NOT a clean look at a block, must not be sampled.
+
+    Checks ONLY the LOWER-CENTRE band — the ground/terrain zone below the
+    horizon and above the hotbar. In a normal scene that's solid terrain
+    (green/brown/grey), never blue; the submerged overlay tints it (and the
+    whole screen) blue-teal, lava tints it orange. Sampling here — not the
+    whole frame — is what stops a bright BLUE SKY (which fills the UPPER frame
+    of any normal outdoor view) from false-positiving as 'underwater'."""
     if frame is None or getattr(frame, "size", 0) == 0:
         return False
-    f = frame.astype(np.float32)
-    r, g, b = float(f[..., 0].mean()), float(f[..., 1].mean()), float(f[..., 2].mean())
-    submerged = (b > r * 1.4 and b > g * 1.12 and g > r * 1.03 and b > 45)
-    lava = (r > b * 1.7 and r > g * 1.25 and r > 90)
+    h, w = frame.shape[:2]
+    y0, y1 = int(h * 0.60), int(h * 0.88)     # below horizon, above hotbar
+    x0, x1 = int(w * 0.32), int(w * 0.68)     # centre (clear of the hand)
+    patch = frame[y0:y1, x0:x1]
+    if patch.size == 0:
+        return False
+    patch = patch.astype(np.float32)
+    r, g, b = (float(patch[..., 0].mean()), float(patch[..., 1].mean()),
+               float(patch[..., 2].mean()))
+    submerged = (b > r * 1.5 and b > g * 1.15 and b > 55)   # teal: blue>green>red
+    lava = (r > b * 1.8 and r > g * 1.3 and r > 90)         # orange
     return bool(submerged or lava)
 
 
@@ -291,38 +302,41 @@ def main(argv=None) -> int:
             if not args.no_roam:
                 cx, cz = args.center
                 cmd(f"/spreadplayers {cx} {cz} 0 {args.range} false @s", wait=0.4)
-            # Settle: let the fall/chunk-load finish; require a stable pose.
-            # If we landed in water, BAIL immediately and re-roam — on peaceful
-            # the only death is drowning while still, so leaving fast (teleport
-            # out) is the whole protection (no water_breathing potion).
+            # Let chunks LOAD before judging anything: right after a teleport
+            # the client shows sky/fog while terrain streams in, so an early
+            # frame is all-sky — not a real view. Wait, then require a STABLE
+            # pose (landed + loaded), and only THEN decide if it's submerged.
+            time.sleep(2.5)
             stable = 0
             last_y = None
-            submerged = False
             t0 = time.time()
-            while time.time() - t0 < 6.0:
+            while time.time() - t0 < 7.0:
                 frame = capture.get_frame()
-                if is_corrupted_view(frame):
-                    submerged = True
-                    break                        # get OUT now (re-roam)
                 f3 = f3_reader.read(frame)
                 wf = wp.update(frame, f3)        # pose/map only (suppressed)
                 if wf.pose is not None:
                     y = wf.pose.y
                     if last_y is not None and abs(y - last_y) < 0.1:
                         stable += 1
+                    else:
+                        stable = 0               # pose jumped -> not settled yet
                     last_y = y
                     biome = getattr(f3, "biome", None) or biome
                 time.sleep(0.2)
                 if stable >= 4:
                     break
-            frame = capture.get_frame()
-            if not submerged and not is_corrupted_view(frame) and stable >= 3:
+            # Judge submersion ONLY now (settled + loaded), on a couple of fresh
+            # frames, so a loading-screen sky frame can't read as 'underwater'.
+            time.sleep(0.3)
+            bad = sum(int(is_corrupted_view(capture.get_frame()))
+                      for _ in range(3)) >= 2
+            if not bad and stable >= 3:
                 if biome:
                     biome_hits[biome.split(":")[-1]] = \
                         biome_hits.get(biome.split(":")[-1], 0) + 1
                 return True, biome
-            log(f"roam attempt {attempt+1}: bad spot "
-                f"(submerged/unstable) — retrying")
+            log(f"roam attempt {attempt+1}: "
+                f"{'submerged' if bad else 'no stable pose'} — retrying")
             if args.no_roam:
                 break
         return (not args.no_roam) is False, biome  # no-roam: accept current spot
