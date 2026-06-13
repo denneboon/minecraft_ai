@@ -23,9 +23,15 @@ API, no in-game data. `README.md` has the project layout; this file is the
     self-trains in the background from F3 labels). `tools/eval_recognizer.py`
     benchmarks it; `tools/train_overnight.py` collects + trains live.
   - `block_fusion.pt` — the context-FUSION recogniser (`vision/world/
-    context_fusion.py` + `context_features.py`): visual patch + ~14 context
-    inputs (face, biome, light, weather, neighbours, …). Train on a GPU box
-    with `tools/train_fusion_model.py`.
+    context_fusion.py` + `context_features.py`): visual patch + ~15 context
+    inputs (face, biome, light, weather, time_of_day, neighbours, …). Train
+    with `tools/train_fusion_model.py` (works on CPU; the AMD PC has no CUDA).
+    Loss is class-balanced so rare blocks aren't drowned out by grass/leaves.
+  - **Measuring it:** `tools/eval_recognizer.py` (CNN/NN confusion matrix);
+    `tools/diagnose_recognizer.py` (fusion accuracy SLICED by weather / time /
+    biome / face + the thinnest train cells — tells you where it fails and what
+    to collect); `tools/collection_report.py` (fast no-train coverage of the
+    store: per-block / per-condition counts + "collect-next" gaps).
   - **F3 OCR** (`vision/ocr.py`, `vision/glyph_ocr.py`) is template matching,
     not ML. It has a per-read time budget — busy/garbled scenes can't blow it
     up (a forest read was 3.7s before the budget; now ~0.25s).
@@ -75,16 +81,30 @@ forest ~64% "rain"):
 DIVERSE dataset (the old `train_overnight.py` only saw one spot). Cheats must be
 on; the world is PEACEFUL so there's NO potion-effect use — no mobs/hunger, and
 the only death (drowning while still) is prevented by the submerged-guard
-re-roam. It **roams** with `/spreadplayers`, sets `/difficulty peaceful` once,
-and at each stop cycles `/weather` + `/time`, labelling every sample with that
-ground truth via `set_environment`. Corruption guards (the point): sampling is
-**suppressed** during transit and on any submerged/lava colour-cast frame
-(`is_corrupted_view` → leave immediately, before drowning), and a rain/thunder
-label is kept only when the **subtitle reader confirms** precipitation is
-actually falling (so commanding rain in a dry desert can't mislabel a clear
-scene). Snow IS trained here: land in (or teleport to) a snowy biome, `/weather
-rain` → silent snow → labelled "snow". Same focus/panic contract as
-`train_overnight`; restores clear/day on exit. `train_overnight.py
+re-roam. It **roams** with `/spreadplayers` (wide `--range`, prefers FRESH
+biomes via `--biome-cap`), sets `/difficulty peaceful` once, and at each stop
+cycles `/weather` + `/time`, labelling every sample with that ground truth via
+`set_environment`. Key behaviours:
+- **Labelling is BIOME-driven** (biome reads reliably from F3): rain biome →
+  rain, snowy biome → silent snow, dry biome (desert/savanna/badlands) → skip.
+  The subtitle reader is only a fallback for UNKNOWN biomes — so weather data is
+  collected even with "Show Subtitles" off.
+- **Coverage-aware:** each station runs its (weather,time) segments
+  least-collected-first and the plan interleaves night early, so a run that
+  dies after one station still captured night (the diagnostic found night
+  starved when it was last).
+- **Raster scan, not a sine sweep:** pitch is reset to a known angle via MC's
+  pitch-clamp, then a full 360° yaw spin at each pitch band (level → up → down)
+  — even sphere coverage, no drift into the ground.
+- **Corruption guards:** sampling is suppressed during transit and on a
+  submerged frame (`is_corrupted_view`, gated on the lower-centre ground band +
+  a blue-starved lava test so orange badlands don't false-trip) → leave before
+  drowning. Roam acceptance does NOT require a numeric pose (load-wait +
+  look-down not-submerged check), so bright biomes where F3 XYZ garbles aren't
+  rejected.
+
+Same focus/panic contract as `train_overnight` (`--idle-exit-sec` grace for
+brief tab-aways); restores clear/day on exit. `train_overnight.py
 --weather/--time` remains the manual single-state path.
 
 ## Two-machine workflow
