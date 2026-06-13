@@ -49,6 +49,7 @@ import json
 import os
 import sys
 import time
+from collections import defaultdict
 import traceback
 
 import numpy as np
@@ -169,10 +170,12 @@ def resolve_label(weather_cmd, subtitle_state, biome):
 
 def station_plan():
     """The (weather_command, time_label) segments to run at each stop. Clear is
-    always safe; rain/thunder are attempted but only kept if confirmed."""
+    always safe; rain/thunder are attempted but only kept if confirmed. NIGHT is
+    interleaved early (not all last) so a station that ends early still captured
+    night — the diagnostic found night was starved when it was last."""
     return [
-        ("clear", "day"), ("rain", "day"), ("thunder", "day"),
-        ("clear", "night"), ("rain", "night"),
+        ("clear", "night"), ("clear", "day"), ("rain", "day"),
+        ("rain", "night"), ("thunder", "day"),
     ]
 
 
@@ -274,6 +277,11 @@ def main(argv=None) -> int:
     seg_done = 0
     seg_skipped = 0
     biome_hits = {}
+    # Per-(weather,time) segments completed THIS run. Each station runs its
+    # segments LEAST-COLLECTED first, so even if the run dies after one station
+    # every condition (esp. night, which used to be last and never reached) is
+    # represented — the diagnostic showed night was starved by the old order.
+    seg_counts = defaultdict(int)
 
     def write_status(extra=None):
         try:
@@ -465,7 +473,9 @@ def main(argv=None) -> int:
                 continue
             log(f"station {station}: biome={biome or 'unknown'} "
                 f"(precip={biome_precip(biome)})")
-            for wcmd, tlabel in station_plan():
+            # Least-collected (weather,time) combos first -> self-balancing.
+            for wcmd, tlabel in sorted(station_plan(),
+                                       key=lambda wt: seg_counts[wt]):
                 if time.time() >= deadline or not wait_focus("plan"):
                     break
                 tset = args.time_day if tlabel == "day" else args.time_night
@@ -495,6 +505,7 @@ def main(argv=None) -> int:
                 wp.set_suppress_sampling(True)
                 if res == "done":
                     seg_done += 1
+                    seg_counts[(wcmd, tlabel)] += 1
                 elif res == "reroam":
                     break                       # spot went bad → next station
                 else:                           # "stop": panic / focus-exit
