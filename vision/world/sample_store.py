@@ -186,7 +186,10 @@ class WorldSampleStore:
             except Exception:
                 continue
         if removed:
-            counts[short] = max(0, counts.get(short, removed) - removed)
+            # Derive the post-eviction count from the ACTUAL file scan, not
+            # ``cached - removed`` (whose default desynced the cache from disk
+            # when ``short`` was absent, letting a block grow past the cap).
+            counts[short] = max(0, len(pngs) - removed)
         return counts.get(short, 0) <= keep
 
     def save(self,
@@ -214,6 +217,15 @@ class WorldSampleStore:
         with self._lock:
             block_dir.mkdir(parents=True, exist_ok=True)
             counts = self._ensure_counts_locked()
+            # Content-dedup FIRST, before any eviction: a duplicate capture
+            # (the common "staring at one block" case) must be rejected without
+            # touching existing files. The old order evicted the oldest sample
+            # THEN found the new one was a duplicate and returned None — a net
+            # loss of one sample, eroding a block below its cap over time.
+            h = _hash_pixels(norm)
+            path = block_dir / f"{h}.png"
+            if path.is_file():
+                return None
             n = counts.get(short, 0)
             if n >= self.cfg.max_samples_per_block:
                 if not self.cfg.evict_oldest_when_full:
@@ -222,10 +234,6 @@ class WorldSampleStore:
                 if not self._evict_oldest_locked(block_dir, short, counts,
                                                  keep=self.cfg.max_samples_per_block - 1):
                     return None
-            h = _hash_pixels(norm)
-            path = block_dir / f"{h}.png"
-            if path.is_file():
-                return None
             bgr = cv2.cvtColor(norm, cv2.COLOR_RGB2BGR)
             ok = cv2.imwrite(str(path), bgr)
             if not ok:
