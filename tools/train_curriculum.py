@@ -200,6 +200,9 @@ def main(argv=None) -> int:
     ap.add_argument("--per-block-cap", type=int, default=400)
     ap.add_argument("--no-roam", action="store_true",
                     help="stay put (only cycle weather/time here)")
+    ap.add_argument("--biome-cap", type=int, default=3,
+                    help="after sampling a biome this many times this run, "
+                         "prefer to roam on to a fresher one (diversity).")
     ap.add_argument("--idle-exit-sec", type=float, default=180.0,
                     help="end the run after MC stays UNFOCUSED this long. While "
                          "unfocused it just pauses (never grabs focus back); a "
@@ -378,9 +381,18 @@ def main(argv=None) -> int:
             bad = sum(int(is_corrupted_view(capture.get_frame()))
                       for _ in range(3)) >= 2
             if not bad:
-                if biome:
-                    biome_hits[biome.split(":")[-1]] = \
-                        biome_hits.get(biome.split(":")[-1], 0) + 1
+                short = biome.split(":")[-1] if biome else None
+                # Prefer FRESH biomes: if this one is already well-sampled this
+                # run and we still have attempts, look elsewhere — diversity
+                # beats re-sampling the same grass/leaves the spawn belt is full
+                # of. Accept anyway once attempts run low so it never stalls.
+                if (short and not args.no_roam and attempt < 4
+                        and biome_hits.get(short, 0) >= args.biome_cap):
+                    log(f"roam attempt {attempt+1}: {short} already covered "
+                        f"({biome_hits[short]}x) — seeking a fresher biome")
+                    continue
+                if short:
+                    biome_hits[short] = biome_hits.get(short, 0) + 1
                 return True, biome
             log(f"roam attempt {attempt+1}: submerged/lava view — retrying")
             if args.no_roam:
