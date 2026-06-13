@@ -210,6 +210,19 @@ class WorldPerceptionConfig:
     # the last verdict is simply held. The detector itself also holds
     # whenever the sky isn't clearly in view, so a slow cadence is fine.
     weather_check_interval_sec: float = 5.0
+    # TRUSTWORTHY-WEATHER gate for TRAINING LABELS. The weather DETECTOR is a
+    # heuristic/centroid classifier (vision.weather), NOT an F3 fact — and on a
+    # mostly-clear forest run it mislabelled ~64% of samples as "rain". Feeding
+    # a confidently-wrong categorical poisons the model worse than a missing
+    # one. So weather is recorded into a sample's context ONLY when
+    # ``trust_weather`` is on AND the detector clears ``min_weather_confidence``
+    # AND it isn't "unknown"; otherwise the sample's weather is None (the
+    # fusion feature then sees it as "missing", which is honest). Default OFF
+    # until the detector is validated against /weather-labelled ground truth.
+    # (The detector still runs for the live agent's own use — this only gates
+    # what becomes a TRAINING label.)
+    trust_weather: bool = False
+    min_weather_confidence: float = 0.75
 
     # The legacy gate, kept for back-compat. Active only when
     # ``commit_only_from_looking_at`` is False.
@@ -1035,8 +1048,15 @@ class WorldPerception:
                         # captured — lets future training condition block
                         # appearance on rain/snow/clear instead of
                         # blending wet + dry views of the same block.
-                        "weather": (self._last_weather.state
-                                    if self._last_weather is not None else None),
+                        # Weather as a TRAINING LABEL only when trusted +
+                        # confident + not "unknown" (the detector is a heuristic
+                        # that confidently mislabels — see trust_weather). Else
+                        # None = "missing", never a wrong label. The confidence
+                        # is recorded too for later auditing/filtering.
+                        "weather": self._trusted_weather(),
+                        "weather_confidence": (
+                            round(float(self._last_weather.confidence), 3)
+                            if self._last_weather is not None else None),
                         "source": "f3_looking_at",
                         # ── Rich context for the recogniser ──────────────
                         # Which face we're looking at (top/side/bottom look
@@ -1695,6 +1715,20 @@ class WorldPerception:
         if ax >= az:
             return "east" if dx < 0 else "west"
         return "north" if dz < 0 else "south"
+
+    def _trusted_weather(self):
+        """Weather to record as a TRAINING LABEL — only a trusted, confident,
+        non-'unknown' verdict; else None (missing). The detector is a heuristic
+        that confidently mislabels (it called a clear forest "rain" ~64% of a
+        run), so an unvalidated verdict must never become a confident label."""
+        w = self._last_weather
+        if w is None or not self.cfg.trust_weather:
+            return None
+        state = getattr(w, "state", None)
+        conf = float(getattr(w, "confidence", 0.0) or 0.0)
+        if state in (None, "unknown") or conf < self.cfg.min_weather_confidence:
+            return None
+        return state
 
     @staticmethod
     def _sky_brightness(frame_rgb) -> int:
@@ -2483,7 +2517,7 @@ def build_world_perception(settings: Optional[Dict[str, Any]] = None,
                 "perception_time_budget_ms",
                 "weather_check_interval_sec",
                 "ray_consistency_max_dist", "max_sample_garble_ratio",
-                "occlusion_max_overlap",
+                "occlusion_max_overlap", "min_weather_confidence",
                 "inverse_validate_score_min"):
         if key in world_cfg:
             setattr(cfg, key, float(world_cfg[key]))
@@ -2498,7 +2532,7 @@ def build_world_perception(settings: Optional[Dict[str, Any]] = None,
                  "inverse_validate_curiosity",
                  "commit_only_from_looking_at",
                  "mask_crosshair_in_samples",
-                 "detect_weather",
+                 "detect_weather", "trust_weather",
                  "debug_f3_dump"):
         if bkey in world_cfg:
             setattr(cfg, bkey, bool(world_cfg[bkey]))
