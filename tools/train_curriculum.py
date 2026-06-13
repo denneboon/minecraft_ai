@@ -6,25 +6,27 @@ and time, driven entirely by Minecraft commands (cheats must be ON).
 The old `train_overnight.py` only ever saw wherever the bot happened to stand,
 so the dataset was narrow. This director instead:
 
-  1. Makes the bot effectively UNKILLABLE with infinite, particle-free effects
-     (resistance V, fire-/water-breathing, slow-falling, saturation,
-     regeneration, invisibility) so teleporting into an ocean / lava / a mob
-     pit can't kill it (which — with immediate-respawn on — would otherwise
-     teleport it to spawn mid-capture and poison samples).
-  2. ROAMS the world with /spreadplayers (lands on the surface) so it gathers
+  1. ROAMS the world with /spreadplayers (lands on the surface) so it gathers
      blocks from many biomes, not one spot.
-  3. At each stop, cycles WEATHER and TIME via /weather + /time and labels every
+  2. At each stop, cycles WEATHER and TIME via /weather + /time and labels every
      sample with that GROUND TRUTH (perception.set_environment) — so each
      condition trains cleanly + separately, no detection guesswork.
-  4. NEVER poisons the set with a bad view:
+  3. NEVER poisons the set with a bad view:
        * sample capture is SUPPRESSED during every teleport/transit;
        * a submerged/lava-tinted frame (global colour cast) suppresses capture
-         and triggers a re-roam — so underwater junk never lands;
+         and triggers an immediate re-roam — so underwater junk never lands AND
+         the bot leaves the water before it can drown (the one death risk on
+         PEACEFUL, where there are no mobs and no hunger);
        * a "rain"/"thunder" label is only trusted when the SUBTITLE reader
          confirms precipitation is actually falling (so commanding rain in a
          desert — where nothing falls — or a snowy biome — where it's silent —
-         doesn't mislabel a clear-looking scene). Snow is labelled only when a
-         snowy biome is confirmed from F3.
+         doesn't mislabel a clear-looking scene). Snow is labelled when a snowy
+         biome is confirmed from F3 (teleport there + /weather rain -> silent
+         snow -> labelled "snow").
+
+NO potion effects are used — the world is PEACEFUL (no mob/hunger death), so
+the only way to die is drowning while sitting still, which the submerged-guard
+re-roam prevents.
 
 It self-teaches the live CNN in the background (like train_overnight); the
 diverse samples it banks are what the GPU box later trains the fusion model on.
@@ -91,21 +93,6 @@ def _panic() -> bool:
 
 
 # ── Pure, testable helpers ──────────────────────────────────────────────────
-
-# Infinite, PARTICLE-FREE buffs (hideParticles=true is essential — effect
-# swirls over the screen would corrupt every sample). night_vision is
-# deliberately EXCLUDED: it would brighten night and destroy the day/night
-# lighting signal we're trying to train.
-SAFETY_EFFECTS = (
-    ("resistance", 4),      # level V -> 100% damage reduction (mobs, fall, …)
-    ("fire_resistance", 0), # lava / fire
-    ("water_breathing", 0), # never drown
-    ("slow_falling", 0),    # no fall damage on a teleport-drop
-    ("saturation", 4),      # never starve
-    ("regeneration", 4),    # heal through anything that slips past resistance
-    ("invisibility", 0),    # mobs ignore us -> no aggro crowding the view
-)
-
 
 def biome_precip(biome):
     """Coarse precipitation type for a biome id/name: 'snow' | 'rain' | 'none'
@@ -245,10 +232,6 @@ def main(argv=None) -> int:
         M._send_chat_message(keyboard, text)
         time.sleep(wait)
 
-    def apply_buffs():
-        for name, amp in SAFETY_EFFECTS:
-            cmd(f"/effect give @s minecraft:{name} infinite {amp} true", wait=0.12)
-
     def focus_ok():
         return safety.allow_input() and not _panic()
 
@@ -309,16 +292,21 @@ def main(argv=None) -> int:
                 cx, cz = args.center
                 cmd(f"/spreadplayers {cx} {cz} 0 {args.range} false @s", wait=0.4)
             # Settle: let the fall/chunk-load finish; require a stable pose.
+            # If we landed in water, BAIL immediately and re-roam — on peaceful
+            # the only death is drowning while still, so leaving fast (teleport
+            # out) is the whole protection (no water_breathing potion).
             stable = 0
             last_y = None
+            submerged = False
             t0 = time.time()
             while time.time() - t0 < 6.0:
                 frame = capture.get_frame()
+                if is_corrupted_view(frame):
+                    submerged = True
+                    break                        # get OUT now (re-roam)
                 f3 = f3_reader.read(frame)
                 wf = wp.update(frame, f3)        # pose/map only (suppressed)
-                if is_corrupted_view(frame):
-                    stable = 0
-                elif wf.pose is not None:
+                if wf.pose is not None:
                     y = wf.pose.y
                     if last_y is not None and abs(y - last_y) < 0.1:
                         stable += 1
@@ -328,7 +316,7 @@ def main(argv=None) -> int:
                 if stable >= 4:
                     break
             frame = capture.get_frame()
-            if not is_corrupted_view(frame) and stable >= 3:
+            if not submerged and not is_corrupted_view(frame) and stable >= 3:
                 if biome:
                     biome_hits[biome.split(":")[-1]] = \
                         biome_hits.get(biome.split(":")[-1], 0) + 1
@@ -341,7 +329,8 @@ def main(argv=None) -> int:
 
     def sample_segment(label_weather, label_time, seconds):
         """Sweep the camera collecting samples labelled (weather,time) for
-        `seconds`. Suppresses on any corrupted/submerged frame."""
+        `seconds`. Returns "done", "stop" (panic/focus → end run), or "reroam"
+        (the view went corrupted/submerged → leave this spot before drowning)."""
         nonlocal next_ckpt
         wp.set_environment(weather=label_weather, time_of_day=label_time)
         wp.set_suppress_sampling(False)
@@ -349,17 +338,18 @@ def main(argv=None) -> int:
         step = 0
         while time.time() - t0 < seconds and time.time() < deadline:
             if not wait_focus("segment"):
-                return False
+                return "stop"
             try:
                 dy = int(20 * np.sin(step * 0.4))
                 mouse.move(args.pan, dy)
                 time.sleep(args.settle)
                 frame = capture.get_frame()
                 if is_corrupted_view(frame):
-                    wp.set_suppress_sampling(True)   # don't bank junk
-                    f3 = f3_reader.read(frame); wp.update(frame, f3)
-                    wp.set_suppress_sampling(False)
-                    continue
+                    # The spot turned submerged/lava — don't sit (would drown
+                    # on peaceful) and don't bank junk: bail and re-roam.
+                    wp.set_suppress_sampling(True)
+                    log("  segment view went submerged/lava — leaving to re-roam")
+                    return "reroam"
                 f3 = f3_reader.read(frame)
                 wp.update(frame, f3)                 # collects + self-teaches
                 step += 1
@@ -368,7 +358,7 @@ def main(argv=None) -> int:
                 time.sleep(0.2)
             if time.time() >= next_ckpt:
                 _checkpoint()
-        return True
+        return "done"
 
     def _checkpoint():
         nonlocal next_ckpt
@@ -387,18 +377,17 @@ def main(argv=None) -> int:
     log(f"=== CURRICULUM start: {args.minutes:.0f} min, roam={'off' if args.no_roam else 'on'} "
         f"(center={tuple(args.center)} range={args.range}), segment={args.segment_sec:.0f}s ===")
     log(f"store={big_store.total_samples()} samples / {big_store.block_count()} blocks")
-    log("applying infinite safety buffs (resistance/fire/water/slow-fall/"
-        "saturation/regen/invisibility — particle-free)…")
+    log("NO potion effects (peaceful world); the only death risk is drowning "
+        "while still, prevented by the submerged-guard re-roam.")
     if not wait_focus("startup"):
         log("never got focus — aborting."); return 0
-    apply_buffs()
+    cmd("/difficulty peaceful", wait=0.3)   # guarantee no-mob / no-hunger
 
     try:
         while time.time() < deadline:
             if not wait_focus("loop"):
                 break
             station += 1
-            apply_buffs()                # refresh (cheap; survives a stray death)
             ok, biome = roam_and_verify()
             if not ok:
                 if _panic() or not safety.allow_input():
@@ -433,10 +422,14 @@ def main(argv=None) -> int:
                     continue
                 log(f"  segment {wcmd}/{tlabel} -> label weather={label}, "
                     f"time={tlabel} (subtitle={sub})")
-                if not sample_segment(label, tlabel, args.segment_sec):
-                    break
-                seg_done += 1
+                res = sample_segment(label, tlabel, args.segment_sec)
                 wp.set_suppress_sampling(True)
+                if res == "done":
+                    seg_done += 1
+                elif res == "reroam":
+                    break                       # spot went bad → next station
+                else:                           # "stop": panic / focus-exit
+                    raise KeyboardInterrupt
     except KeyboardInterrupt:
         log("interrupted.")
     finally:
