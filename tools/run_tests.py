@@ -36,6 +36,7 @@ OFFLINE_TESTS = [
     "test_walker",
     "test_inventory_synthetic",
     "test_weather",
+    "test_subtitle_weather",
     "test_script_runner",
     "test_hotbar",
     "test_safety",

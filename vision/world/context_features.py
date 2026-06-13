@@ -74,6 +74,7 @@ def _scalar(value: Optional[float], lo: float, hi: float) -> np.ndarray:
 # Stable small vocabularies for bounded categoricals.
 _FACES = ("top", "bottom", "north", "south", "east", "west")
 _WEATHER = ("clear", "rain", "snow", "thunder", "unknown")
+_TIME_OF_DAY = ("day", "night", "dawn", "dusk", "unknown")
 _DIMS = ("minecraft:overworld", "minecraft:the_nether", "minecraft:the_end")
 _NEIGHBOR_DIRS = ("py", "ny", "px", "nx", "pz", "nz")   # up/down then horizontal
 _NEIGHBOR_HASH_DIM = 12     # per-direction hashed block-id width
@@ -103,6 +104,14 @@ def _f_face(m):
 def _f_weather(m):
     v = m.get("weather")
     return _onehot(v if v in _WEATHER else ("unknown" if v else None), _WEATHER), v is not None
+
+def _f_time_of_day(m):
+    """Coarse time bucket (day/night/dawn/dusk). Lighting tints every block,
+    so this conditions appearance. Fed by the commanded label during training
+    (player runs ``/time set night``) or by the brightness->bucket reader live;
+    missing -> unknown (presence flag drops)."""
+    v = m.get("time_of_day")
+    return _onehot(v if v in _TIME_OF_DAY else ("unknown" if v else None), _TIME_OF_DAY), v is not None
 
 def _f_dimension(m):
     v = (m.get("pose") or {}).get("dimension") or m.get("dimension")
@@ -171,6 +180,7 @@ def _f_neighbors(m):
 DEFAULT_FEATURES: List[ContextFeature] = [
     ContextFeature("face",           len(_FACES),                _f_face),
     ContextFeature("weather",        len(_WEATHER),              _f_weather),
+    ContextFeature("time_of_day",    len(_TIME_OF_DAY),          _f_time_of_day),
     ContextFeature("dimension",      len(_DIMS),                 _f_dimension),
     ContextFeature("biome",          16,                         _f_biome),
     ContextFeature("sky_brightness", 1,                          _f_sky_brightness),

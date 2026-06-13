@@ -50,6 +50,25 @@ set (order/dims) or the architecture **invalidates existing fusion checkpoints**
 be one line in `DEFAULT_FEATURES` — but coordinate it with a retrain, and don't
 change it casually while another machine is mid-training. Adding new *metadata
 keys* in perception is safe (extractors read defensively; unknown keys ignored).
+(The `time_of_day` feature was the most recent addition — signature changed, so
+re-pull + retrain before relying on `block_fusion.pt` across machines.)
+
+## Weather & time conditioning
+Two honest sources, never the old sky-colour guess (it mislabelled a clear
+forest ~64% "rain"):
+- **Commanded labels (training):** fix a known state in-game (`/weather rain`,
+  `/time set night`) and pass `--weather/--time` to `train_overnight.py`, which
+  calls `perception.set_environment(...)`. Every sample is labelled with that
+  GROUND TRUTH — no detection — so each state trains cleanly + separately. This
+  is the reliable path and the one to use for snow (snow isn't its own weather:
+  rain falls as snow by biome temperature + altitude, and it's silent — see
+  below).
+- **Live (occasional):** `vision/subtitle_weather.py` reads MC's subtitle
+  captions ("Rain falls"/"Thunder rumbles") via the existing glyph OCR —
+  explicit text, position-robust, throttled. A confident `subtitle`/`command`
+  verdict is trusted as a label; the raw sky heuristic stays gated behind
+  `trust_weather` (default off). **Snow is silent in MC → not caption-readable;
+  use the commanded label.**
 
 ## Two-machine workflow
 Laptop collects data + runs the live bot; a GPU PC trains. `tools/sync.py`

@@ -76,6 +76,7 @@ from vision.world.types import (
     BlockObservation,
     LookingAtBlock,
     PlayerPose,
+    WeatherObservation,
     WorldFrame,
 )
 
@@ -223,6 +224,14 @@ class WorldPerceptionConfig:
     # what becomes a TRAINING label.)
     trust_weather: bool = False
     min_weather_confidence: float = 0.75
+    # The RELIABLE live weather source: read Minecraft's subtitle captions
+    # ("Rain falls" / "Thunder rumbles") instead of guessing from sky colour.
+    # It's explicit rendered text (near-100% OCR), so when it's the source a
+    # confident verdict IS trusted as a training label (no trust_weather gate
+    # needed). Snow is silent in MC -> not caption-detectable; use the
+    # COMMANDED label for snow (see set_environment). Falls back to the sky
+    # heuristic only if no subtitle reader was wired.
+    subtitle_weather: bool = True
 
     # The legacy gate, kept for back-compat. Active only when
     # ``commit_only_from_looking_at`` is False.
@@ -477,6 +486,7 @@ class WorldPerception:
                  sample_store: Optional[WorldSampleStore] = None,
                  inverse_renderer: Optional[InverseRenderer] = None,
                  weather_detector: Optional[Any] = None,
+                 subtitle_weather_reader: Optional[Any] = None,
                  block_id_validator: Optional[Callable[[str], bool]] = None,
                  sprite_block_predicate: Optional[Callable[[str], bool]] = None):
         self.cfg = config or WorldPerceptionConfig()
@@ -541,7 +551,19 @@ class WorldPerception:
             except Exception as e:
                 print(f"[perception][WARN] weather detector unavailable: {e!r}")
                 self.weather_detector = None
+        # Preferred live weather source: the subtitle-caption reader (reliable
+        # rendered text) — see WorldPerceptionConfig.subtitle_weather. Injected
+        # by build_world_perception (needs font templates). When present it
+        # supersedes the sky heuristic.
+        self.subtitle_weather_reader = subtitle_weather_reader
         self._last_weather = None
+        # COMMANDED environment overrides (training): when the player sets a
+        # known state with /weather or /time, set_environment records it here
+        # and every sample is labelled with that GROUND TRUTH — no detection,
+        # so each weather/time state trains cleanly and separately. None =
+        # "not commanded" -> fall back to the live readers.
+        self._env_weather: Optional[str] = None
+        self._env_time_of_day: Optional[str] = None
         self._tick             = 0
         self._screen_ray:      Optional[ScreenRay] = None
         self._last_frame_shape: Optional[Tuple[int, int]] = None
@@ -641,16 +663,29 @@ class WorldPerception:
         # The held result rides on every WorldFrame (incl. the pose-None
         # / stale-skip early returns below).
         _now = time.perf_counter()
-        if (self.weather_detector is not None and frame_rgb is not None
-                and (_now - self._last_weather_check)
-                >= self.cfg.weather_check_interval_sec):
+        if self._env_weather is not None:
+            # COMMANDED weather (training): ground truth, no detection at all.
+            if (self._last_weather is None
+                    or self._last_weather.state != self._env_weather):
+                self._last_weather = WeatherObservation(
+                    state=self._env_weather, confidence=1.0,
+                    sky_visible=1.0, source="command")
+        elif ((self.subtitle_weather_reader is not None
+               or self.weather_detector is not None) and frame_rgb is not None
+              and (_now - self._last_weather_check)
+              >= self.cfg.weather_check_interval_sec):
             self._last_weather_check = _now
             try:
-                # Pass pitch so the detector can skip frames where the
-                # camera is pitched down (top band isn't sky). f3.pitch
-                # is the raw read; None when pose is unavailable.
-                _pitch = getattr(f3, "pitch", None) if f3 is not None else None
-                w = self.weather_detector.detect(frame_rgb, pitch=_pitch)
+                if (self.cfg.subtitle_weather
+                        and self.subtitle_weather_reader is not None):
+                    # Reliable: read the subtitle captions. Pitch-independent
+                    # (subtitles are HUD). Source="subtitle" -> trusted label.
+                    w = self.subtitle_weather_reader.read(frame_rgb, now=_now)
+                else:
+                    # Fallback sky heuristic. Pass pitch so it can skip frames
+                    # pitched down (top band isn't sky).
+                    _pitch = getattr(f3, "pitch", None) if f3 is not None else None
+                    w = self.weather_detector.detect(frame_rgb, pitch=_pitch)
                 # Log only on a state TRANSITION so a long run doesn't
                 # spam, but the user can see the agent noticing weather.
                 if w is not None and (self._last_weather is None
@@ -1057,6 +1092,11 @@ class WorldPerception:
                         "weather_confidence": (
                             round(float(self._last_weather.confidence), 3)
                             if self._last_weather is not None else None),
+                        # Time-of-day as a TRAINING LABEL: the commanded value
+                        # only (None unless /time was set + set_environment).
+                        # Lighting tints every block; the sky_brightness scalar
+                        # below covers live lighting continuously.
+                        "time_of_day": self._time_of_day(),
                         "source": "f3_looking_at",
                         # ── Rich context for the recogniser ──────────────
                         # Which face we're looking at (top/side/bottom look
@@ -1717,18 +1757,66 @@ class WorldPerception:
         return "north" if dz < 0 else "south"
 
     def _trusted_weather(self):
-        """Weather to record as a TRAINING LABEL — only a trusted, confident,
-        non-'unknown' verdict; else None (missing). The detector is a heuristic
-        that confidently mislabels (it called a clear forest "rain" ~64% of a
-        run), so an unvalidated verdict must never become a confident label."""
+        """Weather to record as a TRAINING LABEL — only from a TRUSTED source;
+        else None (missing). Trusted sources, in order:
+          * "command"  — the player set /weather (ground truth, always trusted)
+          * "subtitle" — Minecraft's caption text (explicit, ~100% reliable):
+                         trusted when confident, no trust_weather gate needed.
+          * "heuristic"/"trained" sky-colour guess — gated by trust_weather
+            (default OFF: it called a clear forest "rain" ~64% of a run, so an
+            unvalidated verdict must never become a confident label).
+        A None/"unknown"/low-confidence verdict is always "missing"."""
+        # Commanded label short-circuits everything: it's ground truth.
+        if self._env_weather is not None:
+            return self._env_weather
         w = self._last_weather
-        if w is None or not self.cfg.trust_weather:
+        if w is None:
             return None
         state = getattr(w, "state", None)
         conf = float(getattr(w, "confidence", 0.0) or 0.0)
-        if state in (None, "unknown") or conf < self.cfg.min_weather_confidence:
+        if state in (None, "unknown"):
             return None
-        return state
+        source = getattr(w, "source", None)
+        if source == "command":
+            return state
+        if source == "subtitle":
+            return state if conf >= self.cfg.min_weather_confidence else None
+        if not self.cfg.trust_weather:
+            return None
+        return state if conf >= self.cfg.min_weather_confidence else None
+
+    def _time_of_day(self) -> Optional[str]:
+        """Time-of-day to record as a TRAINING LABEL. Only the COMMANDED value
+        (player ran /time set ...) is trusted — there's no reliable pixel
+        clock, and a brightness guess is wrong in caves. None when not
+        commanded (the continuous sky_brightness feature still captures live
+        lighting; this categorical is for clean day/night/dawn/dusk training)."""
+        return self._env_time_of_day
+
+    def set_environment(self, weather: Optional[str] = None,
+                        time_of_day: Optional[str] = None,
+                        clear: bool = False) -> None:
+        """Tell perception the KNOWN environment for a (training) session, so
+        every captured sample is labelled with that ground truth instead of a
+        detector guess. Use it together with the in-game commands, e.g. run
+        ``/weather rain`` + ``set_environment(weather="rain")``, or
+        ``/time set night`` + ``set_environment(time_of_day="night")``. Each
+        state then trains cleanly and separately, no detection needed.
+
+        ``weather`` ∈ {clear,rain,snow,thunder} (snow IS settable here even
+        though it's not caption-detectable live). ``time_of_day`` ∈
+        {day,night,dawn,dusk}. Pass ``clear=True`` to drop BOTH overrides and
+        return to the live readers (for normal play). Passing only one leaves
+        the other unchanged."""
+        if clear:
+            self._env_weather = None
+            self._env_time_of_day = None
+            self._last_weather_check = float("-inf")  # re-read live promptly
+            return
+        if weather is not None:
+            self._env_weather = weather or None
+        if time_of_day is not None:
+            self._env_time_of_day = time_of_day or None
 
     @staticmethod
     def _sky_brightness(frame_rgb) -> int:
@@ -2532,7 +2620,7 @@ def build_world_perception(settings: Optional[Dict[str, Any]] = None,
                  "inverse_validate_curiosity",
                  "commit_only_from_looking_at",
                  "mask_crosshair_in_samples",
-                 "detect_weather", "trust_weather",
+                 "detect_weather", "trust_weather", "subtitle_weather",
                  "debug_f3_dump"):
         if bkey in world_cfg:
             setattr(cfg, bkey, bool(world_cfg[bkey]))
@@ -2689,6 +2777,27 @@ def build_world_perception(settings: Optional[Dict[str, Any]] = None,
         except Exception as e:
             print(f"[world] weather detector disabled: {e}")
 
+    # Preferred live weather source: the subtitle-caption reader (reliable
+    # rendered text). Needs the MC font templates; disabled cleanly if those
+    # or the reader can't be built, leaving the sky heuristic as fallback.
+    subtitle_reader = None
+    if cfg.subtitle_weather:
+        try:
+            import os as _os
+            from vision.mcfont import ensure_font_cache
+            from vision.subtitle_weather import build_subtitle_weather_reader
+            _root = _os.path.dirname(_os.path.dirname(_os.path.dirname(
+                _os.path.abspath(__file__))))
+            font_cache = (((settings or {}).get("ocr", {}) or {})
+                          .get("font_cache_path")
+                          or _os.path.join(_root, "data", "calibration",
+                                           "mc_font.npz"))
+            templates = ensure_font_cache(str(font_cache))
+            subtitle_reader = build_subtitle_weather_reader(settings, templates)
+        except Exception as e:
+            print(f"[world] subtitle weather reader disabled "
+                  f"({e}) — falling back to sky heuristic.")
+
     return WorldPerception(
         config=cfg,
         block_classifier=block_cls,
@@ -2697,6 +2806,7 @@ def build_world_perception(settings: Optional[Dict[str, Any]] = None,
         sample_store=sample_store,
         inverse_renderer=inv_ren,
         weather_detector=weather_det,
+        subtitle_weather_reader=subtitle_reader,
         block_id_validator=block_id_validator,
         sprite_block_predicate=sprite_block_predicate,
     )

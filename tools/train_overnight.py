@@ -118,6 +118,18 @@ def main(argv=None) -> int:
                     help="[--walk] control ticks to walk per relocation")
     ap.add_argument("--walk-dist", type=float, default=10.0,
                     help="[--walk] waypoint distance per relocation (blocks)")
+    ap.add_argument("--weather", choices=["clear", "rain", "snow", "thunder"],
+                    default=None,
+                    help="COMMANDED weather label: set the SAME state in-game "
+                         "(/weather <state>; for snow use a snowy biome) and "
+                         "every sample is labelled with it as ground truth — "
+                         "no detection. Train each weather separately by "
+                         "running once per state. Omit to use the live reader.")
+    ap.add_argument("--time", dest="time_of_day",
+                    choices=["day", "night", "dawn", "dusk"], default=None,
+                    help="COMMANDED time-of-day label: set it in-game "
+                         "(/time set <day|night|...>) and samples are labelled "
+                         "with it. Omit to leave time-of-day unlabelled.")
     args = ap.parse_args(argv)
 
     wins = _find_minecraft_hwnd()
@@ -136,6 +148,16 @@ def main(argv=None) -> int:
     safety.start(); mouse.start(); capture.start()
     f3_reader = build_f3_reader(settings)
     wp = build_world_perception(settings)
+
+    # COMMANDED environment labels: when the user has fixed a known weather /
+    # time in-game (e.g. /weather rain), record it as ground truth on every
+    # sample instead of detecting — so each state trains cleanly + separately.
+    if args.weather or args.time_of_day:
+        wp.set_environment(weather=args.weather, time_of_day=args.time_of_day)
+        print(f"[overnight] COMMANDED environment: "
+              f"weather={args.weather or '(live)'}, "
+              f"time_of_day={args.time_of_day or '(none)'} — make sure the "
+              f"in-game state matches (/weather, /time set).")
 
     # Raise the per-block sample cap so a whole day/weather cycle of
     # conditions is retained (the default 80 would evict last-few-minutes).
