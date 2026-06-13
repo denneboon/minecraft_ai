@@ -489,9 +489,15 @@ def main(argv=None) -> int:
                 continue
             log(f"station {station}: biome={biome or 'unknown'} "
                 f"(precip={biome_precip(biome)})")
-            # Least-collected (weather,time) combos first -> self-balancing.
-            for wcmd, tlabel in sorted(station_plan(),
-                                       key=lambda wt: seg_counts[wt]):
+            # Segment order: least-collected combos first (self-balancing), BUT
+            # in a rare SNOWY biome do the rain/thunder (= silent snow) segments
+            # first — snowy biomes are scarce and a station can end early
+            # (re-roam / focus), so grab the snow while we're standing in it.
+            _snowy = biome_precip(biome) == "snow"
+            def _seg_key(wt):
+                snow_first = -1 if (_snowy and wt[0] in ("rain", "thunder")) else 0
+                return (snow_first, seg_counts[wt])
+            for wcmd, tlabel in sorted(station_plan(), key=_seg_key):
                 if time.time() >= deadline or not wait_focus("plan"):
                     break
                 tset = args.time_day if tlabel == "day" else args.time_night
