@@ -1,0 +1,66 @@
+# CLAUDE.md — operating guide for Claude working on this repo
+
+Pixel-only Minecraft AI (Java 1.21.x). The bot sees only the game **screen +
+F3 debug overlay** and acts through **synthetic keyboard/mouse** — no mod, no
+API, no in-game data. `README.md` has the project layout; this file is the
+"how to work here safely" guide. Branch: **`world-ai-recognizer`**.
+
+## Golden rules
+- **The bot only controls Minecraft when MC is the FOREGROUND window** — input
+  is gated to that, and capture is a screen grab. A backgrounded MC = every
+  action dropped + a stale frame. If the bot "does nothing" / acts on
+  impossible data, FIRST confirm MC is focused (see `tools/diag_capture.py`,
+  `tools/diag_control.py`) before debugging behaviour.
+- **Keep the offline suite green:** `python tools/run_tests.py` (no MC needed).
+  Run it after any change; it's the regression gate.
+- **Never commit `data/`** (samples, models, MC assets, logs — gitignored).
+- End commit messages with: `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.
+- Commit/push only when the user asks. Panic-stop any live tool with **Ctrl+Shift+F12**.
+
+## The system is a HYBRID (this matters)
+- **Perception = real ML.** Block recognition is the bot's main input.
+  - `block_cnn.pt` — the live visual recogniser (metric-learning CNN,
+    self-trains in the background from F3 labels). `tools/eval_recognizer.py`
+    benchmarks it; `tools/train_overnight.py` collects + trains live.
+  - `block_fusion.pt` — the context-FUSION recogniser (`vision/world/
+    context_fusion.py` + `context_features.py`): visual patch + ~14 context
+    inputs (face, biome, light, weather, neighbours, …). Train on a GPU box
+    with `tools/train_fusion_model.py`.
+  - **F3 OCR** (`vision/ocr.py`, `vision/glyph_ocr.py`) is template matching,
+    not ML. It has a per-read time budget — busy/garbled scenes can't blow it
+    up (a forest read was 3.7s before the budget; now ~0.25s).
+- **Decision-making = hand-coded** FSMs + classical search (A*). `agents/
+  treechop.py`, `agents/maker.py`, `agents/skills.py`. Not a learned policy —
+  interpretable + debuggable.
+
+## Robust labels + the two maps (don't regress these)
+A confirmed block / training label must pass: catalog validity + a garble
+gate (F3 `?`-ratio) + **multi-frame agreement** + **crosshair-ray geometry** —
+so a one-frame OCR slip never emits a stray id ("never randomly output
+sandstone"). `WorldMap.get_confirmed/iter_confirmed` = ground truth (F3
+looking-at only); `get_block/iter_blocks` = belief map (incl. CNN guesses).
+`wf.looking_at` is the raw read (responsive agent actions); `wf.looking_at_confirmed`
+is the gated one (map/training/display).
+
+## ⚠️ Fusion model is VERSION-FROZEN
+`context_features.py` `DEFAULT_FEATURES` and the `context_fusion.py` net define
+a checkpoint **signature** recorded in `block_fusion.pt`. Changing the feature
+set (order/dims) or the architecture **invalidates existing fusion checkpoints**
+(load is rejected on signature mismatch). Adding a context input is *meant* to
+be one line in `DEFAULT_FEATURES` — but coordinate it with a retrain, and don't
+change it casually while another machine is mid-training. Adding new *metadata
+keys* in perception is safe (extractors read defensively; unknown keys ignored).
+
+## Two-machine workflow
+Laptop collects data + runs the live bot; a GPU PC trains. `tools/sync.py`
+moves the gitignored data by a single zip (`export-samples`/`import-samples`
+content-merge; `export-model`/`import-model`). `tools/doctor.py` is a one-command
+env health check (deps, CUDA, data presence) — run it first on a fresh machine.
+The GPU build of PyTorch is required for `device=cuda`; the default pip torch is
+CPU-only.
+
+## Headline goal + how to run it
+`python tools/make.py wooden_pickaxe` — chop logs → craft planks/sticks/table →
+place table → 3×3 craft. Needs MC focused. Other live tools in `tools/` (craft,
+table_craft, diag_*). More detail in `docs/world_recognizer.md` and
+`docs/bot_actions.md`.
