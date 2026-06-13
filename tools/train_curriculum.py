@@ -190,11 +190,11 @@ def main(argv=None) -> int:
                     help="seconds of sampling per (weather,time) segment")
     ap.add_argument("--center", type=int, nargs=2, default=[0, 0],
                     metavar=("X", "Z"), help="/spreadplayers centre")
-    ap.add_argument("--range", type=int, default=30000,
+    ap.add_argument("--range", type=int, default=50000,
                     help="/spreadplayers max range from centre. Wide by default: "
                          "the spawn belt (~6k) is all grass/dirt/leaves/logs; "
                          "reaching badlands/deserts/snow needs tens of thousands "
-                         "of blocks (PC finding).")
+                         "of blocks. Escalates per retry when stuck in one biome.")
     ap.add_argument("--pan", type=int, default=34, help="yaw mouse-move per step")
     ap.add_argument("--settle", type=float, default=0.22)
     ap.add_argument("--per-block-cap", type=int, default=400)
@@ -355,7 +355,11 @@ def main(argv=None) -> int:
                 return False, None
             if not args.no_roam:
                 cx, cz = args.center
-                cmd(f"/spreadplayers {cx} {cz} 0 {args.range} false @s", wait=0.4)
+                # Escalate the range each retry: if we keep landing in the same
+                # over-covered biome (a big homogeneous spawn belt), reaching
+                # farther out is how we find badlands/desert/snow. Capped.
+                eff_range = min(args.range * (attempt + 1), 1_000_000)
+                cmd(f"/spreadplayers {cx} {cz} 0 {eff_range} false @s", wait=0.4)
             # Let chunks LOAD before judging: right after a teleport the client
             # shows sky/fog while terrain streams in, so an early frame is
             # all-sky — not a real view. Wait, settle, THEN judge.
