@@ -1440,6 +1440,18 @@ def test_f3_target_multiline() -> bool:
         _fail("garbage input should return None")
         return False
     _ok("garbage input returns None")
+
+    # Property-row leak guard (allowlist): a garbled id line followed by a clean
+    # block-state property row must NOT yield the property's key:value as a
+    # block id — the "never emit a stray id" guarantee.
+    for prop in ("crafting: false", "hinge: left", "axis: y", "snowy: false"):
+        leak = parse_looking_at_block(
+            ["Targeted Block: 100, 64, -50", "????????", prop,
+             "#minecraft:mineable/pickaxe"])
+        if leak is not None and leak.block_id and not leak.block_id.startswith("minecraft:"):
+            _fail(f"property row '{prop}' leaked as block id: {leak.block_id}")
+            return False
+    _ok("block-state property rows are not mistaken for block ids")
     return True
 
 

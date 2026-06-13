@@ -325,11 +325,33 @@ _NON_BLOCK_IDS = frozenset({
 _MIN_BLOCK_ID_LEN = 4
 
 
+# ALLOWLIST of valid block namespaces. Block-state PROPERTY rows parse to
+# ``<property>:<value>`` (``crafting: false`` -> ns="crafting"), and the old
+# denylist of property names was perpetually incomplete — every MC version adds
+# properties (``crafting``, ``hinge``, ``trial_spawner_state``, …) that leaked
+# their ``key:value`` as a confirmed block id at confidence 1.0. A namespace
+# ALLOWLIST can't be outrun: a real block id is always ``minecraft:`` (add
+# modded namespaces here if ever needed). This is the structural guard; the
+# perception layer's catalog validator is the authoritative downstream gate.
+_BLOCK_NAMESPACES = frozenset({"minecraft"})
+
+# Property VALUES that pass the length floor but are never a block-id stem —
+# rejected so an OCR bleed that drops the property key (leaving a bare value)
+# can't sneak through.
+_PROPERTY_VALUE_LITERALS = frozenset({
+    "true", "false", "left", "right", "none", "compare", "subtract",
+    "active", "inactive", "cooldown", "ejecting", "awake", "dormant",
+    "unlit", "small", "large", "tall", "wall_hanging",
+})
+
+
 def _looks_like_block_id(ns: str, bid: str) -> bool:
     """True iff ``ns:bid`` plausibly names a real block."""
-    if ns in _NON_BLOCK_NAMESPACES:
+    if ns not in _BLOCK_NAMESPACES:        # allowlist: property-key "namespaces" out
         return False
     if bid in _NON_BLOCK_IDS:
+        return False
+    if bid in _PROPERTY_VALUE_LITERALS:
         return False
     if bid in _SUSPICIOUS_PARTIAL_IDS:
         return False
