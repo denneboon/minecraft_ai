@@ -390,15 +390,16 @@ def _parse_lines(lines: List[str]) -> F3Info:
         # readable cardinal threw away good angles and left yaw/pitch
         # None (which stalled the god-bridge's precise-yaw step). So we
         # extract the angles whenever the line is IDENTIFIABLE as the
-        # Facing line — it contains ``facing`` or ``toward`` (the two
-        # structural words, far more OCR-robust than the cardinal) — AND
-        # carries an angle pair. The angle pair (two signed decimals) is
-        # itself specific enough that block-state property lines
-        # (``east: true``) never match, so we keep the old guard against
-        # them implicitly.
+        # Facing line — it uniquely contains ``Towards`` (matched by the
+        # substring ``toward``), which is far more OCR-robust than the
+        # cardinal — AND carries an angle pair. We do NOT also accept a bare
+        # ``facing`` token: vanilla BLOCK-STATE lines say ``facing=north``
+        # (furnaces / stairs / observers), so a stray OCR-bled decimal pair on
+        # such a line would otherwise corrupt yaw/pitch — dangerous for the
+        # precise-yaw god-bridge. ``Towards`` never appears in a blockstate.
         if info.yaw is None:
             ma = _RE_ANGLES.search(line)
-            if ma is not None and (("facing" in ll) or ("toward" in ll)):
+            if ma is not None and ("toward" in ll):
                 try:
                     info.yaw   = float(ma.group(1))
                     info.pitch = float(ma.group(2))

@@ -312,18 +312,22 @@ class Capture:
                 raise RuntimeError("Capture: stopped")
             if self._grab_thread is None or not self._grab_thread.is_alive():
                 self.start()
-            if self._latest is None:
-                # Block only until the very first frame is published.
-                if not self._first_frame.wait(timeout=3.0):
-                    raise RuntimeError("Capture: no frame within 3 s")
-                if self._latest is None:
-                    raise RuntimeError(
-                        f"Capture: grab thread produced no frame "
-                        f"({self._grab_err!r})")
+            # Read _latest ONLY under the lock (the grab thread writes it under
+            # the same lock). Reading it unsynchronised could observe a stale
+            # None right after the writer published a frame, spuriously raising
+            # "grab thread produced no frame" and aborting a live run.
             with self._frame_lock:
                 frame = self._latest
             if frame is None:
-                raise RuntimeError(f"Capture: no frame available ({self._grab_err!r})")
+                # Block only until the very first frame is published.
+                if not self._first_frame.wait(timeout=3.0):
+                    raise RuntimeError("Capture: no frame within 3 s")
+                with self._frame_lock:
+                    frame = self._latest
+                if frame is None:
+                    raise RuntimeError(
+                        f"Capture: grab thread produced no frame "
+                        f"({self._grab_err!r})")
             return frame
 
         # Synchronous path — lazy start + single-owner-thread guard so a

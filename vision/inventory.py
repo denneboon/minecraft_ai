@@ -1255,7 +1255,11 @@ class InventoryReader:
         if x1 <= x0 or y1 <= y0:
             return None
         crop = frame_rgb[y0:y1, x0:x1]
-        content = self.recognizer.recognize(crop)
+        # The cursor item is drawn over the GUI / world, NEVER over the grey
+        # slot background — so expect_slot_bg=False (like the HUD), else the
+        # slot-grey negative-evidence penalty is applied against a background
+        # that isn't grey and biases every cursor read toward wrong/empty.
+        content = self.recognizer.recognize(crop, expect_slot_bg=False)
         if content.is_empty:
             return None
         content.count      = max(1, self.count.read(crop))
