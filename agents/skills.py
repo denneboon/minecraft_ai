@@ -156,6 +156,39 @@ def placement_voxel(looking_at) -> Optional[Voxel]:
     return (pos[0] + n[0], pos[1] + n[1], pos[2] + n[2])
 
 
+# Blocks MC silently REPLACES when you place into them — so the placement voxel
+# being one of these is NOT an obstruction. Without this, no spot in a grassy /
+# flowery biome is ever 'placeable' (short_grass covers the ground), and the
+# table placer scans every view and times out (PC-observed on flower_forest).
+_REPLACEABLE_PLACE_INTO = frozenset({
+    "minecraft:short_grass", "minecraft:grass", "minecraft:tall_grass",
+    "minecraft:fern", "minecraft:large_fern", "minecraft:dead_bush",
+    "minecraft:seagrass", "minecraft:tall_seagrass", "minecraft:snow",
+    "minecraft:vine", "minecraft:glow_lichen", "minecraft:hanging_roots",
+    "minecraft:water", "minecraft:lava", "minecraft:fire", "minecraft:light",
+})
+
+
+def _is_replaceable_place_into(bid: Optional[str]) -> bool:
+    if not bid:
+        return True
+    if bid in _REPLACEABLE_PLACE_INTO:
+        return True
+    b = bid.split(":")[-1]
+    # All flowers (incl. 2-tall bottoms), saplings, mushrooms, crops, ferns,
+    # tulips, and the *_grass plants are replaceable. ``grass_block`` is a real
+    # solid ground block and is intentionally NOT matched (it doesn't end with
+    # ``_grass``? it does — guard it explicitly).
+    if b == "grass_block":
+        return False
+    return (b.endswith("_grass") or b.endswith("_fern") or b.endswith("_tulip")
+            or b.endswith("_sapling") or b.endswith("_mushroom")
+            or b in ("dandelion", "poppy", "blue_orchid", "allium",
+                     "azure_bluet", "oxeye_daisy", "cornflower", "torchflower",
+                     "lily_of_the_valley", "wither_rose", "sunflower", "lilac",
+                     "rose_bush", "peony", "pink_petals", "snow"))
+
+
 def can_place_block(pose, looking_at, world_map=None, dimension=None,
                     max_reach: float = PLAYER_REACH,
                     assume_face: Optional[str] = None) -> Optional[Voxel]:
@@ -197,7 +230,7 @@ def can_place_block(pose, looking_at, world_map=None, dimension=None,
         except TypeError:
             obs = world_map.get_block(place)
         bid = getattr(obs, "block_id", None)
-        if bid not in (AIR_BLOCK, None):
+        if bid not in (AIR_BLOCK, None) and not _is_replaceable_place_into(bid):
             return None
     return place
 

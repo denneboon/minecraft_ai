@@ -33,10 +33,13 @@ def _pose(x=0.5, y=64.0, z=0.5, yaw=0.0, pitch=56.0):
 def _la(pos, face="up", block_id="minecraft:grass_block"):
     return SimpleNamespace(pos=pos, face=face, block_id=block_id)
 
-def _wm(solid=()):
-    solid = set(solid)
-    return SimpleNamespace(get_block=lambda v, dimension=None: SimpleNamespace(
-        block_id=("minecraft:stone" if v in solid else AIR_BLOCK)))
+def _wm(solid=(), plants=()):
+    solid = set(solid); plants = set(plants)
+    def _gb(v, dimension=None):
+        bid = ("minecraft:stone" if v in solid
+               else "minecraft:short_grass" if v in plants else AIR_BLOCK)
+        return SimpleNamespace(block_id=bid)
+    return SimpleNamespace(get_block=_gb)
 
 def _hotbar(roles):
     return SimpleNamespace(best_slot_for=lambda r: roles.get(r))
@@ -67,7 +70,11 @@ def main() -> int:
         "target out of reach -> None")
     # resulting voxel already solid
     (ok if can_place_block(p, _la((0, 63, 1), "up"), _wm(solid=[(0, 64, 1)])) is None
-     else bad)("placement voxel occupied -> None")
+     else bad)("placement voxel occupied (solid) -> None")
+    # resulting voxel has short_grass/flower -> REPLACEABLE, still placeable (MC
+    # replaces it). Without this, no spot in a grassy/flowery biome is placeable.
+    (ok if can_place_block(p, _la((0, 63, 1), "up"), _wm(plants=[(0, 64, 1)])) == (0, 64, 1)
+     else bad)("placement voxel is grass/flower (replaceable) -> placeable")
 
     # 3. PlaceBlock: select slot, aim, place via use_item, then VERIFY the
     # block appeared under the crosshair before declaring DONE.
