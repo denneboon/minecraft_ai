@@ -138,16 +138,48 @@ class InventoryController:
                 sc = snap.slots.get(f"hotbar_{i}")
                 if sc is None:
                     continue
-                item = self._hb.item_in_slot(i + 1)      # remembered layout
-                sc.item = item
-                if item is None:
-                    sc.count = 0                          # slot was empty
+                remembered = self._hb.item_in_slot(i + 1)   # remembered layout
+                live_count = int(getattr(sc, "count", 0) or 0)
+                if remembered is None:
+                    # No remembered identity, and HUD item recognition is
+                    # unreliable over the world background — so we can't name
+                    # what's here. Treat as nothing for the ledger (it ignores
+                    # unknown items; assess()/ensure() open + verify when short).
+                    sc.item = None
+                    sc.count = 0
+                    continue
+                # Relabel from the remembered layout (HUD sees the live count,
+                # not the identity) — but ONLY if the live count is PLAUSIBLE
+                # for that item. A slot whose contents changed since the last
+                # full read often shows an impossible count (a stack where a
+                # single tool used to be); relabelling it would yield a
+                # confidently-WRONG ledger entry. If the count exceeds the
+                # item's max stack, treat the slot as changed -> unknown.
+                if live_count > self._max_stack(remembered):
+                    sc.item = None                          # changed -> unknown
+                else:
+                    sc.item = remembered
         if self._memory is not None:
             try:
                 self._memory.observe(snap, complete=False)
             except Exception:
                 pass
         return snap
+
+    def _max_stack(self, item_id: str) -> int:
+        """Max stack size for ``item_id`` from the catalog (64 if unknown).
+        Used to sanity-check a HUD-relabelled slot's live count against the
+        remembered item, so a changed slot isn't relabelled with a wrong id."""
+        cat = getattr(self._hb, "_catalog", None)
+        if cat is not None and hasattr(cat, "item"):
+            try:
+                info = cat.item(item_id if ":" in item_id
+                                else "minecraft:" + item_id)
+                if info is not None and getattr(info, "stack_size", None):
+                    return int(info.stack_size)
+            except Exception:
+                pass
+        return 64
 
     def _center(self, slot_name: str) -> Tuple[int, int]:
         if self._rects is None or slot_name not in self._rects:
