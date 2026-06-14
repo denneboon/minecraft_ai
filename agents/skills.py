@@ -1024,11 +1024,22 @@ class SkillSequence(Skill):
         return res
 
 
+_CONFIRMED_SOURCES = ("looking_at", "ray_clear_air")
+
+
 def find_nearest_block(world_map, origin, match, *, max_radius: int = 48,
-                       dimension: Optional[str] = None, exclude=None, pos_ok=None):
+                       dimension: Optional[str] = None, exclude=None, pos_ok=None,
+                       min_confidence: float = 0.0):
     """Nearest observed block satisfying ``match(block_id) -> bool`` within
     ``max_radius`` (Chebyshev) of ``origin`` voxel. Returns ``(voxel, obs)``
     or ``None``. Used to spot the closest oak log the recogniser has mapped.
+
+    ``min_confidence`` gates BELIEF-map guesses: a voxel is only eligible if it
+    was F3-CONFIRMED (``source`` in :data:`_CONFIRMED_SOURCES`) OR its belief
+    confidence is at least this. This stops the chopper navigating to a
+    low-confidence MISLABEL (grass / leaf_litter guessed as a log) — it would
+    aim at it, fail to confirm a log, and waste the aim budget (or, with the
+    position fallback, chop the wrong block). 0.0 keeps the old behaviour.
     """
     if world_map is None:
         return None
@@ -1043,6 +1054,14 @@ def find_nearest_block(world_map, origin, match, *, max_radius: int = 48,
         bid = getattr(obs, "block_id", None)
         if bid == AIR_BLOCK or bid is None or not match(bid):
             continue
+        # Confidence gate: trust F3-confirmed voxels unconditionally; require
+        # belief-map guesses to clear ``min_confidence`` so a mislabelled
+        # grass/leaf doesn't become a chop target.
+        if min_confidence > 0.0:
+            src = getattr(obs, "source", None)
+            if src not in _CONFIRMED_SOURCES \
+                    and float(getattr(obs, "confidence", 0.0) or 0.0) < min_confidence:
+                continue
         if exclude is not None and tuple(obs.pos) in exclude:
             continue
         if pos_ok is not None and not pos_ok(obs.pos):

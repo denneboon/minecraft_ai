@@ -73,7 +73,8 @@ class FindAndChopLogs:
                  tool_role: Optional[str] = "axe",
                  explore_dist: float = 8.0, max_explore: int = 10,
                  explore_turn: float = 65.0, is_breakable=None,
-                 max_recover: int = 5, mine_action=None, goal_blocks=None):
+                 max_recover: int = 5, mine_action=None, goal_blocks=None,
+                 min_log_confidence: float = 0.6):
         # mine_action(voxel) -> Skill: what to do once IN REACH of a target.
         # Default fells the trunk (ChopTrunk); a flat block-gatherer passes a
         # plain MineBlock factory. This is the one knob that turns the
@@ -94,6 +95,10 @@ class FindAndChopLogs:
         self.max_radius = max_radius
         self.scan_budget = scan_budget
         self.max_logs = max_logs
+        # Belief-map confidence floor for a voxel to be navigated to as a log.
+        # F3-confirmed logs always pass; this only filters low-confidence
+        # GUESSES (a grass/leaf mislabelled as a log). See find_nearest_block.
+        self.min_log_confidence = float(min_log_confidence)
         self.tool_role = tool_role
         # Exploration: when no log is mapped, walk to a new area and re-scan
         # (fanning the heading each attempt) instead of giving up.
@@ -172,7 +177,8 @@ class FindAndChopLogs:
         res = find_nearest_block(ctx.world_map, eye, self.is_log,
                                  max_radius=self.max_radius,
                                  dimension=ctx.dimension, exclude=self._blacklist,
-                                 pos_ok=pos_ok)
+                                 pos_ok=pos_ok,
+                                 min_confidence=self.min_log_confidence)
         return res[0] if res else None
 
     def _drop_target(self):

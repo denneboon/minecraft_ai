@@ -353,6 +353,23 @@ def main() -> int:
     (ok if parse_plan("") == [] else bad)("empty plan -> []")
     (ok if parse_plan("stone:notanum")[0]["count"] == 9999 else bad)("bad count -> unbounded")
 
+    # 14. find confidence gate: a low-confidence MISLABEL (grass/leaf guessed as
+    # a log) must NOT be chosen over a real F3-confirmed log farther away.
+    print("\n[14] find_nearest_block confidence gate")
+    from agents.skills import find_nearest_block
+    from agents.treechop import _is_log_default
+    wm = WorldMap()
+    wm.update_block(BlockObservation(block_id="minecraft:oak_log", pos=(0, 64, 2),
+                                     confidence=0.5, source="vision_patch"))
+    wm.update_block(BlockObservation(block_id="minecraft:oak_log", pos=(0, 64, 5),
+                                     confidence=1.0, source="looking_at"))
+    eye = (0.5, 65.0, 0.5)
+    u = find_nearest_block(wm, eye, _is_log_default, max_radius=32)
+    g = find_nearest_block(wm, eye, _is_log_default, max_radius=32, min_confidence=0.6)
+    (ok if u and u[0] == (0, 64, 2) else bad)("ungated picks the nearer low-conf voxel")
+    (ok if g and g[0] == (0, 64, 5) else bad)(
+        "gated SKIPS the low-conf mislabel, picks the F3-confirmed log")
+
     print("\n" + ("ALL TREECHOP TESTS PASSED" if not _fails
                   else f"{_fails} CHECK(S) FAILED"))
     return 0 if not _fails else 1
