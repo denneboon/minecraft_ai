@@ -1,5 +1,43 @@
 # Known issues — needs live validation before fixing
 
+## make.py wooden_pickaxe — table PLACE → OPEN is the last blocker (FOCUSED FOLLOW-UP)
+
+As of this session the pipeline works **except** placing the crafting table and
+opening it. Validated live and SOLID: gather (find→walk→break→collect logs),
+inventory read, 2×2 crafts (planks/sticks/table), and the 3×3 pickaxe craft in a
+*manually-opened* table. The flaky last 10% is `tools/table_craft.py` +
+`agents/skills.py:PlaceBlock`, which fails differently each run:
+
+- **Aimer oscillation on place look-views** — the `_Aimer` overshoots (±, look
+  =±140px) on a place view and never settles `aimed`, so `can_place_block` is
+  never evaluated for that view and it times out without placing. Intermittent
+  (pose/spot dependent). Likely needs a gentler gain / lower `max_px` for the
+  fine place-aim, or accept "close enough" yaw.
+- **Can't VISUALLY verify a freshly-placed table** — the recogniser garbles a
+  fresh table's id and the open GUI blocks F3 targeting, so `PlaceBlock`'s
+  verify never confirms → it keeps scanning → a later click opens the table →
+  loop. PARTIALLY FIXED (`table_craft` now treats a GUI opening during the place
+  step as proof-of-placement and crafts in the open table — commit d5b9137), but
+  it only helps once it actually places; the oscillation above can stop it
+  first.
+- **Pre-existing tables ignored** — tables left in the world from prior runs
+  aren't recognised/used; the bot places its own next to them. Test worlds get
+  cluttered with tables, which confounds runs (break/clear them between tests).
+- **Finding a placeable spot** — improved (replaceable-plant placement + a
+  step-back to fresh ground + a shallower pitch), but cluttered chop-spots still
+  make it scan many views.
+
+**Recommended fix (focused session):** redesign table-craft to be DETERMINISTIC
+instead of scan→visually-verify: (1) if a crafting_table is already within reach
+/ mapped, walk to it and open it; else (2) clear/step to open ground, place once,
+`wait`, right-click the placed voxel, and CONFIRM via the GUI-open (camera-frozen)
+signal rather than the recogniser. Tune the place-aimer to not oscillate. Test
+in a CLEAN area (no stray tables).
+
+---
+
+# (audit findings below) — needs live validation before fixing
+
 Findings from a code audit that are **real but timing/state-sensitive on the
 live crafting + item-movement path**, so they should be reproduced and fixed
 with Minecraft attached (not blind), to avoid regressing the working
