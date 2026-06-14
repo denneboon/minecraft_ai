@@ -236,7 +236,12 @@ class FindAndChopLogs:
                       and getattr(la, "pos", None) is not None else None)
             if la_id and self.is_log(la_id) and la_pos is not None \
                     and la_pos not in self._blacklist \
-                    and block_in_reach(pose, la_pos, PLAYER_REACH):
+                    and block_in_reach(pose, la_pos, self.reach):
+                # Use the COMFORTABLE reach (~3.5), not the 4.5 edge: a log at
+                # the very edge of reach can't be aimed onto cleanly (it needs a
+                # precise pitch-down the aimer doesn't always land), so the bot
+                # punches air. Beyond ~3.5 we fall through to find -> approach,
+                # which walks the last half-block closer where the aim is easy.
                 self._target = la_pos
                 self._found_raw = la_pos
                 self._recover_count = 0
