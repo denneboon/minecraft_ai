@@ -27,12 +27,32 @@ inventory read, 2×2 crafts (planks/sticks/table), and the 3×3 pickaxe craft in
   step-back to fresh ground + a shallower pitch), but cluttered chop-spots still
   make it scan many views.
 
-**Recommended fix (focused session):** redesign table-craft to be DETERMINISTIC
-instead of scan→visually-verify: (1) if a crafting_table is already within reach
-/ mapped, walk to it and open it; else (2) clear/step to open ground, place once,
-`wait`, right-click the placed voxel, and CONFIRM via the GUI-open (camera-frozen)
-signal rather than the recogniser. Tune the place-aimer to not oscillate. Test
-in a CLEAN area (no stray tables).
+**Progress this session (committed):**
+- Place-aim OSCILLATION fixed: `table_craft.drive()` now applies camera moves
+  via instant `mouse.move` gated on a FRESH pose (it was easing every ~20Hz tick
+  on stale poses → overshoot). The table now actually places.
+- GUI-open-as-success: a GUI opening during the place scan is treated as
+  proof-of-placement and crafts in the open table (commit d5b9137).
+- Placement-spot finding improved: replaceable-plant placement (grass/flowers
+  count as clear), a step-back to fresh ground, a shallower pitch.
+- Settle before the 3×3 read in the GUI-open case.
+
+**Still flaky (focused follow-up) — each run fails in a DIFFERENT mode:**
+- Sometimes `couldn't place the table` (can_place_block finds no spot in a
+  cluttered/grassy chop-patch even with the replaceable + step-back fixes).
+- Sometimes places + opens fine but the 3×3 `craft: can't craft … from inventory`.
+- The INVENTORY READ is timing-flaky: the RECOGNITION works (diag_inventory
+  detects oak_planks/stick/crafting_table after /give), but make.py's round read
+  occasionally returns empty and plans a from-scratch gather. The maker retries
+  per round, so it usually recovers, but it's not reliable.
+
+**Recommended fix (focused session):** make table-craft DETERMINISTIC — (1) if a
+crafting_table is already within reach/mapped, walk to it and open it; else
+(2) ensure the bot is on CLEAR ground (step/pillar to it), place once, wait,
+right-click the placed voxel, CONFIRM via the GUI-open signal. Make the
+inventory round-read robust (retry/settle when it reads suspiciously empty).
+Test in a CLEAN area. Bot perception + recognition are solid; this is
+action/timing reliability.
 
 ---
 

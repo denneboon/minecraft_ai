@@ -265,9 +265,13 @@ def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
         print(f"[table] table placed at {table_pos}"
               f"{' (already open via place-click)' if gui_already_open else ''}")
 
-        # 3. Open it — UNLESS a click during placement already opened it.
+        # 3. Open it — UNLESS a click during placement already opened it. Either
+        # way, SETTLE before reading: the table GUI needs a moment to fully open
+        # and render its slots, or the first inventory read sees a half-open /
+        # empty grid and the craft fails "can't craft … from inventory".
         if not gui_already_open:
-            mouse.right_click(); time.sleep(0.7)
+            mouse.right_click()
+        time.sleep(0.9)
 
         # 4. Craft the 3x3 recipe in the open table.
         tctl = InventoryController(mouse, kb, reader, hotbar, capture,
