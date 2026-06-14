@@ -88,9 +88,14 @@ def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
         except Exception:
             pass
 
+    # Set by drive() when a GUI opens during the PLACE step: that means the
+    # table got placed and the bot's click opened it — proof of placement.
+    place_gui = {"open": False, "pos": None}
+
     def drive(skill, label, max_secs=14.0, debug=False):
         t0 = time.time(); n = 0; _last_pause = time.time()
         _last_cam = None; _frozen = 0      # frozen-camera (opened-GUI) detector
+        _last_tpos = None                  # last targeted block (the table we hit)
         while time.time() - t0 < max_secs:
             n += 1
             now = time.time()
@@ -116,6 +121,8 @@ def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
                 tpos = targeted_block_pos(getattr(reading, "raw_text", "").splitlines())
             except Exception:
                 tpos = None
+            if tpos is not None:
+                _last_tpos = tpos
             ctx = SkillContext(pose=pose, world_map=wp.world_map,
                                looking_at=wf.looking_at, targeted_pos=tpos,
                                hotbar=hotbar, px_per_deg=px_per_deg,
@@ -134,6 +141,19 @@ def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
                 if cam == _last_cam:
                     _frozen += 1
                     if _frozen >= 8:
+                        if label == "place":
+                            # A GUI opened DURING placement = the table is placed
+                            # and the bot's click opened it. That's the success
+                            # signal (PlaceBlock's visual verify can't read a
+                            # fresh table). Leave it OPEN and tell the caller to
+                            # craft in it — don't escape + loop forever.
+                            place_gui["open"] = True
+                            place_gui["pos"] = _last_tpos
+                            if debug:
+                                print(f"[table]  .place: GUI opened -> table is "
+                                      f"placed + open at {_last_tpos}")
+                            _stop()
+                            return SkillStatus.DONE
                         if debug:
                             print(f"[table]  .{label}: camera frozen — closing an "
                                   f"opened GUI (escape)")
@@ -224,14 +244,20 @@ def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
 
         # 2. Place the table (scans look-views, places, self-verifies).
         pb = PlaceBlock(slot=table_slot)
-        if drive(pb, "place", max_secs=55.0, debug=debug) != SkillStatus.DONE \
-                or pb.placed_at is None:
+        st = drive(pb, "place", max_secs=55.0, debug=debug)
+        # Success is EITHER PlaceBlock's visual confirm OR a GUI opening during
+        # the scan (the click landed on the just-placed table and opened it — a
+        # fresh table OCRs to garble so the visual verify often can't read it).
+        gui_already_open = place_gui["open"]
+        table_pos = pb.placed_at or place_gui["pos"]
+        if st != SkillStatus.DONE or table_pos is None:
             return False, "couldn't place the table"
-        table_pos = pb.placed_at
-        print(f"[table] table placed + confirmed at {table_pos}")
+        print(f"[table] table placed at {table_pos}"
+              f"{' (already open via place-click)' if gui_already_open else ''}")
 
-        # 3. Open it (crosshair is on it).
-        mouse.right_click(); time.sleep(0.7)
+        # 3. Open it — UNLESS a click during placement already opened it.
+        if not gui_already_open:
+            mouse.right_click(); time.sleep(0.7)
 
         # 4. Craft the 3x3 recipe in the open table.
         tctl = InventoryController(mouse, kb, reader, hotbar, capture,
