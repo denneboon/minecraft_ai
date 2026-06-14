@@ -1115,10 +1115,11 @@ class PlaceBlock(Skill):
     name = "place_block"
 
     def __init__(self, tool_role: str = "blocks", *, slot: Optional[int] = None,
-                 pitches=(50.0, 44.0, 58.0),
+                 pitches=(48.0, 42.0, 55.0, 36.0),
                  yaw_offs=(0.0, 60.0, -60.0, 120.0, -120.0, 180.0),
                  max_ticks: int = 600, max_reach: float = PLAYER_REACH,
-                 tol_deg: float = 5.0, verify_ticks: int = 5):
+                 tol_deg: float = 5.0, verify_ticks: int = 5,
+                 max_step_backs: int = 2, back_ticks: int = 10):
         self.tool_role = tool_role
         self.slot = slot                 # explicit hotbar slot 1-9, overrides role
         # SWEEP DIRECTIONS FIRST at the best pitch (turn away from obstacles
@@ -1129,6 +1130,8 @@ class PlaceBlock(Skill):
         self.max_reach = max_reach
         self._tol = tol_deg
         self.verify_ticks = verify_ticks
+        self.max_step_backs = int(max_step_backs)
+        self.back_ticks = int(back_ticks)
         self.reset()
 
     def reset(self):
@@ -1142,6 +1145,23 @@ class PlaceBlock(Skill):
         self._aimer = _Aimer(tol_deg=self._tol)
         self.placed_at = None
         self._support = None
+        self._step_backs = 0
+        self._stepping = False
+        self._back_t = 0
+
+    def _exhausted_views(self):
+        """All views failed at this spot. Step back onto fresh ground and
+        re-scan (the bot is usually standing in the cluttered patch it just
+        chopped, where the close ground is occupied by stumps/leaves/drops).
+        Returns a SkillResult to step back, or None when the budget is spent."""
+        if self._step_backs >= self.max_step_backs:
+            return None
+        self._step_backs += 1
+        self._stepping = True
+        self._back_t = 0
+        return SkillResult(AgentAction(movement={"backward": True}),
+                           SkillStatus.RUNNING,
+                           f"place: no spot here — stepping back ({self._step_backs})")
 
     def _next_view(self) -> bool:
         """Advance to the next candidate; return False if exhausted."""
@@ -1175,6 +1195,22 @@ class PlaceBlock(Skill):
         if self._base_yaw is None:
             self._base_yaw = float(pose.yaw)
 
+        # STEP-BACK: walk backward onto fresh ground, then re-scan every view
+        # from there (escape the cluttered chop patch). A fixed number of ticks
+        # of backward, then reset the scan.
+        if self._stepping:
+            self._back_t += 1
+            if self._back_t < self.back_ticks:
+                return SkillResult(AgentAction(movement={"backward": True}),
+                                   SkillStatus.RUNNING,
+                                   "place: stepping back to clearer ground")
+            self._stepping = False
+            self._idx = 0
+            self._base_yaw = None
+            self._aimer = _Aimer(tol_deg=self._tol)
+            return SkillResult(AgentAction(), SkillStatus.RUNNING,
+                               "place: re-scanning from new spot")
+
         # 2b. VERIFY a placement we just attempted: did the block appear under
         # the (still-aimed) crosshair? If so we're done; if MC rejected it
         # (nothing there after a few ticks), try the next view.
@@ -1206,6 +1242,9 @@ class PlaceBlock(Skill):
             if self._verify > self.verify_ticks or (stale and self._verify >= 2):
                 self.placed_at = None
                 if not self._next_view():
+                    r = self._exhausted_views()
+                    if r is not None:
+                        return r
                     return SkillResult(AgentAction(), SkillStatus.FAILED,
                                        "place: every view rejected the placement")
                 return SkillResult(AgentAction(), SkillStatus.RUNNING,
@@ -1243,6 +1282,9 @@ class PlaceBlock(Skill):
                                SkillStatus.RUNNING, f"place: placing at {place}")
         # 4. nothing placeable from this view -> next candidate
         if not self._next_view():
+            r = self._exhausted_views()
+            if r is not None:
+                return r
             return SkillResult(AgentAction(), SkillStatus.FAILED,
                                "place: no valid surface in any view")
         return SkillResult(AgentAction(), SkillStatus.RUNNING,

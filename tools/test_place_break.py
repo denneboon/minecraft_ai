@@ -138,14 +138,26 @@ def main() -> int:
             break
     (ok if dm.status == SkillStatus.DONE else bad)(
         f"confirms despite a MISREAD id when targeted coords match ({dm.status})")
-    # if the block never appears (MC rejected) and there are no other views,
-    # it FAILS rather than hanging.
-    pbr = PlaceBlock("blocks", pitches=(56.0,), yaw_offs=(0.0,), verify_ticks=2)
+    # if the block never appears (MC rejected) and there are no other views NOR
+    # step-backs, it FAILS rather than hanging.
+    pbr = PlaceBlock("blocks", pitches=(56.0,), yaw_offs=(0.0,), verify_ticks=2,
+                     max_step_backs=0)
     cair = SkillContext(pose=_pose(), looking_at=_la((0, 63, 1), "up"),
                         world_map=_wm(), hotbar=_hotbar({"blocks": 5}), px_per_deg=6.5)
     statuses = [pbr.tick(cair).status for _ in range(20)]
     (ok if SkillStatus.FAILED in statuses else bad)(
-        "rejected placement with no other view -> FAILED")
+        "rejected placement, no views nor step-backs -> FAILED")
+    # WITH a step-back budget, an exhausted scan steps back (RUNNING) and
+    # re-scans instead of failing immediately.
+    pbs = PlaceBlock("blocks", pitches=(56.0,), yaw_offs=(0.0,), verify_ticks=2,
+                     max_step_backs=1, back_ticks=3)
+    cair2 = SkillContext(pose=_pose(), looking_at=_la((0, 63, 1), "up"),
+                         world_map=_wm(), hotbar=_hotbar({"blocks": 5}), px_per_deg=6.5)
+    infos = []
+    for _ in range(14):
+        r = pbs.tick(cair2); infos.append(r.info or "")
+    (ok if any("stepping back" in i or "step" in i for i in infos) else bad)(
+        "exhausted scan with budget -> steps back to fresh ground")
     # no blocks in hotbar -> FAILED
     pb2 = PlaceBlock("blocks")
     r2 = pb2.tick(SkillContext(pose=_pose(), hotbar=_hotbar({}), px_per_deg=6.5))
