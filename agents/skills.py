@@ -427,6 +427,29 @@ class MineBlock(Skill):
                 return SkillResult(AgentAction(), SkillStatus.FAILED, "timed out mining")
             return SkillResult(AgentAction(interact="attack"), SkillStatus.RUNNING, info)
 
+        def _mine_centred(info):
+            # Like _hold, but keeps the crosshair CENTRED on the target voxel
+            # while mining. Freezing the camera the instant F3 first flickers
+            # "log" can latch it on the block's EDGE; pose jitter then slips the
+            # crosshair off and MC RESETS break progress, so it punches forever
+            # without breaking (live-observed: 10 s, never broke). A small
+            # correction toward the FIXED voxel centre (not chasing jittery F3)
+            # holds it on the block; capped so it can't swing onto a neighbour.
+            self._mining_ticks += 1
+            if self._mining_ticks > self.max_ticks:
+                return SkillResult(AgentAction(), SkillStatus.FAILED, "timed out mining")
+            e = _eye(ctx.pose)
+            if e is None:
+                return SkillResult(AgentAction(interact="attack"),
+                                   SkillStatus.RUNNING, info)
+            c = (self.voxel[0] + 0.5, self.voxel[1] + 0.5, self.voxel[2] + 0.5)
+            yaw, pitch = aim_angles(e, c)
+            dx, dy, _ = self.aim.step(ctx, yaw, pitch)
+            cap = 6                              # ~1 deg/tick: nudge, never swing off
+            dx = max(-cap, min(cap, int(dx))); dy = max(-cap, min(cap, int(dy)))
+            return SkillResult(AgentAction(interact="attack", look_dx=dx, look_dy=dy),
+                               SkillStatus.RUNNING, info)
+
         # ── MINING a log: frozen camera, hold click until the log is gone ──
         if self._mode == "mine_log":
             # "Still on the log" = F3 names a log, OR the id is unreadable but
@@ -435,7 +458,7 @@ class MineBlock(Skill):
             # crosshair falls through and the targeted position changes/clears.
             if self._is_log(la_id) or (la_id is None and on_target_raw):
                 self._silent = 0
-                return _hold("mining log")
+                return _mine_centred("mining log")   # hold crosshair ON the block
             self._silent += 1
             if self._silent <= 3:        # ride out a brief F3 OCR gap, still frozen
                 return _hold("mining log (F3 gap)")
