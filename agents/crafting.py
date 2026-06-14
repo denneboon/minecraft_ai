@@ -49,6 +49,22 @@ class Crafter:
         for i in range(width * width):
             self.ctl.shift_left_click(f"craft_in_{i}")
 
+    def _read_now(self, *, quick: bool = False):
+        """Fresh inventory snapshot, best-effort. ``quick`` skips the
+        hover-to-learn pass (presence/positions only — used for the post-craft
+        result-slot check). Returns None on failure or a controller without
+        ``read()``."""
+        stop = (lambda _s: True) if quick else (lambda _s: False)
+        try:
+            return self.ctl.read(stop_when=stop)
+        except TypeError:
+            try:
+                return self.ctl.read()
+            except Exception:
+                return None
+        except Exception:
+            return None
+
     def craft(self, target_id: str, *, snap=None) -> Tuple[bool, str]:
         """Craft ``target_id`` from the current inventory using the 2x2 grid.
         Single-ingredient recipes (planks) move the whole stack in and
@@ -80,16 +96,39 @@ class Crafter:
         for (rc, item) in step.cell_items.items():
             by_item.setdefault(item, []).append(grid_slot(rc[0], rc[1], width))
 
-        for item, cells in by_item.items():
-            src = find_item_slot(snap, item)
+        cur = snap
+        for idx, (item, cells) in enumerate(by_item.items()):
+            if idx > 0:
+                # A prior ingredient's move_stack displaces a hotbar item into
+                # an inventory slot, so a source slot resolved from the stale
+                # pre-move snapshot may now hold something else. Re-read so
+                # find_item_slot resolves against the CURRENT inventory (matters
+                # for recipes mixing single-cell + multi-cell ingredients).
+                cur = self._read_now() or cur
+            src = find_item_slot(cur, item)
             if src is None:
                 return False, f"no inventory slot holds {item.split(':')[-1]}"
             if len(cells) == 1:
                 # whole-stack into the one cell via number-key swap (preferred)
-                self.ctl.move_stack(src, cells[0], snap)
+                self.ctl.move_stack(src, cells[0], cur)
             else:
                 # several cells of the same item -> split one into each
                 self.ctl.distribute_one(src, cells)
+
+        # Verify the recipe actually PRODUCED output before claiming success: a
+        # cell under-fill (e.g. a misread source slot) leaves the result slot
+        # empty, and returning True there makes Maker advance on a no-op. We
+        # need only PRESENCE in the result slot, not its identity (so skip the
+        # hover-resolve). If we can't read it, fall back to optimistic success —
+        # don't regress the happy path or offline mocks without a result slot.
+        after = self._read_now(quick=True)
+        result_slot = (after.slots.get("craft_result")
+                       if after is not None and getattr(after, "slots", None)
+                       else None)
+        if result_slot is not None and getattr(result_slot, "is_empty", False):
+            self._clear_grid(width)
+            return False, (f"{step.result_id.split(':')[-1]}: nothing produced "
+                           f"(grid under-filled)")
 
         self.ctl.take_result()
         self._clear_grid(width)
