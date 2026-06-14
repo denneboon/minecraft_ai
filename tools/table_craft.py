@@ -60,14 +60,17 @@ def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
     if ":" not in target:
         target = "minecraft:" + target
 
-    def _dispatch(action):
+    def _dispatch(action, apply_look=True):
         if action.hotbar:
             kb.tap(str(action.hotbar))
-        if action.look_dx or action.look_dy:
+        if apply_look and (action.look_dx or action.look_dy):
             try:
-                # track_target = relative camera motion MC's raw input sees;
-                # mouse.move() is absolute and invisible to the game.
-                mouse.track_target(int(action.look_dx), int(action.look_dy))
+                # INSTANT relative move (like the chop FSM in make.py), applied
+                # ONLY on a FRESH pose. The eased track_target applied every
+                # ~20Hz tick re-issued camera moves on stale poses between the
+                # ~11Hz F3 updates and over-rotated -> the place-aim oscillated
+                # back and forth and never settled.
+                mouse.move(int(action.look_dx), int(action.look_dy))
             except Exception:
                 pass
         if action.interact == "use_item":
@@ -96,6 +99,7 @@ def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
         t0 = time.time(); n = 0; _last_pause = time.time()
         _last_cam = None; _frozen = 0      # frozen-camera (opened-GUI) detector
         _last_tpos = None                  # last targeted block (the table we hit)
+        _last_ts = None                    # pose freshness (gate camera on fresh)
         while time.time() - t0 < max_secs:
             n += 1
             now = time.time()
@@ -127,8 +131,14 @@ def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
                                looking_at=wf.looking_at, targeted_pos=tpos,
                                hotbar=hotbar, px_per_deg=px_per_deg,
                                dimension=getattr(pose, "dimension", None) if pose else None)
+            # Only apply camera moves on a FRESH pose (a new F3 read), so the
+            # aimer's per-update correction lands once and converges instead of
+            # being re-applied on stale poses and overshooting.
+            ts = getattr(reading, "timestamp", None) if reading is not None else None
+            fresh = ts is not None and ts != _last_ts
+            _last_ts = ts
             r = skill.tick(ctx)
-            _dispatch(r.action)
+            _dispatch(r.action, apply_look=fresh)
             # Frozen-camera guard: if we keep commanding a turn but the view
             # won't move, the cursor is unlocked because a GUI opened — the bot
             # right-clicked an EXISTING crafting table (left over from a prior
