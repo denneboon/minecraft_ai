@@ -140,34 +140,57 @@ def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
             r = skill.tick(ctx)
             _dispatch(r.action, apply_look=fresh)
             # Frozen-camera guard: if we keep commanding a turn but the view
-            # won't move, the cursor is unlocked because a GUI opened — the bot
-            # right-clicked an EXISTING crafting table (left over from a prior
-            # run) and OPENED it instead of placing. Tap escape to close it so
-            # the scan can continue. (No focus loss; the gate stays open and
-            # inputs are sent but ignored.)
+            # won't move, SOMETHING froze the camera. It could be (a) a crafting
+            # GUI we opened by clicking an existing/just-placed table, (b) the
+            # PAUSE menu, or (c) a genuinely stuck aim (terrain/yaw limit/stale
+            # pose). We MUST tell these apart: the old code assumed "frozen during
+            # place == table placed+open", which mistook the PAUSE menu for a
+            # placed table (and blind-escaping with nothing open OPENS the pause
+            # menu). Classify with the menu detector before acting.
             if pose is not None and (r.action.look_dx or r.action.look_dy):
                 cam = (round(float(getattr(pose, "yaw", 0.0)), 1),
                        round(float(getattr(pose, "pitch", 0.0)), 1))
                 if cam == _last_cam:
                     _frozen += 1
                     if _frozen >= 8:
-                        if label == "place":
-                            # A GUI opened DURING placement = the table is placed
-                            # and the bot's click opened it. That's the success
-                            # signal (PlaceBlock's visual verify can't read a
-                            # fresh table). Leave it OPEN and tell the caller to
-                            # craft in it — don't escape + loop forever.
+                        _frozen = 0
+                        det = (menu_detector.detect(frame)
+                               if menu_detector is not None else None)
+                        is_pause = bool(det) and det.menu == "pause"
+                        gui_open = bool(det) and det.open and not is_pause
+                        if is_pause:
+                            # Stray pause (an earlier mis-aimed escape, or a focus
+                            # blip). RESUME — it is NOT a placed table.
+                            if debug:
+                                print(f"[table]  .{label}: PAUSE menu detected -> "
+                                      f"resume (not a placed table)")
+                            M.ensure_playing(capture, menu_detector, kb)
+                            time.sleep(0.2)
+                        elif gui_open and label == "place":
+                            # A real crafting GUI is open during placement — the
+                            # click landed on the (just-placed or pre-existing)
+                            # table and opened it. THAT is the success signal
+                            # (a fresh table's id OCRs to garble so PlaceBlock's
+                            # visual verify often can't read it).
                             place_gui["open"] = True
                             place_gui["pos"] = _last_tpos
                             if debug:
-                                print(f"[table]  .place: GUI opened -> table is "
-                                      f"placed + open at {_last_tpos}")
+                                print(f"[table]  .place: crafting GUI open -> "
+                                      f"table placed + open at {_last_tpos}")
                             _stop()
                             return SkillStatus.DONE
-                        if debug:
-                            print(f"[table]  .{label}: camera frozen — closing an "
-                                  f"opened GUI (escape)")
-                        kb.tap("escape"); time.sleep(0.35); _frozen = 0
+                        elif gui_open:
+                            # A GUI is genuinely open and we're NOT placing ->
+                            # safe to escape it (we confirmed one is open).
+                            if debug:
+                                print(f"[table]  .{label}: GUI open — closing (escape)")
+                            kb.tap("escape"); time.sleep(0.35)
+                        elif debug:
+                            # No menu open: the aim is stuck (terrain/limit/stale
+                            # pose). Do NOT escape — that would OPEN the pause
+                            # menu. Let the skill keep retrying / time out.
+                            print(f"[table]  .{label}: camera stuck, no GUI — "
+                                  f"NOT escaping (would open pause)")
                 else:
                     _frozen = 0
                 _last_cam = cam
@@ -237,7 +260,9 @@ def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
         def _ensure_camera_live(tries=4):
             """After an inventory screen MC sometimes hasn't re-grabbed the
             mouse (the view is FROZEN, track_target can't aim). Nudge and
-            confirm the pose moves; if stuck, tap escape and retry."""
+            confirm the pose moves; if a menu is actually OPEN, close it (or
+            resume from pause). NEVER blind-escape — escape with nothing open
+            opens the PAUSE menu (the live bug)."""
             for _ in range(tries):
                 p0 = _pose_now(); y0 = getattr(p0, "yaw", None)
                 mouse.track_target(90, 0); time.sleep(0.30)
@@ -246,7 +271,15 @@ def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
                         and abs(norm_angle(float(y1) - float(y0))) > 1.0:
                     mouse.track_target(-90, 0); time.sleep(0.15)
                     return True
-                kb.tap("escape"); time.sleep(0.35)
+                # View didn't move. Only escape if a GUI is genuinely open.
+                det = (menu_detector.detect(capture.get_frame())
+                       if menu_detector is not None else None)
+                if det is not None and det.menu == "pause":
+                    M.ensure_playing(capture, menu_detector, kb); time.sleep(0.2)
+                elif det is not None and det.open:
+                    kb.tap("escape"); time.sleep(0.35)
+                else:
+                    time.sleep(0.25)         # no menu — wait for mouse re-grab
             return False
 
         if not _ensure_camera_live():
