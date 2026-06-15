@@ -231,7 +231,13 @@ def main(argv=None) -> int:
         got = fsm.logs >= qty
         print(f"[make] gather {item_id.split(':')[-1]}: chopped {fsm.logs}/{qty} "
               f"({'enough' if got else 'short'}; ended={ended})")
-        return got
+        # PROGRESS, not all-or-nothing: a partial gather (chopped some, but the
+        # spot ran dry before the full qty) is NOT a failure — the Maker re-reads
+        # the inventory and re-plans the remaining deficit next round, exploring
+        # further. Returning False only when we got NOTHING lets the Maker's
+        # gather-fails / no-progress guards stop a truly barren area, while a
+        # forest edge that yields 1-2 logs per pass still completes over rounds.
+        return fsm.logs >= 1
 
     def _table_craft(tgt):
         return run_table_craft(

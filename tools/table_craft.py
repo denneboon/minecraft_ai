@@ -289,7 +289,7 @@ def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
         # budget: on cratered post-chop ground the placer may step back several
         # times to reach flat ground before it can place.
         pb = PlaceBlock(slot=table_slot)
-        st = drive(pb, "place", max_secs=95.0, debug=debug)
+        st = drive(pb, "place", max_secs=140.0, debug=debug)
         # Success is EITHER PlaceBlock's visual confirm OR a GUI opening during
         # the scan (the click landed on the just-placed table and opened it — a
         # fresh table OCRs to garble so the visual verify often can't read it).

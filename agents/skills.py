@@ -1003,6 +1003,7 @@ class ChopTrunk(Skill):
         self._target = self.start
         self._mined = 0
         self._phase = "mine"
+        self._dir = 1               # fell UP first, then DOWN to clear the stump
         self._mine = MineBlock(self._target, tool_role=self.tool_role,
                                is_target=self.is_log, is_passthrough=self.is_safe)
         self._aim = None
@@ -1022,11 +1023,13 @@ class ChopTrunk(Skill):
                     return SkillResult(r.action, SkillStatus.DONE,
                                        f"trunk done ({self._mined} logs)")
                 self._mined += 1
-                self._target = (self._target[0], self._target[1] + 1, self._target[2])
+                self._target = (self._target[0], self._target[1] + self._dir,
+                                self._target[2])
                 self._aim = LookAtVoxel(self._target, tol_deg=3.0)
                 self._phase = "aim_up"; self._check_ticks = 0
                 return SkillResult(r.action, SkillStatus.RUNNING,
-                                   f"mined {self._mined}; looking up")
+                                   f"mined {self._mined}; looking "
+                                   f"{'up' if self._dir > 0 else 'down'}")
             return r                          # RUNNING / FAILED / BLOCKED
         if self._phase == "aim_up":
             r = self._aim.tick(ctx)
@@ -1046,6 +1049,17 @@ class ChopTrunk(Skill):
             return SkillResult(AgentAction(), SkillStatus.RUNNING,
                                f"log above at {self._target}; mining")
         if self._check_ticks >= 8:
+            if self._dir > 0:
+                # Top of the trunk reached. Now fell DOWNWARD from below the
+                # start voxel: a stump left below the chop point blocks the bot
+                # from standing on the drop column, so the logs we just felled
+                # never get collected (the live "chopped N, collected 0" bug).
+                self._dir = -1
+                self._target = (self.start[0], self.start[1] - 1, self.start[2])
+                self._aim = LookAtVoxel(self._target, tol_deg=3.0)
+                self._phase = "aim_up"; self._check_ticks = 0
+                return SkillResult(AgentAction(), SkillStatus.RUNNING,
+                                   "trunk top cleared; felling stump below")
             return SkillResult(AgentAction(), SkillStatus.DONE,
                                f"trunk cleared ({self._mined} logs)")
         # hold aim while the OCR catches up
@@ -1163,10 +1177,10 @@ class PlaceBlock(Skill):
     def __init__(self, tool_role: str = "blocks", *, slot: Optional[int] = None,
                  pitches=(48.0, 42.0, 55.0, 36.0),
                  yaw_offs=(0.0, 60.0, -60.0, 120.0, -120.0, 180.0),
-                 max_ticks: int = 600, max_reach: float = PLAYER_REACH,
+                 max_ticks: int = 900, max_reach: float = PLAYER_REACH,
                  tol_deg: float = 5.0, verify_ticks: int = 5,
-                 max_step_backs: int = 5, back_ticks: int = 10,
-                 spot_budget: int = 70):
+                 max_step_backs: int = 6, back_ticks: int = 24,
+                 spot_budget: int = 60):
         self.tool_role = tool_role
         self.slot = slot                 # explicit hotbar slot 1-9, overrides role
         # SWEEP DIRECTIONS FIRST at the best pitch (turn away from obstacles
@@ -1197,6 +1211,7 @@ class PlaceBlock(Skill):
         self._stepping = False
         self._back_t = 0
         self._spot_ticks = 0        # ticks scanned at the CURRENT spot
+        self._escape_yaw = None     # fixed heading to retreat along (set once)
 
     def _exhausted_views(self):
         """All views failed at this spot. Step back onto fresh ground and
@@ -1251,9 +1266,18 @@ class PlaceBlock(Skill):
         if self._stepping:
             self._back_t += 1
             if self._back_t < self.back_ticks:
-                return SkillResult(AgentAction(movement={"backward": True}),
-                                   SkillStatus.RUNNING,
-                                   "place: stepping back to clearer ground")
+                # Retreat along a FIXED heading (locked on the first step-back)
+                # so successive step-backs accumulate in ONE direction — out of
+                # the tree box — instead of wandering as each re-scan re-faces
+                # the bot. Hold that yaw with a gentle look correction while
+                # walking backward.
+                if self._escape_yaw is None:
+                    self._escape_yaw = float(pose.yaw)
+                err = ((self._escape_yaw - float(pose.yaw) + 180.0) % 360.0) - 180.0
+                ldx = int(max(-50.0, min(50.0, err * (ctx.px_per_deg or 6.5))))
+                return SkillResult(
+                    AgentAction(movement={"backward": True}, look_dx=ldx),
+                    SkillStatus.RUNNING, "place: stepping back to clearer ground")
             self._stepping = False
             self._idx = 0
             self._base_yaw = None
