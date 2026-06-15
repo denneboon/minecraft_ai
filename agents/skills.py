@@ -1311,19 +1311,26 @@ class PlaceBlock(Skill):
                                int(math.floor(pose.y)) - 1,
                                int(math.floor(pose.z)))
                 self._prime_t = 0
-                self._prime_aim = _Aimer(tol_deg=self._tol)
+                self._prime_aim = None
             self._prime_t += 1
             if self._prime_t <= self.prime_back_ticks:
                 # back up off the stand cell so placing there won't intersect us
                 return SkillResult(AgentAction(movement={"backward": True}),
                                    SkillStatus.RUNNING, "place: priming (step back)")
-            # Moving BACKWARD keeps our facing, so the cell we just stepped off
-            # of is now straight AHEAD — look down at it (same yaw) and place.
-            dx, dy, aimed = self._prime_aim.step(ctx, self._base_yaw, 52.0)
-            if not aimed and self._prime_t < self.prime_back_ticks + 24:
-                return SkillResult(AgentAction(look_dx=dx, look_dy=dy),
-                                   SkillStatus.RUNNING,
+            # Aim PRECISELY at the cell we just stepped off of — at the VOXEL
+            # itself (LookAtVoxel computes the exact angle), not a fixed
+            # down-forward pitch. The fixed pitch overshot onto the tree trunk
+            # we'd been chopping right next to (the live "couldn't place the
+            # table" in a forest), whereas the exact aim lands on the grass we
+            # stood on, which is closer than the trunk.
+            if self._prime_aim is None:
+                self._prime_aim = LookAtVoxel(self._stand, tol_deg=self._tol)
+            ar = self._prime_aim.tick(ctx)
+            if ar.status == SkillStatus.RUNNING \
+                    and self._prime_t < self.prime_back_ticks + 30:
+                return SkillResult(ar.action, SkillStatus.RUNNING,
                                    "place: priming (aim at stand spot)")
+            aimed = (ar.status == SkillStatus.DONE)
             self._primed = True           # only ever prime once; then scan
             place = (can_place_block(pose, ctx.looking_at, ctx.world_map,
                                      getattr(pose, "dimension", None),

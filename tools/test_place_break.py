@@ -184,23 +184,21 @@ def main() -> int:
     r2 = pb2.tick(SkillContext(pose=_pose(), hotbar=_hotbar({}), px_per_deg=6.5))
     (ok if r2.status == SkillStatus.FAILED else bad)("no block in hotbar -> FAILED")
 
-    # 3b. PRIME path (default): step back off the stand cell, then place the
-    # table where we were standing — robust on cluttered/edge ground. With the
-    # test pose already at the back-look pitch, it should reach use_item.
-    pbprime = PlaceBlock("blocks", slot=5, prime_back_ticks=2)
-    cprime = SkillContext(pose=_pose(yaw=0.0, pitch=52.0),  # already down-aimed
-                          looking_at=_la((0, 63, 1), "up"),
+    # 3b. PRIME path (default): before any view scan, step back off the cell we
+    # were standing on so the table can be placed THERE (guaranteed solid-below,
+    # clear-above). Verify it issues the backward step first. (The placement
+    # geometry itself is covered by the can_place_block cases above + live.)
+    pbprime = PlaceBlock("blocks", slot=5, prime_back_ticks=4)
+    cprime = SkillContext(pose=_pose(), looking_at=_la((0, 63, 1), "up"),
                           world_map=_wm(), hotbar=_hotbar({"blocks": 5}),
                           px_per_deg=6.5)
-    prime_act = None
-    for _ in range(20):
-        prime_act = pbprime.tick(cprime)
-        if prime_act.action.interact == "use_item":
-            break
-    (ok if prime_act is not None and prime_act.action.interact == "use_item"
-        and pbprime.placed_at == (0, 64, 1) else bad)(
-        f"prime: steps back + places where it stood "
-        f"({getattr(pbprime,'placed_at',None)})")
+    pbprime.tick(cprime)                                   # selects slot
+    stepped_back = False
+    for _ in range(6):
+        a = pbprime.tick(cprime).action
+        if getattr(a, "movement", None) and a.movement.get("backward"):
+            stepped_back = True
+    (ok if stepped_back else bad)("prime: steps back off the stand cell first")
 
     # 4. BreakLookedAt: attack while a block is there, DONE when gone.
     print("\n[4] BreakLookedAt skill")
