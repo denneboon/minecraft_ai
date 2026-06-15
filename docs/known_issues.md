@@ -1,12 +1,66 @@
 # Known issues — needs live validation before fixing
 
-## make.py wooden_pickaxe — table PLACE → OPEN is the last blocker (FOCUSED FOLLOW-UP)
+## make.py wooden_pickaxe — table PLACE→OPEN now WORKS; last blocker is the 2×2 crafter (FOCUSED FOLLOW-UP)
 
-As of this session the pipeline works **except** placing the crafting table and
-opening it. Validated live and SOLID: gather (find→walk→break→collect logs),
-inventory read, 2×2 crafts (planks/sticks/table), and the 3×3 pickaxe craft in a
-*manually-opened* table. The flaky last 10% is `tools/table_craft.py` +
-`agents/skills.py:PlaceBlock`, which fails differently each run:
+**Update (this session — far-coords savanna live test, commits a481c1c..58b27b7).**
+Four root-cause bugs found + fixed (all committed, 26/26 offline green), and a
+full from-scratch run now drives the WHOLE pipeline — gather → craft planks →
+craft table → **place table AND open it** → craft sticks → attempt the 3×3
+pickaxe — failing only at the very last 3×3 craft. Specifically validated LIVE
+at (≈3980, 3980), ~4000 blocks from spawn:
+
+- **Distance-from-spawn is a non-issue (RESOLVED).** F3 XYZ/facing/biome/targeted
+  all parse at 4-digit coords; navigation, chopping, centred-mining, give, and
+  inventory read all work there. The earlier "far coords break it" was a
+  one-off confound, not a standing bug.
+- **plan_make species substitution (FIXED, commit d71d705).** THE non-oak-biome
+  blocker: the gatherer is species-agnostic but plan_make hardcoded oak and
+  re-demanded oak_log forever in a savanna/birch forest. Now it adapts to the
+  wood actually chopped (acacia_log → acacia_planks). Regression-tested.
+- **_read_counts stale-frame miss (FIXED, commit 58b27b7).** The threaded
+  capture returns a pre-open frame for a beat, so a too-early read came back
+  empty and triggered a bogus re-gather every round. Now 0.8s settle +
+  read-until-nonempty. The gather→re-read→re-plan loop now CONVERGES.
+- **Table PLACE→OPEN (FIXED, commits a481c1c + earlier d5b9137).** The exact
+  symptom the user reported ("placed the table but kept spinning, never opened
+  it") is gone — the run log shows `table placed at (X,Y,Z) (already open via
+  place-click)`. Place-aim oscillation (fresh-pose-gated instant move),
+  replaceable-plant placement, step-back, and a confidence-gated occupancy
+  check (a low-confidence belief mislabel no longer blocks a spot) all landed.
+
+**THE remaining blocker — the 2×2 crafter intermittently fails mid-chain, eating
+the wood margin.** In the validated run the bot collected 3 logs (partial: see
+collection note) and round 4 had enough for the whole plan (`gather [-]`), then:
+`craft acacia_planks OK` → `craft crafting_table OK` → **`craft acacia_planks
+FAIL (can't craft acacia_planks from inventory)` while 2 logs were still on
+hand** → wood margin lost → final `craft: FAIL: can't craft wooden_pickaxe from
+inventory`. This is the **crafter stale-snapshot bug already flagged below**
+(`Crafter.craft` re-queries `find_item_slot` against a snapshot taken before
+items moved; after the table craft displaces stacks, the next plank craft
+resolves slots against stale state and bails). Fix that (re-read after each
+placement / reserve carry slots) and the chain should complete — the wood
+budget (3 logs → 12 planks vs. 9 needed) is sufficient when no craft is wasted.
+A bigger gather buffer would also absorb the loss. **Needs focused live
+iteration with MC attached — do not fix blind (it's timing/slot-state).**
+
+**Secondary — drop COLLECTION is partial on branchy trees.** `chopped N/N`
+counts BREAKS, not pickups. In a sparse savanna with tall acacia, broken logs
+fall out of the ~1.5-block pickup radius, so ~1 of 3 is collected per pass and
+the maker needs several rounds to accumulate 3 (it DOES, via re-gather, now that
+the read+planner converge). In a straight-trunk oak/birch forest (the intended
+scenario) drops fall at the bot's feet and collection is reliable — run-1 here
+collected 3/3 from a tree right in front. Consider a post-chop "vacuum" walk over
+the trunk base, or count COLLECTED (inventory delta) not broken.
+
+---
+
+## (historical) make.py table PLACE→OPEN — was the last blocker, now FIXED (see update above)
+
+As of an earlier session the pipeline worked **except** placing the crafting
+table and opening it. Validated live and SOLID: gather (find→walk→break→collect
+logs), inventory read, 2×2 crafts (planks/sticks/table), and the 3×3 pickaxe
+craft in a *manually-opened* table. The flaky last 10% was `tools/table_craft.py`
++ `agents/skills.py:PlaceBlock`, which failed differently each run:
 
 - **Aimer oscillation on place look-views** — the `_Aimer` overshoots (±, look
   =±140px) on a place view and never settles `aimed`, so `can_place_block` is
