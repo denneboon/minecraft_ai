@@ -42,9 +42,10 @@ from agents.maker import Maker
 from agents.hotbar_arranger import arrange_hotbar
 from agents.armor_equip import equip_best_armor
 from agents.treechop import FindAndChopLogs, _full_movement, log_predicates
-from agents.skills import SkillContext, SkillStatus
+from agents.skills import SkillContext, SkillStatus, MineBlock
 from vision.world.f3_target import targeted_block_pos
 from knowledge.catalog import Catalog
+from knowledge.mining import gather_source_for
 from vision.mc_assets import MCAssets
 from tools.table_craft import run_table_craft
 
@@ -144,13 +145,39 @@ def main(argv=None) -> int:
             pass
 
     def _gather(item_id, qty):
-        """Gather ``qty`` of a raw material (logs only) by chopping trees."""
-        if not is_log(item_id):
-            print(f"[make] can't gather {item_id.split(':')[-1]} (only logs)")
-            return False
-        fsm = FindAndChopLogs(is_log=is_log, reach=3.5, max_logs=max(3, qty + 2),
-                              goal_blocks=qty, tool_role="axe",
-                              is_breakable=is_breakable)
+        """Gather ``qty`` of a raw material from the world.
+
+        Logs are felled with the tree FSM; any other MINEABLE block is acquired
+        with the SAME find->walk->mine FSM but a single-block predicate and the
+        right tool — e.g. cobblestone by mining stone with a pickaxe (the planner
+        already knows stone tools need cobblestone). Returns False up front for a
+        material we can't mine, or one whose tool isn't on the hotbar (mining
+        stone bare-handed drops nothing, so that would loop fruitlessly)."""
+        if is_log(item_id):
+            fsm = FindAndChopLogs(is_log=is_log, reach=3.5, max_logs=max(3, qty + 2),
+                                  goal_blocks=qty, tool_role="axe",
+                                  is_breakable=is_breakable)
+        else:
+            source, role = gather_source_for(item_id, cat)
+            short = item_id.split(":")[-1]
+            if source is None or role is None:
+                print(f"[make] can't gather {short} (no known mine source)")
+                return False
+            if hotbar.best_slot_for(role) is None:
+                # No pickaxe/shovel/… in the hotbar → the block won't drop its
+                # item (stone needs a pickaxe). Fail honestly instead of mining air.
+                print(f"[make] can't gather {short} — need a {role} in the hotbar "
+                      f"first (mine {source.split(':')[-1]} for {short})")
+                return False
+            src_stem = source.split(":")[-1]
+            pred = (lambda b, s=source, st=src_stem:
+                    bool(b) and (b == s or str(b).split(":")[-1] == st))
+            mine = (lambda v, r=role, p=pred:
+                    MineBlock(v, tool_role=r, is_target=p, is_passthrough=p))
+            print(f"[make] gather {short}: mining {src_stem} with a {role}")
+            fsm = FindAndChopLogs(is_log=pred, is_breakable=pred, reach=3.5,
+                                  max_logs=max(3, qty + 2), goal_blocks=qty,
+                                  tool_role=role, mine_action=mine)
         budget = 90.0 + 90.0 * qty            # generous: walk to + chop each log
         t0 = time.time(); last = None; ended = "timeout"; _lost = None
         last_ts = None; last_tick = 0.0; last_pause = time.time()
