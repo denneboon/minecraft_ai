@@ -1208,7 +1208,7 @@ class PlaceBlock(Skill):
                  pitches=(48.0, 42.0, 55.0, 36.0),
                  yaw_offs=(0.0, 60.0, -60.0, 120.0, -120.0, 180.0),
                  max_ticks: int = 900, max_reach: float = PLAYER_REACH,
-                 tol_deg: float = 5.0, verify_ticks: int = 5,
+                 tol_deg: float = 5.0, verify_ticks: int = 9,
                  max_step_backs: int = 3, back_ticks: int = 12,
                  spot_budget: int = 60, prime_back_ticks: int = 11,
                  prime: bool = True):
@@ -1409,13 +1409,22 @@ class PlaceBlock(Skill):
             if id_hit or raw_hit:
                 return SkillResult(AgentAction(), SkillStatus.DONE,
                                    f"placed + confirmed at {self.placed_at}")
-            # FAST reject: if the crosshair still shows the SUPPORT block (the
-            # one we placed against) after a couple ticks, nothing went down —
-            # MC rejected it (spot occupied / too close). Don't wait the full
-            # verify window; move on to the next view immediately.
-            stale = (ctx.targeted_pos == self._support or
-                     (lpos is not None and lpos == self._support))
-            if self._verify > self.verify_ticks or (stale and self._verify >= 2):
+            # Re-aim the crosshair ONTO the placed voxel itself. A steep PRIME
+            # place aimed down at the grass and put the table on TOP of it, so
+            # the crosshair sits on the support BELOW the table and F3 reports
+            # the support — we'd otherwise call the (real) placement a failure
+            # and walk off, abandoning the table we just put down (live-seen).
+            # Lifting the aim onto placed_at lets F3 confirm the table.
+            adx = ady = 0
+            if self.placed_at is not None:
+                e = _eye(pose)
+                if e is not None:
+                    c = (self.placed_at[0] + 0.5, self.placed_at[1] + 0.5,
+                         self.placed_at[2] + 0.5)
+                    yaw, pitch = aim_angles(e, c)
+                    adx, ady, _ = self._aimer.step(ctx, yaw, pitch)
+            if self._verify > self.verify_ticks:
+                # genuinely nothing there after re-aiming -> MC rejected it.
                 self.placed_at = None
                 if not self._next_view():
                     r = self._exhausted_views()
@@ -1425,7 +1434,8 @@ class PlaceBlock(Skill):
                                        "place: every view rejected the placement")
                 return SkillResult(AgentAction(), SkillStatus.RUNNING,
                                    f"place: rejected, trying view {self._idx}")
-            return SkillResult(AgentAction(), SkillStatus.RUNNING, "place: verifying")
+            return SkillResult(AgentAction(look_dx=adx, look_dy=ady),
+                               SkillStatus.RUNNING, "place: verifying (aim at placed)")
 
         # 2a. AIM at the current candidate view.
         if self._idx >= len(self._cands):
