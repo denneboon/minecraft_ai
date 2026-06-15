@@ -514,6 +514,18 @@ class MineBlock(Skill):
             return SkillResult(AgentAction(interact="attack", look_dx=dx, look_dy=dy),
                                SkillStatus.RUNNING, info)
 
+        # While LATCHED onto a target (mine_log / clear_leaf), keep checking it's
+        # in INTERACTION reach. F3's targeted-block ray reaches ~20 blocks — far
+        # past the 4.5 we can actually hit — so the crosshair can rest on a log
+        # up a ledge or across a gap that we'll only punch air at until the
+        # 20s mine timeout (the live "trying to punch a tree barely too far
+        # away"). Abandon promptly so the FSM walks closer / skips it.
+        if self._mode in ("mine_log", "clear_leaf"):
+            _e = _eye(ctx.pose)
+            if _e is not None and block_reach_distance(_e, self.voxel) > self.max_reach:
+                return SkillResult(AgentAction(), SkillStatus.FAILED,
+                                   f"target out of reach while mining ({self.voxel})")
+
         # ── MINING a log: frozen camera, hold click until the log is gone ──
         if self._mode == "mine_log":
             # "Still on the log" = F3 names a log, OR the id is unreadable but
