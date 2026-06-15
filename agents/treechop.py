@@ -72,6 +72,9 @@ class FindAndChopLogs:
     # on (~1s at the ~11 Hz agent loop) — long enough for a log to fall from a
     # tall/branchy trunk and be vacuumed up.
     _COLLECT_DWELL_TICKS = 10
+    # While collecting, how many blocking blocks we'll MINE out of the way to
+    # actually reach the drop's x,z column (leaf/log/trunk remnants in a forest).
+    _MAX_COLLECT_RECOVER = 4
 
     def __init__(self, is_log=None, reach: float = 3.5, max_radius: int = 32,
                  scan_budget: int = 60, max_logs: int = 9999,
@@ -130,6 +133,7 @@ class FindAndChopLogs:
         self.chopped = 0                # trunk-columns chopped (>=1 log each)
         self.logs = 0                   # actual log blocks broken
         self._collect_dwell = 0         # ticks to stand still vacuuming drops
+        self._collect_recover = 0       # blocks mined to reach the drop column
 
     def _eye_vox(self, pose):
         return (int(math.floor(pose.x)), int(math.floor(pose.y)),
@@ -479,6 +483,7 @@ class FindAndChopLogs:
                 # tree. The old code refound the instant it arrived, so canopy
                 # drops were routinely left behind (only ~1 of 3 collected).
                 self._collect_dwell = self._COLLECT_DWELL_TICKS
+                self._collect_recover = 0
                 return SkillResult(r.action, SkillStatus.RUNNING,
                                    f"chopped {mined} log(s); collecting")
             if r.status in (SkillStatus.FAILED, SkillStatus.BLOCKED):
@@ -489,9 +494,8 @@ class FindAndChopLogs:
 
         if st == "collect":
             r = self._sub.tick(ctx)
-            if r.status in (SkillStatus.DONE, SkillStatus.FAILED, SkillStatus.BLOCKED):
-                # Arrived on (or gave up reaching) the chopped column. DWELL a
-                # few ticks standing still first so falling/incoming drops are
+            if r.status == SkillStatus.DONE:
+                # Standing on the drop column. DWELL a few ticks so the item is
                 # vacuumed up, THEN go find the next tree.
                 if self._collect_dwell > 0:
                     self._collect_dwell -= 1
@@ -499,6 +503,40 @@ class FindAndChopLogs:
                                        "collecting (dwell)")
                 self._target = None; self._state = "find"
                 return SkillResult(r.action, SkillStatus.RUNNING, "collected; refind")
+            if r.status in (SkillStatus.FAILED, SkillStatus.BLOCKED):
+                # Can't reach the drop's x,z — a block is in the way. Standing on
+                # the column picks the item up most of the time, so MINE a
+                # breakable blocker (leaf / log / trunk remnant) and keep going
+                # (operator's suggestion). If nothing's clearable or the budget's
+                # spent, dwell here and move on.
+                if self._collect_recover < self._MAX_COLLECT_RECOVER:
+                    obstacle = self._obstacle_ahead(ctx)
+                    if obstacle is not None and obstacle not in self._cleared:
+                        self._collect_recover += 1
+                        self._cleared.add(obstacle)
+                        self._sub = MineBlock(obstacle, tool_role=None,
+                                              is_safe=self.is_breakable)
+                        self._state = "collect_mine"
+                        return SkillResult(AgentAction(), SkillStatus.RUNNING,
+                                           f"collect: clearing {obstacle} to reach drop")
+                if self._collect_dwell > 0:
+                    self._collect_dwell -= 1
+                    return SkillResult(AgentAction(), SkillStatus.RUNNING,
+                                       "collecting (dwell)")
+                self._target = None; self._state = "find"
+                return SkillResult(r.action, SkillStatus.RUNNING, "collected; refind")
+            return r
+
+        if st == "collect_mine":
+            r = self._sub.tick(ctx)
+            if r.status in (SkillStatus.DONE, SkillStatus.FAILED, SkillStatus.BLOCKED):
+                # Cleared (or couldn't) — resume walking onto the drop column.
+                self._sub = WalkToward(self._target, arrive_dist=0.6,
+                                       arrive_on_column=True, stuck_window=10,
+                                       avoid_fall=False, jump_after=6)
+                self._state = "collect"
+                return SkillResult(r.action, SkillStatus.RUNNING,
+                                   "collect: cleared; resuming walk to drop")
             return r
 
         return SkillResult(AgentAction(), SkillStatus.FAILED, f"bad state {st}")
