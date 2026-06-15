@@ -89,6 +89,80 @@ _FOOD_RANK = {
 }
 
 
+# Armor material tiers, BEST first. Distinct from tool tiers: armour has
+# leather / chainmail / turtle and NO wood/stone/copper. turtle_helmet has no
+# tiered prefix but protects ~iron-tier, so rank it there.
+_ARMOR_RANK = {
+    "netherite": 6, "diamond": 5, "iron": 4, "chainmail": 3, "turtle": 4,
+    "golden": 2, "gold": 2, "leather": 1,
+}
+# Which body slot a piece occupies, by id suffix (fallback for the catalog's
+# equipment_slot). turtle_helmet is a head piece despite the odd name.
+_ARMOR_SLOT_SUFFIX = {
+    "head": ("_helmet",), "chest": ("_chestplate",),
+    "legs": ("_leggings",), "feet": ("_boots",),
+}
+
+
+def armor_material_rank(item_id: Optional[str]) -> int:
+    """Protection tier for ranking 'which helmet/chestplate/… is best' —
+    netherite=6 … leather=1, turtle=4, and 0 for a non-tiered head item
+    (carved_pumpkin, mob head, elytra) so those never beat real armour."""
+    if not item_id:
+        return 0
+    prefix = _stem(item_id).split("_", 1)[0]
+    return _ARMOR_RANK.get(prefix, 0)
+
+
+def armor_slot_of(item_id: Optional[str], catalog=None) -> Optional[str]:
+    """The body slot ('head'/'chest'/'legs'/'feet') a piece equips into, or
+    None. Uses the catalog's equipment_slot first, id-suffix as a fallback."""
+    if not item_id:
+        return None
+    info = None
+    if catalog is not None:
+        try:
+            info = catalog.item(item_id)
+        except Exception:
+            info = None
+    if info is not None and getattr(info, "equipment_slot", None) in (
+            "head", "chest", "legs", "feet"):
+        return info.equipment_slot
+    stem = _stem(item_id)
+    for slot, sufs in _ARMOR_SLOT_SUFFIX.items():
+        if any(stem.endswith(s) for s in sufs) or (
+                slot == "head" and stem == "turtle_helmet"):
+            return slot
+    return None
+
+
+def best_armor_for_slot(items, slot: str, catalog=None) -> Optional[str]:
+    """The BEST real armour piece for body ``slot`` ('head'/'chest'/'legs'/
+    'feet') from ``items`` — highest protection tier, ties broken by count.
+
+    Only pieces with a real armour material (tier > 0) are considered, so a
+    carved_pumpkin / mob head / elytra is never auto-equipped over nothing.
+    ``items`` is a ``{item_id: count}`` map or an iterable of ids; returns the
+    item id or None when nothing fits the slot."""
+    if isinstance(items, dict):
+        pairs = list(items.items())
+    else:
+        counts: dict = {}
+        for it in (items or []):
+            if it:
+                counts[it] = counts.get(it, 0) + 1
+        pairs = list(counts.items())
+    best, best_key = None, None
+    for item_id, count in pairs:
+        rank = armor_material_rank(item_id)
+        if rank <= 0 or armor_slot_of(item_id, catalog) != slot:
+            continue
+        key = (rank, int(count or 0))
+        if best_key is None or key > best_key:
+            best, best_key = item_id, key
+    return best
+
+
 def material_rank(item_id: Optional[str]) -> int:
     """Tool material tier for ranking 'which sword/pickaxe is best' —
     netherite=7 … wood=1, and 0 for an item with no tiered material prefix."""
@@ -191,4 +265,5 @@ def matches_role(item_id: Optional[str], role: str,
 
 
 __all__ = ["ROLES", "DEFAULT_FOOD", "item_role", "matches_role",
-           "material_rank", "best_item_for_role"]
+           "material_rank", "best_item_for_role",
+           "armor_material_rank", "armor_slot_of", "best_armor_for_slot"]

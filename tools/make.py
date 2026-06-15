@@ -40,6 +40,7 @@ from agents.crafting import Crafter
 from agents.inventory_memory import InventoryMemory
 from agents.maker import Maker
 from agents.hotbar_arranger import arrange_hotbar
+from agents.armor_equip import equip_best_armor
 from agents.treechop import FindAndChopLogs, _full_movement
 from agents.skills import SkillContext, SkillStatus
 from vision.world.f3_target import targeted_block_pos
@@ -271,6 +272,15 @@ def main(argv=None) -> int:
                     f"{r}={i.split(':')[-1]}" for r, i in arr.items()))
         except Exception as e:
             print(f"[make] hotbar arrange skipped: {e}")
+
+        # Wear the best armour we're carrying (survival upkeep; best-effort).
+        try:
+            eq = equip_best_armor(ctl, catalog=cat, log=print)
+            if eq:
+                print("[make] armor: " + ", ".join(
+                    f"{s}={i.split(':')[-1]}" for s, i in eq.items()))
+        except Exception as e:
+            print(f"[make] armor equip skipped: {e}")
 
         M.bot_running_banner(f"making {count}x {target.split(':')[-1]}")
         ok, msg = maker.make(target, count)

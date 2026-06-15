@@ -56,6 +56,7 @@ OFFLINE_TESTS = [
     "test_stack_count",
     "test_place_break",
     "test_hotbar_arrange",
+    "test_armor_equip",
 ]
 
 
