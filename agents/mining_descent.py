@@ -110,6 +110,7 @@ class DescendToStone(Skill):
         self._t = 0                 # per-phase tick counter
         self._mine_pos = None       # voxel we're mining
         self._mine_yield = False    # is it stone (drops cobblestone)?
+        self._collect_after = False # pause to grab the drop after stepping down
         self._step_y = None         # pose.y when the step (walk) began
         self._step_x0 = 0.0         # pose.x/z when the step began (cap walk dist)
         self._step_z0 = 0.0
@@ -196,25 +197,27 @@ class DescendToStone(Skill):
                 self._sub = None
                 self._step_y = float(pose.y)
                 self._step_x0, self._step_z0 = float(pose.x), float(pose.z)
-                # When we just broke STONE, hold still a moment so its dropped
-                # cobblestone (right at the cut, ~1 block away) gets sucked in
-                # BEFORE we step down past it — otherwise the drop is left in the
-                # trench and the mined block never reaches the inventory.
-                self._phase = "collect" if self._mine_yield else "step"
-                self._t = 0
+                if self._mine_yield:
+                    self.gathered += 1
+                # Collect AFTER stepping down: the cobblestone drops at the cut,
+                # which we're about to step onto — so pause to pick it up once
+                # we're standing THERE, not a block away from it. (Pausing before
+                # the step left the drop behind in the trench.)
+                self._collect_after = self._mine_yield
+                self._phase = "step"; self._t = 0
                 return SkillResult(r.action, SkillStatus.RUNNING, "cut tread")
             if r.status in (SkillStatus.FAILED, SkillStatus.BLOCKED) or self._t > 50:
                 self._sub = None
                 return self._stop_or_turn("stop: couldn't cut the tread")
             return r
 
-        # 2b. Collect: stand on the cut for a beat so the cobblestone is picked
-        #     up (auto-pickup pulls items within ~1 block over ~0.5 s).
+        # 2b. Collect: stand on the cut (we just stepped onto it) for a beat so
+        #     the cobblestone drop is sucked in (auto-pickup pulls items within
+        #     ~1 block over ~0.5 s) before moving on.
         if self._phase == "collect":
             self._t += 1
-            if self._t >= 10:
-                self.gathered += 1
-                self._phase = "step"; self._t = 0
+            if self._t >= 8:
+                self._phase = "face"; self._t = 0
                 return SkillResult(AgentAction(), SkillStatus.RUNNING, "collected")
             return SkillResult(AgentAction(movement={"forward": False}),
                                SkillStatus.RUNNING, "collecting drop")
@@ -231,7 +234,11 @@ class DescendToStone(Skill):
                 self._depth += 1
                 if drop > _MAX_FALL:
                     return self._done("stopped: fell into open space (cave)")
-                self._phase = "face"; self._t = 0
+                self._t = 0
+                # Pause to pick up the cobblestone drop now that we're standing
+                # on the cut; otherwise carry on to the next stair.
+                self._phase = "collect" if self._collect_after else "face"
+                self._collect_after = False
                 return SkillResult(AgentAction(movement={"forward": False}),
                                    SkillStatus.RUNNING, f"descended (depth {self._depth})")
             if moved > _STEP_REACH or self._t > 16:
