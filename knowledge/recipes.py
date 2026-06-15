@@ -300,11 +300,30 @@ def plan_make(target_id: str, count: int, available: Dict[str, int],
                 got = next((o for o in sorted(opts, key=lambda o: -_have(avail, o))
                             if _have(avail, o) > 0), None)
                 if got is None:
-                    # make/gather the first acceptable option, then use it
-                    opt = opts[0]
-                    if not _ensure(opt, 1, depth - 1) or _have(avail, opt) <= 0:
-                        return False
-                    got = opt
+                    # None of the acceptable items is on hand. PREFER an option
+                    # we can craft from what we ALREADY have without gathering
+                    # new raw — e.g. having chopped acacia_log, make
+                    # acacia_planks rather than defaulting to oak_planks (first
+                    # in #planks tag order) and demanding oak_log we'll never
+                    # find in this biome. This is what makes the species-
+                    # agnostic gatherer + re-plan loop actually converge: the
+                    # plan adapts to whatever wood was brought back. Only if NO
+                    # option is gather-free do we fall back to the first option
+                    # (and let it record the raw shortfall to gather).
+                    for opt in opts:
+                        snap_raw, snap_av, snap_st = dict(raw), dict(avail), list(steps)
+                        if (_ensure(opt, 1, depth - 1) and _have(avail, opt) > 0
+                                and raw == snap_raw):       # required no new raw
+                            got = opt
+                            break
+                        raw.clear(); raw.update(snap_raw)   # roll back the trial
+                        avail.clear(); avail.update(snap_av)
+                        steps[:] = snap_st
+                    if got is None:
+                        opt = opts[0]
+                        if not _ensure(opt, 1, depth - 1) or _have(avail, opt) <= 0:
+                            return False
+                        got = opt
                 cell_items[rc] = got
                 avail[got] = _have(avail, got) - 1
             steps.append(CraftStep(rec.result_id, rec.result_count,

@@ -101,6 +101,21 @@ def main() -> int:
                          {"minecraft:wooden_pickaxe": 1}, a, cat)
     (ok if haveit == ({}, []) else bad)(f"already have it -> empty plan ({haveit})")
 
+    # 7b. SPECIES SUBSTITUTION (the savanna/birch live bug): the gatherer is
+    # species-agnostic, so a re-plan with non-oak logs on hand must USE them
+    # (acacia_log -> acacia_planks) and NOT re-demand oak_log forever. Without
+    # this the bot loops gather<->re-plan in any non-oak biome and never crafts.
+    for sp in ("acacia", "birch", "spruce"):
+        log = f"minecraft:{sp}_log"
+        sub = R.plan_make("minecraft:wooden_pickaxe", 1, {log: 3}, a, cat)
+        if sub is None:
+            bad(f"{sp}_log on hand -> a plan"); continue
+        sraw, ssteps = sub
+        plank_steps = {s.result_id.split(":")[-1] for s in ssteps if s.result_id.endswith("_planks")}
+        (ok if not sraw and plank_steps == {f"{sp}_planks"} else bad)(
+            f"3x {sp}_log on hand -> no re-gather, crafts {sp}_planks "
+            f"(raw={ {k.split(':')[-1]: v for k, v in sraw.items()} }, planks={sorted(plank_steps)})")
+
     print("\n" + ("ALL RECIPE TESTS PASSED" if not _fails
                   else f"{_fails} CHECK(S) FAILED"))
     return 0 if not _fails else 1
