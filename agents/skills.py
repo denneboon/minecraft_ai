@@ -222,7 +222,13 @@ def can_place_block(pose, looking_at, world_map=None, dimension=None,
     # placement whose box intersects the player hitbox, so a spot < ~1 block
     # away horizontally tends to silently fail.
     hd = math.hypot((place[0] + 0.5) - pose.x, (place[2] + 0.5) - pose.z)
-    if hd < 1.0:
+    if hd < 0.85:
+        # MC rejects a placement whose block box intersects the player hitbox
+        # (~0.3 radius + 0.5 half-block ≈ 0.8). Below ~0.85 it's a sure reject;
+        # between there and 1.0 it OFTEN works, and the placer's post-place
+        # verify catches the genuine rejects — so don't pre-emptively rule out
+        # the close-but-legal spots (on cratered chop terrain the only reachable
+        # ground is close, and the old 1.0 floor rejected every spot -> timeout).
         return None
     if world_map is not None:                        # already occupied?
         try:
@@ -1159,7 +1165,8 @@ class PlaceBlock(Skill):
                  yaw_offs=(0.0, 60.0, -60.0, 120.0, -120.0, 180.0),
                  max_ticks: int = 600, max_reach: float = PLAYER_REACH,
                  tol_deg: float = 5.0, verify_ticks: int = 5,
-                 max_step_backs: int = 2, back_ticks: int = 10):
+                 max_step_backs: int = 5, back_ticks: int = 10,
+                 spot_budget: int = 70):
         self.tool_role = tool_role
         self.slot = slot                 # explicit hotbar slot 1-9, overrides role
         # SWEEP DIRECTIONS FIRST at the best pitch (turn away from obstacles
@@ -1172,6 +1179,7 @@ class PlaceBlock(Skill):
         self.verify_ticks = verify_ticks
         self.max_step_backs = int(max_step_backs)
         self.back_ticks = int(back_ticks)
+        self.spot_budget = int(spot_budget)
         self.reset()
 
     def reset(self):
@@ -1188,6 +1196,7 @@ class PlaceBlock(Skill):
         self._step_backs = 0
         self._stepping = False
         self._back_t = 0
+        self._spot_ticks = 0        # ticks scanned at the CURRENT spot
 
     def _exhausted_views(self):
         """All views failed at this spot. Step back onto fresh ground and
@@ -1199,6 +1208,7 @@ class PlaceBlock(Skill):
         self._step_backs += 1
         self._stepping = True
         self._back_t = 0
+        self._spot_ticks = 0
         return SkillResult(AgentAction(movement={"backward": True}),
                            SkillStatus.RUNNING,
                            f"place: no spot here — stepping back ({self._step_backs})")
@@ -1247,9 +1257,25 @@ class PlaceBlock(Skill):
             self._stepping = False
             self._idx = 0
             self._base_yaw = None
+            self._spot_ticks = 0
             self._aimer = _Aimer(tol_deg=self._tol)
             return SkillResult(AgentAction(), SkillStatus.RUNNING,
                                "place: re-scanning from new spot")
+
+        # Per-spot time cap: if we've scanned this spot too long without
+        # placing, RELOCATE (step back) instead of grinding every view to the
+        # global budget — the spot is just bad (cratered/sloped chop terrain).
+        # This guarantees the step-back actually fires (the full 24-view scan is
+        # slow enough that the whole place step otherwise times out in one spot).
+        if self._mode == "aim":
+            self._spot_ticks += 1
+            if self._spot_ticks > self.spot_budget:
+                r = self._exhausted_views()
+                if r is not None:
+                    return r
+                return SkillResult(AgentAction(), SkillStatus.FAILED,
+                                   "place: no placeable ground (stepped back "
+                                   f"{self._step_backs}x)")
 
         # 2b. VERIFY a placement we just attempted: did the block appear under
         # the (still-aimed) crosshair? If so we're done; if MC rejected it
