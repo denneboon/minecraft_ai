@@ -162,6 +162,8 @@ def main(argv=None) -> int:
         except Exception:
             pass
 
+    dug = {"v": False}   # set when a gather dug a shaft -> craft via pillar-place
+
     def _gather(item_id, qty):
         """Gather ``qty`` of a raw material from the world.
 
@@ -192,10 +194,11 @@ def main(argv=None) -> int:
                 # Stone is everywhere a few blocks DOWN — don't depend on an
                 # exposed face. Cut a safe descending staircase to it (never
                 # digs straight down / into lava — see agents.mining_descent).
-                print(f"[make] gather {short}: digging a safe staircase down to "
+                print(f"[make] gather {short}: digging straight down to "
                       f"{src_stem} with a {role}")
                 fsm = DescendToStone(count=qty, tool_role=role,
                                      max_depth=max(8, qty + 6))
+                dug["v"] = True   # we'll be in a shaft -> craft via pillar-place
             else:
                 pred = (lambda b, s=source, st=src_stem:
                         bool(b) and (b == s or str(b).split(":")[-1] == st))
@@ -293,7 +296,7 @@ def main(argv=None) -> int:
             menu_detector=menu_detector, reader=reader, hotbar=hotbar,
             inspector=inspector, actions=actions, gate=gate, cat=cat, assets=a,
             ui_scale=ui_scale, origin=origin, px_per_deg=px_per_deg,
-            memory=memory, debug=debug, f3_worker=f3w)
+            memory=memory, debug=debug, f3_worker=f3w, pillar_place=dug["v"])
 
     maker = Maker(ctl, crafter, memory, a, cat,
                   gather_fn=_gather, table_craft_fn=_table_craft, log=print)

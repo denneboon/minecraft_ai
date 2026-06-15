@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import sys
+import math
 import time
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -39,7 +40,7 @@ from agents.inventory_inspector import InventoryInspector, InspectorConfig
 from control.hotbar import build_hotbar_manager
 from control.inventory_control import InventoryController
 from agents.crafting import Crafter, find_item_slot
-from agents.skills import (PlaceBlock, BreakLookedAt, LookAtVoxel,
+from agents.skills import (PlaceBlock, BreakLookedAt, LookAtVoxel, PillarUp,
                            SkillContext, SkillStatus, norm_angle)
 from vision.world.f3_target import targeted_block_pos
 from agents.treechop import _full_movement
@@ -52,10 +53,15 @@ TABLE = "minecraft:crafting_table"
 def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
                     reader, hotbar, inspector, actions, gate, cat, assets,
                     ui_scale=2, origin=(0, 0), px_per_deg=6.5, memory=None,
-                    debug=False, f3_worker=None):
+                    debug=False, f3_worker=None, pillar_place=False):
     """Place a crafting table, open it, craft ``target`` (3x3), break the table
     back. Components are provided + owned by the CALLER (not started/stopped
-    here). Returns ``(ok, message)``."""
+    here). Returns ``(ok, message)``.
+
+    ``pillar_place`` places the table UNDER THE FEET (jump + place, the pillar
+    mechanic) and opens it by looking straight down — so it works in a tight
+    1-wide spot (e.g. the bottom of a dig shaft) where there's no ground in
+    front to place it on. The bot stands on the table to use it."""
     a = assets
     if ":" not in target:
         target = "minecraft:" + target
@@ -292,26 +298,49 @@ def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
         if not _ensure_camera_live():
             return False, "camera won't respond (a menu may be stuck open)"
 
-        # 2. Place the table (scans look-views, places, self-verifies). Generous
-        # budget: on cratered post-chop ground the placer may step back several
-        # times to reach flat ground before it can place.
-        pb = PlaceBlock(slot=table_slot)
-        st = drive(pb, "place", max_secs=140.0, debug=debug)
-        # Success is EITHER PlaceBlock's visual confirm OR a GUI opening during
-        # the scan (the click landed on the just-placed table and opened it — a
-        # fresh table OCRs to garble so the visual verify often can't read it).
-        gui_already_open = place_gui["open"]
-        table_pos = pb.placed_at or place_gui["pos"]
-        if st != SkillStatus.DONE or table_pos is None:
-            return False, "couldn't place the table"
-        print(f"[table] table placed at {table_pos}"
-              f"{' (already open via place-click)' if gui_already_open else ''}")
+        # 2. Place the table.
+        if pillar_place:
+            # Pillar-place it UNDER the feet (jump + place) — works in a tight
+            # 1-wide shaft. The bot ends up standing ON the table.
+            pu = PillarUp(height=1, slot=table_slot, place_pitch=85.0,
+                          per_block_budget=60)
+            st = drive(pu, "place-table", max_secs=22.0, debug=debug)
+            reading = (f3_worker.latest() if f3_worker is not None
+                       else f3.read(capture.get_frame()))
+            wf = wp.update(capture.get_frame(), reading)
+            pose = wf.pose
+            if st != SkillStatus.DONE or pose is None:
+                return False, "couldn't pillar-place the table"
+            table_pos = (int(math.floor(pose.x)), int(math.floor(pose.y)) - 1,
+                         int(math.floor(pose.z)))
+            gui_already_open = False
+            print(f"[table] pillar-placed table under feet at {table_pos}")
+        else:
+            # Place on the ground in front (scans look-views, self-verifies).
+            # Generous budget: on cratered post-chop ground the placer may step
+            # back several times to reach flat ground before it can place.
+            pb = PlaceBlock(slot=table_slot)
+            st = drive(pb, "place", max_secs=140.0, debug=debug)
+            # Success is EITHER PlaceBlock's visual confirm OR a GUI opening
+            # during the scan (the click landed on the just-placed table and
+            # opened it — a fresh table OCRs to garble so the visual verify
+            # often can't read it).
+            gui_already_open = place_gui["open"]
+            table_pos = pb.placed_at or place_gui["pos"]
+            if st != SkillStatus.DONE or table_pos is None:
+                return False, "couldn't place the table"
+            print(f"[table] table placed at {table_pos}"
+                  f"{' (already open via place-click)' if gui_already_open else ''}")
 
-        # 3. Open it — UNLESS a click during placement already opened it. Either
-        # way, SETTLE before reading: the table GUI needs a moment to fully open
-        # and render its slots, or the first inventory read sees a half-open /
-        # empty grid and the craft fails "can't craft … from inventory".
-        if not gui_already_open:
+        # 3. Open it — UNLESS a click during placement already opened it. For the
+        # pillar-placed table, aim straight DOWN at it (it's under our feet) then
+        # right-click. SETTLE before reading: the GUI needs a moment to fully
+        # render its slots, or the first read sees a half-open grid.
+        if pillar_place:
+            drive(LookAtVoxel(table_pos, tol_deg=5.0), "aim-open",
+                  max_secs=4.0, debug=debug)
+            mouse.right_click()
+        elif not gui_already_open:
             mouse.right_click()
         time.sleep(0.9)
 

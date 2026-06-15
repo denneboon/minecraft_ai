@@ -689,10 +689,14 @@ class PillarUp(Skill):
     name = "pillar_up"
 
     def __init__(self, height: int = 1, place_pitch: float = 80.0,
-                 per_block_budget: int = 40):
+                 per_block_budget: int = 40, slot: Optional[int] = None):
         self.height = height
         self.place_pitch = place_pitch
         self.per_block_budget = per_block_budget
+        # Pillar with a SPECIFIC hotbar slot (1-9) instead of the generic blocks
+        # role — e.g. to place a crafting table under the feet so it can be used
+        # in a tight 1-wide shaft (place it, stand on it, look down to open).
+        self.slot = slot
         self.aim = _Aimer(tol_deg=4.0)
         self._done_blocks = 0
         self._base_y: Optional[float] = None
@@ -727,8 +731,8 @@ class PillarUp(Skill):
                                "no upward progress (blocked / out of blocks)")
         # Select blocks slot once.
         hb = ctx.hotbar
-        if not self._selected and hb is not None:
-            slot = hb.best_slot_for("blocks")
+        if not self._selected and (hb is not None or self.slot is not None):
+            slot = self.slot if self.slot is not None else hb.best_slot_for("blocks")
             self._selected = True
             if slot is None:
                 return SkillResult(AgentAction(), SkillStatus.FAILED, "no blocks")
