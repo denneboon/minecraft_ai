@@ -44,23 +44,32 @@ class Maker:
 
     # ------------------------------------------------------------------
     def _read_counts(self) -> dict:
-        """Open + full-read the inventory (updates the ledger), return counts."""
+        """Open + full-read the inventory (updates the ledger), return counts.
+
+        The GUI must RENDER and the (threaded) screen capture must deliver a
+        fresh POST-open frame before the read is meaningful — a too-early read
+        sees the pre-open world and comes back EMPTY, which would wrongly
+        trigger a from-scratch re-gather (the live round-2 bug: logs ARE on
+        hand but the read missed them). Measured: ~0.6 s settle was still too
+        short on this box, ~0.8 s read cleanly. So: a generous first settle,
+        then re-read a few times until non-empty before trusting 'empty' as
+        real. A genuinely empty inventory just costs the full retry budget once."""
         self.ctl.open_inventory()
+        counts: dict = {}
         try:
-            time.sleep(0.35)            # let the inventory GUI render first
-            try:
-                snap = self.ctl.read(stop_when=lambda s: False)
-                # A too-early / flaky read can come back EMPTY even when the
-                # inventory has items (round-1 miss -> a bogus from-scratch
-                # gather). Re-read once after a settle before trusting "empty".
-                if not inventory_counts(snap):
-                    time.sleep(0.35)
+            time.sleep(0.8)             # GUI render + capture refresh
+            for _ in range(3):
+                try:
                     snap = self.ctl.read(stop_when=lambda s: False)
-            except TypeError:
-                snap = self.ctl.read()
+                except TypeError:
+                    snap = self.ctl.read()
+                counts = inventory_counts(snap)
+                if counts:
+                    break
+                time.sleep(0.4)         # let a fresh frame arrive, then retry
         finally:
             self.ctl.close()
-        return inventory_counts(snap)
+        return counts
 
     # ------------------------------------------------------------------
     def make(self, target_id: str, count: int = 1, *, max_rounds: int = 5
