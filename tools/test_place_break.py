@@ -79,6 +79,18 @@ def main() -> int:
     # replaces it). Without this, no spot in a grassy/flowery biome is placeable.
     (ok if can_place_block(p, _la((0, 63, 1), "up"), _wm(plants=[(0, 64, 1)])) == (0, 64, 1)
      else bad)("placement voxel is grass/flower (replaceable) -> placeable")
+    # TARGETING a replaceable block (grass/bush/leaf_litter/snow/…): MC places
+    # INTO that block's own cell, so it ALWAYS works — place == the targeted
+    # cell, not the cell above it.
+    for rb in ("minecraft:short_grass", "minecraft:tall_grass", "minecraft:fern",
+               "minecraft:leaf_litter", "minecraft:bush", "minecraft:snow",
+               "minecraft:dandelion", "minecraft:warped_roots"):
+        (ok if can_place_block(p, _la((0, 63, 1), "up", block_id=rb), _wm()) == (0, 63, 1)
+         else bad)(f"targeting replaceable {rb.split(':')[-1]} -> places INTO it")
+    # a SOLID look-alike (grass_block, mangrove_roots) is NOT replaceable -> place
+    # on TOP (the cell above), as before.
+    (ok if can_place_block(p, _la((0, 63, 1), "up", block_id="minecraft:grass_block"), _wm()) == (0, 64, 1)
+     else bad)("targeting grass_block (solid) -> places on top, not into")
     # VERTICALLY CLEAR placements: a spot directly below us (same x,z, lower y)
     # does NOT intersect the hitbox and places fine — the old horizontal-only
     # distance floor wrongly rejected every such spot (the main "renders things

@@ -187,32 +187,59 @@ def placement_voxel(looking_at) -> Optional[Voxel]:
 # flowery biome is ever 'placeable' (short_grass covers the ground), and the
 # table placer scans every view and times out (PC-observed on flower_forest).
 _REPLACEABLE_PLACE_INTO = frozenset({
+    # air variants
+    "minecraft:air", "minecraft:cave_air", "minecraft:void_air",
+    # ground plants / decorations the player walks through
     "minecraft:short_grass", "minecraft:grass", "minecraft:tall_grass",
     "minecraft:fern", "minecraft:large_fern", "minecraft:dead_bush",
+    "minecraft:bush", "minecraft:firefly_bush", "minecraft:leaf_litter",
+    "minecraft:short_dry_grass", "minecraft:tall_dry_grass",
+    "minecraft:moss_carpet", "minecraft:pale_moss_carpet",
     "minecraft:seagrass", "minecraft:tall_seagrass", "minecraft:snow",
     "minecraft:vine", "minecraft:glow_lichen", "minecraft:hanging_roots",
+    "minecraft:small_dripleaf",
+    # nether / cave vegetation
+    "minecraft:crimson_roots", "minecraft:warped_roots", "minecraft:nether_sprouts",
+    "minecraft:twisting_vines", "minecraft:twisting_vines_plant",
+    "minecraft:weeping_vines", "minecraft:weeping_vines_plant",
+    "minecraft:cave_vines", "minecraft:cave_vines_plant",
+    "minecraft:kelp", "minecraft:kelp_plant",
+    # fluids / misc the game overwrites on placement
     "minecraft:water", "minecraft:lava", "minecraft:fire", "minecraft:light",
+    "minecraft:structure_void",
+})
+
+# Solid ground blocks that LOOK plant-ish by name but are NOT replaceable — must
+# never be matched by the suffix rules below.
+_NOT_REPLACEABLE = frozenset({
+    "minecraft:grass_block", "minecraft:mangrove_roots", "minecraft:muddy_mangrove_roots",
 })
 
 
 def _is_replaceable_place_into(bid: Optional[str]) -> bool:
+    """True if placing a block 'into' ``bid`` succeeds because MC silently
+    REPLACES it (grass, bushes, leaf litter, snow layer, ferns, flowers,
+    saplings, mushrooms, vines, water/lava, …). A placement that targets such a
+    block lands in that block's own cell — so the placer should treat it as a
+    clear spot, not an obstruction. Solid ground (grass_block, mangrove_roots)
+    is explicitly excluded."""
     if not bid:
         return True
     if bid in _REPLACEABLE_PLACE_INTO:
         return True
-    b = bid.split(":")[-1]
-    # All flowers (incl. 2-tall bottoms), saplings, mushrooms, crops, ferns,
-    # tulips, and the *_grass plants are replaceable. ``grass_block`` is a real
-    # solid ground block and is intentionally NOT matched (it doesn't end with
-    # ``_grass``? it does — guard it explicitly).
-    if b == "grass_block":
+    if bid in _NOT_REPLACEABLE:
         return False
+    b = bid.split(":")[-1]
+    # Families that are uniformly replaceable plants. (`grass_block` /
+    # `mangrove_roots` are caught by _NOT_REPLACEABLE above.)
     return (b.endswith("_grass") or b.endswith("_fern") or b.endswith("_tulip")
             or b.endswith("_sapling") or b.endswith("_mushroom")
+            or b.endswith("_dry_grass")
             or b in ("dandelion", "poppy", "blue_orchid", "allium",
                      "azure_bluet", "oxeye_daisy", "cornflower", "torchflower",
                      "lily_of_the_valley", "wither_rose", "sunflower", "lilac",
-                     "rose_bush", "peony", "pink_petals", "snow"))
+                     "rose_bush", "peony", "pink_petals", "wildflowers",
+                     "snow", "leaf_litter", "bush", "firefly_bush"))
 
 
 def can_place_block(pose, looking_at, world_map=None, dimension=None,
@@ -233,11 +260,21 @@ def can_place_block(pose, looking_at, world_map=None, dimension=None,
     tgt = getattr(looking_at, "pos", None)
     if tgt is None:
         return None
-    face = getattr(looking_at, "face", None) or assume_face
-    if face not in _FACE_NORMAL:
-        return None
-    n = _FACE_NORMAL[face]
-    place = (tgt[0] + n[0], tgt[1] + n[1], tgt[2] + n[2])
+    # If the TARGETED block is itself replaceable (grass, bush, leaf litter,
+    # snow, fern, flower, vine, water, …), MC places the new block straight INTO
+    # that block's own cell — NOT onto an adjacent face. So the placement voxel
+    # is the targeted cell, and it's guaranteed clear (the game overwrites the
+    # plant). This is the "aim at grass and it always places" case. Otherwise we
+    # place on the adjacent face (top, for a downward-looking placer).
+    tgt_bid = getattr(looking_at, "block_id", None)
+    if _is_replaceable_place_into(tgt_bid):
+        place = tuple(tgt)
+    else:
+        face = getattr(looking_at, "face", None) or assume_face
+        if face not in _FACE_NORMAL:
+            return None
+        n = _FACE_NORMAL[face]
+        place = (tgt[0] + n[0], tgt[1] + n[1], tgt[2] + n[2])
     # Reach is to the block you CLICK (the targeted block). MC then places into
     # the adjacent cell — which may itself sit a hair past the reach sphere, so
     # we deliberately do NOT also require ``place`` to be in reach (that wrongly
