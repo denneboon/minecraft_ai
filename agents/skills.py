@@ -1347,8 +1347,13 @@ class PlaceBlock(Skill):
             if self._prime_aim is None:
                 self._prime_aim = LookAtVoxel(self._stand, tol_deg=self._tol)
             ar = self._prime_aim.tick(ctx)
+            # Generous aim budget: the craft screens can leave the camera pointed
+            # far off (seen: nearly straight up at pitch -79), and the aim only
+            # applies on FRESH F3 poses, so a full swing down to the stand voxel
+            # can take dozens of ticks. Too short a budget abandons the prime
+            # right as it's about to land ("couldn't place the table").
             if ar.status == SkillStatus.RUNNING \
-                    and self._prime_t < self.prime_back_ticks + 30:
+                    and self._prime_t < self.prime_back_ticks + 70:
                 return SkillResult(ar.action, SkillStatus.RUNNING,
                                    "place: priming (aim at stand spot)")
             aimed = (ar.status == SkillStatus.DONE)
