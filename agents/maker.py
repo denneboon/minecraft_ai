@@ -72,7 +72,7 @@ class Maker:
         return counts
 
     # ------------------------------------------------------------------
-    def make(self, target_id: str, count: int = 1, *, max_rounds: int = 5
+    def make(self, target_id: str, count: int = 1, *, max_rounds: int = 8
              ) -> Tuple[bool, str]:
         """Make ``count`` of ``target_id`` from scratch. Returns (ok, message).
 
