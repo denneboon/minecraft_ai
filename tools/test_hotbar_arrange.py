@@ -116,6 +116,22 @@ def main() -> int:
         "returns what it placed")
     (ok if ctl.closed == 1 else bad)("closes the inventory exactly once")
 
+    # 4. a slot_roles map that REPEATS a role must not pull the item back out
+    #    of the slot it was just placed in (would corrupt the earlier slot).
+    print("\n[4] duplicate-role layout keeps the first placement intact")
+    slots2 = {f"hotbar_{i}": None for i in range(9)}
+    slots2.update({
+        "hotbar_7": ("minecraft:dirt", 50),    # in a non-role slot
+        "inv_0": ("minecraft:cobblestone", 64),  # the single best block stack
+    })
+    ctl2 = _MockCtl(slots2)
+    arrange_hotbar(ctl2, slot_roles={5: "blocks", 6: "blocks"},
+                   catalog=cat, settle=0.0)
+    (ok if ctl2.item("hotbar_4") == "minecraft:cobblestone" else bad)(
+        f"slot 5 keeps cobblestone (got {ctl2.item('hotbar_4')})")
+    (ok if ctl2.item("hotbar_5") != "minecraft:cobblestone" else bad)(
+        "slot 6 did NOT steal it back out of slot 5")
+
     print("\n" + ("ALL HOTBAR-ARRANGE TESTS PASSED" if not _fails
                   else f"{_fails} CHECK(S) FAILED"))
     return 0 if not _fails else 1

@@ -46,6 +46,7 @@ def arrange_hotbar(ctl, slot_roles: Optional[Dict[int, str]] = None,
     """
     layout = dict(slot_roles or DEFAULT_ARRANGE)
     placed: Dict[str, str] = {}
+    filled: set = set()                            # hotbar slots already assigned
     ctl.open_inventory()
     try:
         time.sleep(settle)
@@ -65,14 +66,22 @@ def arrange_hotbar(ctl, slot_roles: Optional[Dict[int, str]] = None,
             target = f"hotbar_{slot - 1}"
             if src is None:
                 continue
+            # Don't pull an item back OUT of a slot we already filled: with a
+            # slot_roles map that repeats a role, a later slot's best can
+            # resolve to an earlier role's just-placed item — swapping it out
+            # would corrupt the earlier slot. The item's locked; leave it.
+            if src in filled:
+                continue
             if src == target:                      # already in the right slot
                 placed[role] = best
+                filled.add(target)
                 continue
             try:
                 ctl.number_swap(src, slot)         # best -> this hotbar slot
             except Exception:
                 continue
             placed[role] = best
+            filled.add(target)
             if log:
                 log(f"[hotbar] slot {slot} {role} <- {best.split(':')[-1]}")
             time.sleep(0.12)

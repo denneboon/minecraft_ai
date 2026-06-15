@@ -126,6 +126,28 @@ def main() -> int:
     fsm3.tick(SkillContext(pose=_pose(), world_map=WorldMap(), looking_at=lb))
     (ok if fsm3._state == "chop" else bad)(f"birch log under crosshair -> chop (state={fsm3._state})")
 
+    # 5c. Clean-sightline raise: aiming at the BOTTOM log of a mapped trunk
+    #     from up close grazes the ground (live 'grass_block blocks the target
+    #     — abandon'). The chop start is raised to the log nearest EYE height
+    #     (at/below eye), never above it; ChopTrunk fells the skipped lower
+    #     logs on its DOWN pass. No-op when the column above isn't mapped.
+    print("\n[5c] chop start raised to a clean (eye-level) sightline")
+    fsm = FindAndChopLogs(reach=3.5)
+    wm_col = WorldMap()
+    for yy in (63, 64, 65, 66):          # a 4-tall trunk at x=2
+        wm_col.update_block(BlockObservation(pos=(2, yy, 0),
+            block_id="minecraft:oak_log", confidence=1.0,
+            source="looking_at", last_seen_tick=0))
+    ctx_col = SkillContext(pose=_pose(x=0.0, y=64.0, z=0.0), world_map=wm_col)
+    raised = fsm._raise_to_clean_sightline(ctx_col, (2, 63, 0))  # eye=65.62
+    (ok if raised == (2, 65, 0) else bad)(
+        f"bottom (2,63,0) raised to eye-level (2,65,0), not above eye (got {raised})")
+    # No mapped column above -> unchanged (safe fallback).
+    raised2 = fsm._raise_to_clean_sightline(
+        SkillContext(pose=_pose(), world_map=_map_with_log((2, 63, 0))), (2, 63, 0))
+    (ok if raised2 == (2, 63, 0) else bad)(
+        f"unmapped column above -> target unchanged (got {raised2})")
+
     # 6. Approach stuck -> pillar-out recover -> re-approach; 2nd stuck -> give up.
     print("\n[6] stuck -> pillar-out recover")
     from agents.skills import SkillResult

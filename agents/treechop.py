@@ -139,6 +139,37 @@ class FindAndChopLogs:
         return (int(math.floor(pose.x)), int(math.floor(pose.y)),
                 int(math.floor(pose.z)))
 
+    def _raise_to_clean_sightline(self, ctx, tgt):
+        """Prefer the trunk log nearest EYE height as the chop START. Aiming
+        at the BOTTOM log of a trunk from up close grazes the terrain in
+        FRONT of it — the live 'grass_block blocks the target — abandon' that
+        burned several refind cycles before the bot stumbled onto an eye-level
+        segment. Climb the MAPPED log column while the next log up stays in
+        reach and at/below eye level, so the first cut has a clean
+        horizontal-ish line. ChopTrunk fells UP then DOWN, so the lower logs
+        we skip past still fall. No-op when the column above isn't mapped yet
+        (safe fallback to the original target)."""
+        wm, pose = getattr(ctx, "world_map", None), ctx.pose
+        if wm is None or pose is None:
+            return tgt
+        eye_y = float(pose.y) + 1.62
+        x, y, z = tgt
+        cur = tgt
+        for _ in range(8):                  # cap: a mis-mapped column can't run away
+            if (y + 1) > eye_y:             # never aim the first cut above eye level
+                break
+            above = (x, y + 1, z)
+            try:
+                obs = wm.get_block(above, dimension=ctx.dimension)
+            except TypeError:
+                obs = wm.get_block(above)
+            if not self.is_log(getattr(obs, "block_id", None)):
+                break
+            if not block_in_reach(pose, above, self.reach):
+                break
+            cur = above; y += 1
+        return cur
+
     def _drop_ground(self, ctx, base):
         """The cell a broken log's drop comes to REST in: scan DOWN from the log
         through air/log to the first solid block; the item sits on top of it.
@@ -331,9 +362,11 @@ class FindAndChopLogs:
             # still grabs anything already under the crosshair within full
             # PLAYER_REACH, so we never walk away from a log we could hit now.
             if block_in_reach(pose, tgt, self.reach):
-                self._sub = self._make_mine(tgt)
+                self._target = self._raise_to_clean_sightline(ctx, tgt)
+                self._sub = self._make_mine(self._target)
                 self._state = "chop"
-                return SkillResult(AgentAction(), SkillStatus.RUNNING, f"log {tgt} in reach; chopping")
+                return SkillResult(AgentAction(), SkillStatus.RUNNING,
+                                   f"log {self._target} in reach; chopping")
             # A* route AROUND known gaps/obstacles to the comfortable distance,
             # following the path with the reactive WalkToward.
             self._sub = NavigateTo(tgt, arrive_reach=self.reach)
@@ -403,6 +436,7 @@ class FindAndChopLogs:
                     self._drop_target(); self._state = "find"
                     return SkillResult(r.action, SkillStatus.RUNNING,
                                        "arrived but log still out of reach; refind")
+                self._target = self._raise_to_clean_sightline(ctx, self._target)
                 self._sub = self._make_mine(self._target)
                 self._state = "chop"
                 return SkillResult(r.action, SkillStatus.RUNNING, "arrived; chopping")
