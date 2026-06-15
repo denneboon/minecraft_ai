@@ -19,6 +19,7 @@ ledger (:class:`InventoryMemory`) lets it skip work it doesn't need.
 """
 from __future__ import annotations
 
+import time
 from typing import Callable, Optional, Tuple
 
 from knowledge.recipes import plan_make
@@ -46,8 +47,15 @@ class Maker:
         """Open + full-read the inventory (updates the ledger), return counts."""
         self.ctl.open_inventory()
         try:
+            time.sleep(0.35)            # let the inventory GUI render first
             try:
                 snap = self.ctl.read(stop_when=lambda s: False)
+                # A too-early / flaky read can come back EMPTY even when the
+                # inventory has items (round-1 miss -> a bogus from-scratch
+                # gather). Re-read once after a settle before trusting "empty".
+                if not inventory_counts(snap):
+                    time.sleep(0.35)
+                    snap = self.ctl.read(stop_when=lambda s: False)
             except TypeError:
                 snap = self.ctl.read()
         finally:

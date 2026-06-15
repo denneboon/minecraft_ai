@@ -231,7 +231,14 @@ def can_place_block(pose, looking_at, world_map=None, dimension=None,
             obs = world_map.get_block(place)
         bid = getattr(obs, "block_id", None)
         if bid not in (AIR_BLOCK, None) and not _is_replaceable_place_into(bid):
-            return None
+            # Only a CONFIRMED or high-confidence solid actually blocks the
+            # placement. A low-confidence belief GUESS (a mislabel hovering over
+            # the ground, e.g. grass guessed as oak_leaves) must NOT — otherwise
+            # no spot in a forest is ever 'placeable' and the table never lands.
+            src = getattr(obs, "source", None)
+            conf = float(getattr(obs, "confidence", 0.0) or 0.0)
+            if src in _CONFIRMED_SOURCES or conf >= 0.85:
+                return None
     return place
 
 

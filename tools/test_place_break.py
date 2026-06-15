@@ -36,9 +36,13 @@ def _la(pos, face="up", block_id="minecraft:grass_block"):
 def _wm(solid=(), plants=()):
     solid = set(solid); plants = set(plants)
     def _gb(v, dimension=None):
-        bid = ("minecraft:stone" if v in solid
-               else "minecraft:short_grass" if v in plants else AIR_BLOCK)
-        return SimpleNamespace(block_id=bid)
+        if v in solid:                       # a CONFIRMED solid blocks placement
+            return SimpleNamespace(block_id="minecraft:stone",
+                                   source="looking_at", confidence=1.0)
+        if v in plants:                      # replaceable plant (low-conf guess)
+            return SimpleNamespace(block_id="minecraft:short_grass",
+                                   source="vision_patch", confidence=0.6)
+        return SimpleNamespace(block_id=AIR_BLOCK, source=None, confidence=0.0)
     return SimpleNamespace(get_block=_gb)
 
 def _hotbar(roles):
