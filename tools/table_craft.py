@@ -147,7 +147,14 @@ def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
             # place == table placed+open", which mistook the PAUSE menu for a
             # placed table (and blind-escaping with nothing open OPENS the pause
             # menu). Classify with the menu detector before acting.
-            if pose is not None and (r.action.look_dx or r.action.look_dy):
+            # Gate on FRESH: the F3 worker returns the SAME cached pose for
+            # several drive ticks between its ~11 Hz updates while this loop
+            # spins at ~20 Hz, so a stale repeat looks identical even when the
+            # camera is really turning. Counting stale repeats as "frozen"
+            # spuriously triggers the (expensive) menu probe mid-swing and, worse,
+            # could mis-read a real-but-irrelevant GUI as "table placed". Only
+            # judge freeze across genuinely NEW poses.
+            if fresh and pose is not None and (r.action.look_dx or r.action.look_dy):
                 cam = (round(float(getattr(pose, "yaw", 0.0)), 1),
                        round(float(getattr(pose, "pitch", 0.0)), 1))
                 if cam == _last_cam:
@@ -317,7 +324,15 @@ def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
         print(f"[table] craft: {'OK' if okc else 'FAIL'}: {msg}")
         tctl.close(); time.sleep(0.5)
 
-        # 5. Break the table back (by POSITION — its id won't OCR).
+        # 5. Break the table back (by POSITION — its id won't OCR). Re-aim at
+        # it FIRST: closing the table GUI leaves the camera wherever it was
+        # when the GUI opened (not necessarily on the table), and BreakLookedAt
+        # only attacks while the crosshair is ON the voxel — it never aims
+        # itself, so a left-over off-target view would idle the break to its
+        # timeout. LookAtVoxel returns DONE immediately when already aimed, so
+        # this is ~free in the common case.
+        drive(LookAtVoxel(table_pos, tol_deg=4.0), "aim-break",
+              max_secs=3.0, debug=debug)
         bk = BreakLookedAt(expect_pos=table_pos)
         drive(bk, "break", max_secs=14.0, debug=debug)
         print(f"[table] table reclaimed: {bk.broke}")
