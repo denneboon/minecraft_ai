@@ -34,6 +34,7 @@ OFFLINE_TESTS = [
     "test_world_explorer_offline",
     "test_pathfind",
     "test_walker",
+    "test_pose_filter",
     "test_inventory_synthetic",
     "test_weather",
     "test_subtitle_weather",

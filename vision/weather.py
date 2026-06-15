@@ -156,7 +156,12 @@ class WeatherDetectorConfig:
     clear_blueness_min: float = 0.80     # blue sky → clear, blocks false-rain
     precip_blueness_max: float = 0.82    # grey (low blue) supports precip
     snow_whiteness_min: float = 0.08     # white flakes in the air band
-    precip_edge_min: float = 0.04        # mid-band edge density for precip
+    # DEAD config: the edge-density gate it documents was never implemented in
+    # _classify_heuristic, so this threshold does nothing. The sky heuristic is
+    # deprecated anyway (labels now come from biome + subtitles, trust_weather
+    # off), so impact is nil. Kept (loadable from settings) so an old config
+    # doesn't error; wire it into _classify_heuristic if the heuristic is revived.
+    precip_edge_min: float = 0.04
 
     # Weather is only readable when the camera can actually SEE the sky.
     # The scanning agents spend much of their time pitched DOWN (MC

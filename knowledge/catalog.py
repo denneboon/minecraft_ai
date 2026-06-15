@@ -445,6 +445,14 @@ class Catalog:
         practical "is this a log?" query without paying the cost of
         a full transitive closure. If a future caller needs full
         closure we can promote this to a fixpoint pass.
+
+        ASYMMETRY (deliberate): this index — and therefore ``ItemInfo.tags`` /
+        ``BlockInfo.tags`` built from it — is ONE LEVEL, while ``items_in_tag``/
+        ``blocks_in_tag`` recurse (transitive). So "does X carry tag T?" via
+        ``.tags`` can answer False for a tag X belongs to only transitively.
+        For membership questions that must respect nested tags, query
+        ``items_in_tag``/``blocks_in_tag`` (which the recipe resolver does), not
+        ``.tags``.
         """
         kinds_dir = Path(self.assets.root) / "data" / "tags" / kind
         if not kinds_dir.is_dir():

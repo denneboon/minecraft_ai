@@ -62,6 +62,15 @@ import numpy as np
 # if MC's GUI scale changes between runs.
 SAMPLE_SIZE = 16
 
+# Sentinel "item id" for a slot that is actually EMPTY but whose background
+# art (the armour/shield/off-hand placeholder icons) fools the std-dev
+# empty-detector into thinking it holds an item. We hover such a slot once,
+# find nothing, and save its pixels under this label so the NN recogniser
+# learns the slot's empty look and reports it empty next time — instead of
+# re-hovering it on every read. Stored on disk as the dir ``__empty__`` and
+# reconstructed as ``minecraft:__empty__`` by ``load_all`` (matches here).
+EMPTY_SAMPLE_LABEL = "minecraft:__empty__"
+
 
 @dataclass
 class StoredSample:
@@ -280,5 +289,5 @@ def build_sample_store(root: Optional[Path] = None) -> SampleStore:
 
 __all__ = [
     "SampleStore", "SampleStoreConfig", "StoredSample",
-    "SAMPLE_SIZE", "build_sample_store", "default_sample_root",
+    "SAMPLE_SIZE", "EMPTY_SAMPLE_LABEL", "build_sample_store", "default_sample_root",
 ]

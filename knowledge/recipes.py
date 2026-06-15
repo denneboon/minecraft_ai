@@ -173,7 +173,11 @@ class CraftStep:
     # (row, col) -> the concrete item id to place there (chosen from options
     # by what the bot actually has).
     cell_items: Dict[Tuple[int, int], str]
-    times: int = 1                   # how many times to run this craft
+    # How many times to run this craft. CURRENTLY ALWAYS 1: batching is handled
+    # by the callers (Maker/Crafter loop the craft and re-read between runs), so
+    # this field is informational only — do not read it expecting a batch count
+    # without first wiring planners to set it.
+    times: int = 1
 
 
 _TABLE = "minecraft:crafting_table"

@@ -534,6 +534,11 @@ class GlyphOCR:
         # heights actually got rendered on this line.
         scale = max(1, int(self.cfg.ui_scale))
         full_cell_span = 13 * scale // 2     # ~13 rows at scale 2; 6 at scale 1
+        # Calibrated for GUI scale 2 (what this project runs). The ``* scale //
+        # 2`` form mis-rounds the ascender reserve at scale 1 (4*1//2 = 2 vs the
+        # true ~2-3), so lowercase-only lines can sit a row off there — no live
+        # impact at scale 2. If scale-1 is ever used, derive cap_offset from the
+        # actual font ascender reserve instead of this ratio.
         cap_offset     = 4 * scale // 2      # ~4 rows at scale 2; 2 at scale 1
         span = visible_bot - visible_top + 1
         if span < full_cell_span:

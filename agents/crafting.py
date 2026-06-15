@@ -13,6 +13,7 @@ them needs an open crafting-table screen, the next increment.
 """
 from __future__ import annotations
 
+import time
 from typing import Dict, List, Optional, Tuple
 
 from knowledge.recipes import plan_step
@@ -65,6 +66,27 @@ class Crafter:
         except Exception:
             return None
 
+    def _read_settled(self, stop_when):
+        """Read the open inventory, but first let MC finish RENDERING the
+        current state. A just-completed craft moved stacks; the threaded screen
+        capture can otherwise hand us a PRE-render frame where the ingredients
+        look missing -> a bogus 'can't craft … from inventory' (the live
+        mid-chain failure). Settle, read (hovering until plannable), and if it's
+        still not plannable, settle + retry once before trusting the result."""
+        snap = None
+        for attempt in range(2):
+            time.sleep(0.45 if attempt == 0 else 0.4)
+            try:
+                snap = self.ctl.read(stop_when=stop_when)
+            except TypeError:
+                snap = self.ctl.read()        # controllers without stop_when
+            try:
+                if snap is not None and (stop_when is None or stop_when(snap)):
+                    return snap
+            except Exception:
+                return snap
+        return snap
+
     def craft(self, target_id: str, *, snap=None) -> Tuple[bool, str]:
         """Craft ``target_id`` from the current inventory using the 2x2 grid.
         Single-ingredient recipes (planks) move the whole stack in and
@@ -77,10 +99,7 @@ class Crafter:
             def _plannable(s):
                 return plan_step(target_id, inventory_counts(s),
                                  self.assets, self.cat) is not None
-            try:
-                snap = self.ctl.read(stop_when=_plannable)
-            except TypeError:
-                snap = self.ctl.read()        # controllers without stop_when
+            snap = self._read_settled(_plannable)
         avail = inventory_counts(snap)
         step = plan_step(target_id, avail, self.assets, self.cat)
         if step is None:

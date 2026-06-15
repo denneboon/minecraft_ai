@@ -68,6 +68,11 @@ def _full_movement(mv):
 class FindAndChopLogs:
     name = "find_and_chop_logs"
 
+    # Ticks to stand still on the chopped column collecting drops before moving
+    # on (~1s at the ~11 Hz agent loop) — long enough for a log to fall from a
+    # tall/branchy trunk and be vacuumed up.
+    _COLLECT_DWELL_TICKS = 10
+
     def __init__(self, is_log=None, reach: float = 3.5, max_radius: int = 32,
                  scan_budget: int = 60, max_logs: int = 9999,
                  tool_role: Optional[str] = "axe",
@@ -124,6 +129,7 @@ class FindAndChopLogs:
         self._approach_fails = 0        # consecutive unreachable targets -> relocate
         self.chopped = 0                # trunk-columns chopped (>=1 log each)
         self.logs = 0                   # actual log blocks broken
+        self._collect_dwell = 0         # ticks to stand still vacuuming drops
 
     def _eye_vox(self, pose):
         return (int(math.floor(pose.x)), int(math.floor(pose.y)),
@@ -434,6 +440,13 @@ class FindAndChopLogs:
                 self._sub = WalkToward(base, arrive_dist=0.6, arrive_on_column=True,
                                        stuck_window=8, jump_after=10 ** 9)
                 self._state = "collect"
+                # Stand still ~1s on arrival so drops still FALLING from a tall/
+                # branchy trunk (acacia logs sit high, the drop takes a moment
+                # to reach the ground) — or being vacuumed in from a block or
+                # two away — are actually picked up before we leave for the next
+                # tree. The old code refound the instant it arrived, so canopy
+                # drops were routinely left behind (only ~1 of 3 collected).
+                self._collect_dwell = self._COLLECT_DWELL_TICKS
                 return SkillResult(r.action, SkillStatus.RUNNING,
                                    f"chopped {mined} log(s); collecting")
             if r.status in (SkillStatus.FAILED, SkillStatus.BLOCKED):
@@ -445,6 +458,13 @@ class FindAndChopLogs:
         if st == "collect":
             r = self._sub.tick(ctx)
             if r.status in (SkillStatus.DONE, SkillStatus.FAILED, SkillStatus.BLOCKED):
+                # Arrived on (or gave up reaching) the chopped column. DWELL a
+                # few ticks standing still first so falling/incoming drops are
+                # vacuumed up, THEN go find the next tree.
+                if self._collect_dwell > 0:
+                    self._collect_dwell -= 1
+                    return SkillResult(AgentAction(), SkillStatus.RUNNING,
+                                       "collecting (dwell)")
                 self._target = None; self._state = "find"
                 return SkillResult(r.action, SkillStatus.RUNNING, "collected; refind")
             return r

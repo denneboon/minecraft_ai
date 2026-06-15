@@ -60,9 +60,17 @@ class PoseFilterConfig:
     pitch_max_abs: float = 90.5
 
     # If we've been holding the previous pose for this long without
-    # a fresh good read, give up and accept whatever comes next —
-    # the previous pose is stale anyway after this much time.
+    # a fresh good read, the old continuity check no longer applies —
+    # the player may have moved far while we were blind. But we do NOT
+    # trust a single read after the gap (an in-range-but-wrong XYZ would
+    # "teleport the eye" and become ground truth). Instead we RE-ACQUIRE:
+    # accept only after this many consecutive reads that are mutually
+    # consistent (low velocity between successive reads), so one spurious
+    # jump can't stick while a genuine new position (stable across reads)
+    # still re-locks quickly.
     max_hold_seconds: float = 1.5
+    reacq_consistent_reads: int = 3      # consecutive consistent reads to re-lock
+    reacq_max_gap_sec: float = 1.0       # max time between them to count as a streak
 
     # Reads where ALL fields are None are not "outliers" — they're
     # the OCR saying "I couldn't read this frame". Just pass them
@@ -93,6 +101,10 @@ class PoseFilter:
         self.n_accepted: int = 0
         self.n_rejected: int = 0
         self.last_reject_reason: Optional[str] = None
+        # Re-acquisition streak (after a long blind gap, see accept()).
+        self._reacq_candidate = None   # F3Info of the streak's last read
+        self._reacq_ts: float = 0.0
+        self._reacq_streak: int = 0
 
     def reset(self) -> None:
         self._last_good = None
@@ -100,6 +112,9 @@ class PoseFilter:
         self.n_accepted = 0
         self.n_rejected = 0
         self.last_reject_reason = None
+        self._reacq_candidate = None
+        self._reacq_ts = 0.0
+        self._reacq_streak = 0
 
     def accept(self, info, now: Optional[float] = None):
         """
@@ -150,10 +165,17 @@ class PoseFilter:
 
         dt = max(1e-3, now - self._last_good_ts)
         if dt > self.cfg.max_hold_seconds:
-            # We've held the same pose so long that "continuity" no
-            # longer applies — the player has moved, the agent has
-            # been blind, we just take what we can get.
-            return self._accept(info, now)
+            # Held the same pose past the hold window — continuity vs the stale
+            # last_good no longer applies (the player may have moved far while
+            # we were blind). But DON'T trust a single read: an in-range-but-
+            # wrong XYZ would teleport the eye. Re-acquire only after N reads
+            # that are mutually consistent with each other.
+            return self._reacquire(info, now)
+
+        # A normal continuity-checked read resumes -> abandon any half-built
+        # re-acquisition streak (we never lost the lock).
+        self._reacq_streak = 0
+        self._reacq_candidate = None
 
         last = self._last_good
         if (info.x is not None and last.x is not None
@@ -173,6 +195,43 @@ class PoseFilter:
         return self._accept(info, now)
 
     # ── Internals ────────────────────────────────────────────────
+
+    def _within_caps(self, info, ref, dt: float) -> bool:
+        """True if moving from ``ref`` to ``info`` in ``dt`` s respects the
+        positional velocity caps (fields that are None on either side skip)."""
+        dt = max(1e-3, dt)
+        if (info.x is not None and ref.x is not None
+                and info.z is not None and ref.z is not None):
+            dxz = ((info.x - ref.x) ** 2 + (info.z - ref.z) ** 2) ** 0.5
+            if dxz / dt > self.cfg.max_dxz_per_sec:
+                return False
+        if info.y is not None and ref.y is not None:
+            if abs(info.y - ref.y) / dt > self.cfg.max_dy_per_sec:
+                return False
+        return True
+
+    def _reacquire(self, info, now: float):
+        """After a long blind gap, re-lock only on a STREAK of consecutive
+        reads that are mutually consistent (low velocity between them) — never
+        on a single read, which could be an in-range-but-wrong jump. A read
+        that breaks consistency restarts the streak from itself. Until the
+        streak is long enough we keep returning the last good pose."""
+        cand, cts = self._reacq_candidate, self._reacq_ts
+        if (cand is not None
+                and (now - cts) <= self.cfg.reacq_max_gap_sec
+                and self._within_caps(info, cand, now - cts)):
+            self._reacq_streak += 1
+        else:
+            self._reacq_streak = 1            # (re)start the streak at this read
+        self._reacq_candidate = info
+        self._reacq_ts = now
+        if self._reacq_streak >= self.cfg.reacq_consistent_reads:
+            self._reacq_streak = 0
+            self._reacq_candidate = None
+            return self._accept(info, now)
+        return self._reject(
+            info, f"re-acquiring "
+                  f"({self._reacq_streak}/{self.cfg.reacq_consistent_reads})")
 
     def _accept(self, info, now: float):
         self._last_good = info

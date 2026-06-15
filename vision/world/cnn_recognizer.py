@@ -235,6 +235,13 @@ class CNNBlockRecognizer:
         self.cfg = config or CNNBlockRecognizerConfig()
         self._lock = threading.RLock()
         self._model = None                       # _SmallBlockCNN | None
+        # Bumped on EVERY model swap (train publish / disk load / clear). The
+        # incremental embed path captures this before embedding and re-checks
+        # after: if it changed, a retrain rebuilt the index in a NEW embedding
+        # space mid-embed, so the just-computed OLD-space vectors must NOT be
+        # appended (mixing spaces makes cosine sims meaningless) — rebuild
+        # instead. See _embed_into_index.
+        self._model_version = 0
         self._proto: Dict[str, np.ndarray] = {}  # block_id -> ACTIVE prototype
         # Cold-start prototypes computed from GAME TEXTURES at pre-train
         # time (covers blocks with zero real samples). Real-sample
@@ -477,21 +484,35 @@ class CNNBlockRecognizer:
     def _embed_into_index(self, new: List[StoredWorldSample]) -> None:
         """Append new sample embeddings and refresh affected prototypes —
         O(new), used on the incremental hot-reload path."""
-        emb = self._embed_batch([s.rgb for s in new])
+        with self._lock:
+            version_at_start = self._model_version
+        emb = self._embed_batch([s.rgb for s in new])   # slow; model may swap
         if emb is None:
             return
         ids = [s.block_id for s in new]
+        stale = False
         with self._lock:
-            self._emb = emb if self._emb is None else np.concatenate([self._emb, emb], axis=0)
-            self._emb_ids.extend(ids)
-            # Recompute prototypes for the affected ids from the full index.
-            all_emb, all_ids = self._emb, self._emb_ids
-            for bid in set(ids):
-                mask = np.array([i == bid for i in all_ids])
-                m = all_emb[mask].mean(axis=0)
-                n = np.linalg.norm(m)
-                if np.isfinite(n) and n > 1e-6:   # skip degenerate/NaN protos
-                    self._proto[bid] = (m / n).astype(np.float32)
+            if self._model_version != version_at_start:
+                # A background retrain (or a disk reload) published a NEW model
+                # and rebuilt the index in its new embedding space WHILE we were
+                # embedding with the old one. Appending these old-space vectors
+                # would make cosine distances meaningless for those rows. Drop
+                # them; a full rebuild below re-embeds everything in the current
+                # space (the new samples are already in self._samples).
+                stale = True
+            else:
+                self._emb = emb if self._emb is None else np.concatenate([self._emb, emb], axis=0)
+                self._emb_ids.extend(ids)
+                # Recompute prototypes for the affected ids from the full index.
+                all_emb, all_ids = self._emb, self._emb_ids
+                for bid in set(ids):
+                    mask = np.array([i == bid for i in all_ids])
+                    m = all_emb[mask].mean(axis=0)
+                    n = np.linalg.norm(m)
+                    if np.isfinite(n) and n > 1e-6:   # skip degenerate/NaN protos
+                        self._proto[bid] = (m / n).astype(np.float32)
+        if stale:
+            self._rebuild_index()                 # re-embed all in the new space
 
     # ── Training ───────────────────────────────────────────────────
 
@@ -649,6 +670,7 @@ class CNNBlockRecognizer:
         with self._lock:
             self._model = model
             self._trained = True
+            self._model_version += 1            # new embedding space published
         if is_pretrain:
             # Compute pure texture prototypes (no real samples in play yet)
             # and promote them to the cold-start set.
@@ -702,6 +724,7 @@ class CNNBlockRecognizer:
             model.eval()
             self._model = model
             self._trained = True
+            self._model_version += 1            # new embedding space loaded
             tp = ckpt.get("texture_proto") or {}
             self._texture_proto = {k: np.asarray(v, dtype=np.float32)
                                    for k, v in tp.items()}
@@ -717,6 +740,7 @@ class CNNBlockRecognizer:
             self._epoch_note = f"load-error: {e!r}"
             self._model = None
             self._trained = False
+            self._model_version += 1
 
 
 # ---------------------------------------------------------------------------

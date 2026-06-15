@@ -268,7 +268,6 @@ def _run_pipeline(args, settings, ui_scale, frame, live_capture, live_hwnd):
                 snap,
                 window_origin=window_origin,
                 container=layout_name,
-                restore_cursor=True,
                 pre_hover_frame=frame,
             )
             dt = time.perf_counter() - t0

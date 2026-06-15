@@ -65,6 +65,7 @@ from vision.inventory_layout import (
     hud_hotbar_rects,
     ARMOR_SLOTS, HOTBAR_SLOTS, MAIN_SLOTS,
 )
+from vision.sample_store import EMPTY_SAMPLE_LABEL
 
 
 # ---------------------------------------------------------------------------
@@ -1203,6 +1204,11 @@ class InventoryReader:
         # actual renderer output, beating synthetic templates for code-rendered
         # icons (shulkers, banners, chests, potions…).
         content = self.sample_recog.recognize(crop) if use_sample else None
+        if content is not None and content.item == EMPTY_SAMPLE_LABEL:
+            # A learned "this slot is empty" sample matched — the placeholder-art
+            # slot (armour/shield/off-hand) the std-dev detector keeps mistaking
+            # for an item. Trust it and report empty so nobody hovers it again.
+            return SlotContent(source="placeholder")
         if content is not None:
             content.source = "sample"
         else:
