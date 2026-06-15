@@ -1272,6 +1272,7 @@ class PlaceBlock(Skill):
         self._stand = None          # the block under our feet at start
         self._prime_t = 0
         self._prime_aim = None
+        self._prime_placed = False  # prime did a use_item at a guaranteed spot
 
     def _exhausted_views(self):
         """All views failed at this spot. Step back onto fresh ground and
@@ -1361,6 +1362,7 @@ class PlaceBlock(Skill):
                 self.placed_at = place
                 self._support = (place[0], place[1] - 1, place[2])
                 self._mode = "verify"; self._verify = 0
+                self._prime_placed = True     # trusted spot (see verify timeout)
                 return SkillResult(AgentAction(interact="use_item"),
                                    SkillStatus.RUNNING,
                                    f"place: priming at {place}")
@@ -1444,6 +1446,15 @@ class PlaceBlock(Skill):
                     yaw, pitch = aim_angles(e, c)
                     adx, ady, _ = self._aimer.step(ctx, yaw, pitch)
             if self._verify > self.verify_ticks:
+                # Couldn't visually confirm. If this was the PRIME placement, the
+                # spot was GUARANTEED valid (we stood on it: solid below, clear
+                # above), so MC didn't reject it — F3 just can't read the fresh
+                # table on uneven ground. TRUST it (the re-aim has put the
+                # crosshair on the table, ready for the open-click) rather than
+                # walk off a table we really placed.
+                if self._prime_placed and self.placed_at is not None:
+                    return SkillResult(AgentAction(), SkillStatus.DONE,
+                                       f"placed (prime, trusted) at {self.placed_at}")
                 # genuinely nothing there after re-aiming -> MC rejected it.
                 self.placed_at = None
                 if not self._next_view():
