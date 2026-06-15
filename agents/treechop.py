@@ -135,6 +135,16 @@ class FindAndChopLogs:
         return (int(math.floor(pose.x)), int(math.floor(pose.y)),
                 int(math.floor(pose.z)))
 
+    def _reachable_band(self, pose, v) -> bool:
+        """A looked-at log worth WALKING to: within the scan radius
+        horizontally and a feet-reachable height band (not a high canopy log we
+        could never get to from the ground)."""
+        dx = v[0] + 0.5 - float(pose.x)
+        dz = v[2] + 0.5 - float(pose.z)
+        if math.hypot(dx, dz) > self.max_radius:
+            return False
+        return -4.0 <= (v[1] - float(pose.y)) <= 5.0
+
     def _make_mine(self, voxel):
         """The reach-action for a target: configured mine_action, else the
         default trunk-feller."""
@@ -241,19 +251,33 @@ class FindAndChopLogs:
             la_pos = (tuple(la.pos) if la is not None
                       and getattr(la, "pos", None) is not None else None)
             if la_id and self.is_log(la_id) and la_pos is not None \
-                    and la_pos not in self._blacklist \
-                    and block_in_reach(pose, la_pos, self.reach):
-                # Use the COMFORTABLE reach (~3.5), not the 4.5 edge: a log at
-                # the very edge of reach can't be aimed onto cleanly (it needs a
-                # precise pitch-down the aimer doesn't always land), so the bot
-                # punches air. Beyond ~3.5 we fall through to find -> approach,
-                # which walks the last half-block closer where the aim is easy.
-                self._target = la_pos
-                self._found_raw = la_pos
-                self._recover_count = 0
-                self._cleared = set()
-                self._sub = self._make_mine(la_pos)
-                self._state = "chop"
+                    and la_pos not in self._blacklist:
+                if block_in_reach(pose, la_pos, self.reach):
+                    # Use the COMFORTABLE reach (~3.5), not the 4.5 edge: a log
+                    # at the very edge of reach can't be aimed onto cleanly (it
+                    # needs a precise pitch-down the aimer doesn't always land),
+                    # so the bot punches air. Beyond ~3.5 we WALK to it below.
+                    self._target = la_pos
+                    self._found_raw = la_pos
+                    self._recover_count = 0
+                    self._cleared = set()
+                    self._sub = self._make_mine(la_pos)
+                    self._state = "chop"
+                elif self._state in ("find", "scan", "explore") \
+                        and self._reachable_band(pose, la_pos):
+                    # We can SEE a log but it's a bit too far to hit. WALK to it
+                    # directly — the crosshair already proves it's there, so
+                    # don't ignore a log we're literally looking at just because
+                    # a sparse / low-confidence belief map hasn't registered it
+                    # (the live "never found a tree even looking right at a log"
+                    # complaint). Beats spinning/scanning past a visible log.
+                    self._target = la_pos
+                    self._found_raw = la_pos
+                    self._recover_count = 0
+                    self._cleared = set()
+                    self._explore_attempts = 0
+                    self._sub = NavigateTo(la_pos, arrive_reach=self.reach)
+                    self._state = "approach"; self._approach_ticks = 0
 
         st = self._state
         if st == "find":
@@ -437,8 +461,16 @@ class FindAndChopLogs:
                 # coords match) so the drop, which falls straight down, is in
                 # pickup range. Small arrive_dist fallback if the column is
                 # unreachable; stuck-detection ends it either way.
+                # avoid_fall=False + modest jumping: the drop sits in the column
+                # we just chopped (often a 1-3 deep hole, or a step up/down on
+                # uneven ground). The default fall-avoidance REFUSES to step
+                # toward that hole, so on anything but dead-flat ground the bot
+                # never reaches the drop and collects 0 (the live "chopped N,
+                # collected 0" bug). It's a short walk to a spot we were just
+                # next to — not a cliff — so let it step in and mantle out.
                 self._sub = WalkToward(base, arrive_dist=0.6, arrive_on_column=True,
-                                       stuck_window=8, jump_after=10 ** 9)
+                                       stuck_window=10, avoid_fall=False,
+                                       jump_after=6)
                 self._state = "collect"
                 # Stand still ~1s on arrival so drops still FALLING from a tall/
                 # branchy trunk (acacia logs sit high, the drop takes a moment
