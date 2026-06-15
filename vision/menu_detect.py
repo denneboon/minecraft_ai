@@ -85,6 +85,16 @@ class MenuDetectorConfig:
     y_start_frac:  float = 0.04
     y_end_frac:    float = 0.70
 
+    # X range (fraction of width) to sweep. Minecraft's menus (pause title +
+    # buttons, chest/inventory titles) are HORIZONTALLY CENTERED, while the F3
+    # debug overlay sits on the left/right EDGES. Scanning only the centre band
+    # skips that dense, garbled overlay text entirely — without it, OCRing the
+    # overlay rows first burned the whole read budget and the pause menu was
+    # missed (the bot then thought it was 'playing' on a paused/frozen frame and
+    # never recovered). Centre-only is both faster and far more reliable.
+    x_start_frac:  float = 0.20
+    x_end_frac:    float = 0.80
+
     # Stride between scanned rows (in screen pixels). 8 is fine — even
     # if a glyph straddles a row boundary the neighbouring row picks it
     # up. Smaller = slower; larger = more chance of missing short text.
@@ -152,6 +162,11 @@ class MenuDetector:
         h, w = frame.shape[:2]
         y0 = max(0, int(h * self.cfg.y_start_frac))
         y1 = min(h, int(h * self.cfg.y_end_frac))
+        # Centre band only — skip the edge F3 overlay (see x_*_frac docs).
+        x0 = max(0, int(w * getattr(self.cfg, "x_start_frac", 0.0)))
+        x1 = min(w, int(w * getattr(self.cfg, "x_end_frac", 1.0)))
+        if x1 <= x0:
+            x0, x1 = 0, w
         step = max(1, int(self.cfg.y_step_px))
         glyph_h = 8 * max(1, int(self.cfg.ui_scale))
         band_h = glyph_h + 6   # ample margin for descenders and bevels
@@ -181,7 +196,7 @@ class MenuDetector:
         for y in scan_rows:
             if deadline is not None and time.perf_counter() > deadline:
                 break
-            crop = frame[y:y + band_h, :]
+            crop = frame[y:y + band_h, x0:x1]
             try:
                 text = self._ocr.recognize_line(crop)
             except (cv2.error, ValueError, IndexError, AttributeError) as e:
