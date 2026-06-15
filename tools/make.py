@@ -210,7 +210,7 @@ def main(argv=None) -> int:
                                       tool_role=role, mine_action=mine)
         budget = 90.0 + 90.0 * qty            # generous: walk to + chop each log
         t0 = time.time(); last = None; ended = "timeout"; _lost = None
-        last_ts = None; last_tick = 0.0; last_pause = time.time()
+        last_ts = None; last_tick = 0.0; last_pause = time.time(); garble = 0
         try:
             while time.time() - t0 < budget:
                 now = time.time()
@@ -265,7 +265,16 @@ def main(argv=None) -> int:
                                    hotbar=hotbar, px_per_deg=px_per_deg,
                                    dimension=getattr(pose, "dimension", None) if pose else None)
                 r = fsm.tick(ctx)
-                _dispatch(r.action, apply_look=fresh)
+                # Camera moves apply on FRESH poses so the aimer doesn't
+                # over-rotate on stale ones. BUT if F3 garbles persistently (the
+                # crosshair on empty sky / a cleared area gives no pose), the
+                # look would never apply and a SCAN would deadlock — unable to
+                # rotate AWAY from the empty view that's causing the garble. So
+                # after a garble streak, force the look through occasionally
+                # (slow, throttled) to rotate out of it.
+                garble = 0 if fresh else garble + 1
+                force_look = (not fresh) and garble >= 8 and (garble % 4 == 0)
+                _dispatch(r.action, apply_look=fresh or force_look)
                 if debug and (_gstate(fsm) != last):
                     print(f"[make]  gather: {_gstate(fsm)} got={_gprog(fsm)}/{qty} "
                           f"pos={getattr(pose,'x',None)},{getattr(pose,'z',None)} | {r.info}")
