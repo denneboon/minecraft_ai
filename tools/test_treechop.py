@@ -148,6 +148,24 @@ def main() -> int:
     (ok if raised2 == (2, 63, 0) else bad)(
         f"unmapped column above -> target unchanged (got {raised2})")
 
+    # 5d. Scan STEP-AND-SETTLE: a fast continuous spin sweeps the crosshair past
+    #     trunks faster than the ~11 Hz F3 reader can record them (the live
+    #     "looks right past a tree it saw"). The scan must rotate a small step
+    #     then HOLD (look_dx==0) so a log in the new view registers — never the
+    #     old 70 px/tick blind spin.
+    print("\n[5d] scan steps and settles (no fast blind spin)")
+    fsm = FindAndChopLogs(scan_budget=50, max_explore=0,
+                          scan_step_px=26, scan_settle_ticks=1)
+    sctx = SkillContext(pose=_pose(pitch=0.0), world_map=WorldMap())  # empty -> scan
+    looks = [fsm.tick(sctx).action.look_dx for _ in range(8)]
+    (ok if 70 not in looks else bad)(f"no 70 px blind spin (looks={looks})")
+    (ok if 26 in looks else bad)("rotates by the configured step (26)")
+    (ok if 0 in looks else bad)("holds still on settle ticks (look_dx==0)")
+    # a step is always followed by at least one settle (no two 26s back-to-back).
+    steps = [i for i, dx in enumerate(looks) if dx == 26]
+    (ok if all(j - i > 1 for i, j in zip(steps, steps[1:])) else bad)(
+        "a settle tick separates consecutive steps")
+
     # 6. Approach stuck -> pillar-out recover -> re-approach; 2nd stuck -> give up.
     print("\n[6] stuck -> pillar-out recover")
     from agents.skills import SkillResult

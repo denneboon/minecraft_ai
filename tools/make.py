@@ -42,12 +42,30 @@ from agents.maker import Maker
 from agents.hotbar_arranger import arrange_hotbar
 from agents.armor_equip import equip_best_armor
 from agents.treechop import FindAndChopLogs, _full_movement, log_predicates
+from agents.mining_descent import DescendToStone
 from agents.skills import SkillContext, SkillStatus, MineBlock
 from vision.world.f3_target import targeted_block_pos
 from knowledge.catalog import Catalog
 from knowledge.mining import gather_source_for
 from vision.mc_assets import MCAssets
 from tools.table_craft import run_table_craft
+
+# Source blocks acquired by DIGGING DOWN (a safe staircase) rather than by
+# finding an exposed face — the stone family, which sits a few blocks under the
+# surface everywhere.
+_DIG_DOWN_SOURCES = {"stone", "deepslate", "andesite", "diorite", "granite",
+                     "tuff"}
+
+
+def _gprog(fsm):
+    """How many target blocks a gather FSM has secured — works for both the
+    tree/visible-block FSM (``.logs``) and the dig-down miner (``.gathered``)."""
+    v = getattr(fsm, "logs", None)
+    return v if v is not None else getattr(fsm, "gathered", 0)
+
+
+def _gstate(fsm):
+    return getattr(fsm, "_state", None) or getattr(fsm, "_phase", "")
 
 
 def main(argv=None) -> int:
@@ -170,14 +188,23 @@ def main(argv=None) -> int:
                       f"first (mine {source.split(':')[-1]} for {short})")
                 return False
             src_stem = source.split(":")[-1]
-            pred = (lambda b, s=source, st=src_stem:
-                    bool(b) and (b == s or str(b).split(":")[-1] == st))
-            mine = (lambda v, r=role, p=pred:
-                    MineBlock(v, tool_role=r, is_target=p, is_passthrough=p))
-            print(f"[make] gather {short}: mining {src_stem} with a {role}")
-            fsm = FindAndChopLogs(is_log=pred, is_breakable=pred, reach=3.5,
-                                  max_logs=max(3, qty + 2), goal_blocks=qty,
-                                  tool_role=role, mine_action=mine)
+            if src_stem in _DIG_DOWN_SOURCES:
+                # Stone is everywhere a few blocks DOWN — don't depend on an
+                # exposed face. Cut a safe descending staircase to it (never
+                # digs straight down / into lava — see agents.mining_descent).
+                print(f"[make] gather {short}: digging a safe staircase down to "
+                      f"{src_stem} with a {role}")
+                fsm = DescendToStone(count=qty, tool_role=role,
+                                     max_depth=max(8, qty + 6))
+            else:
+                pred = (lambda b, s=source, st=src_stem:
+                        bool(b) and (b == s or str(b).split(":")[-1] == st))
+                mine = (lambda v, r=role, p=pred:
+                        MineBlock(v, tool_role=r, is_target=p, is_passthrough=p))
+                print(f"[make] gather {short}: mining {src_stem} with a {role}")
+                fsm = FindAndChopLogs(is_log=pred, is_breakable=pred, reach=3.5,
+                                      max_logs=max(3, qty + 2), goal_blocks=qty,
+                                      tool_role=role, mine_action=mine)
         budget = 90.0 + 90.0 * qty            # generous: walk to + chop each log
         t0 = time.time(); last = None; ended = "timeout"; _lost = None
         last_ts = None; last_tick = 0.0; last_pause = time.time()
@@ -236,10 +263,10 @@ def main(argv=None) -> int:
                                    dimension=getattr(pose, "dimension", None) if pose else None)
                 r = fsm.tick(ctx)
                 _dispatch(r.action, apply_look=fresh)
-                if debug and (fsm._state != last):
-                    print(f"[make]  gather: {fsm._state} chopped={fsm.chopped} "
-                          f"logs={fsm.logs}/{qty} pos={getattr(pose,'x',None)},{getattr(pose,'z',None)} | {r.info}")
-                    last = fsm._state
+                if debug and (_gstate(fsm) != last):
+                    print(f"[make]  gather: {_gstate(fsm)} got={_gprog(fsm)}/{qty} "
+                          f"pos={getattr(pose,'x',None)},{getattr(pose,'z',None)} | {r.info}")
+                    last = _gstate(fsm)
                 # NB: do NOT stop the instant the block breaks — the FSM still
                 # has to WALK OVER the dropped item to collect it (its 'collect'
                 # state). Let it run to DONE (which is after collection), so the
@@ -249,8 +276,8 @@ def main(argv=None) -> int:
             _stop(); time.sleep(1.2)          # let auto-pickup settle
         finally:
             _stop()
-        got = fsm.logs >= qty
-        print(f"[make] gather {item_id.split(':')[-1]}: chopped {fsm.logs}/{qty} "
+        got = _gprog(fsm) >= qty
+        print(f"[make] gather {item_id.split(':')[-1]}: got {_gprog(fsm)}/{qty} "
               f"({'enough' if got else 'short'}; ended={ended})")
         # PROGRESS, not all-or-nothing: a partial gather (chopped some, but the
         # spot ran dry before the full qty) is NOT a failure — the Maker re-reads
@@ -258,7 +285,7 @@ def main(argv=None) -> int:
         # further. Returning False only when we got NOTHING lets the Maker's
         # gather-fails / no-progress guards stop a truly barren area, while a
         # forest edge that yields 1-2 logs per pass still completes over rounds.
-        return fsm.logs >= 1
+        return _gprog(fsm) >= 1
 
     def _table_craft(tgt):
         return run_table_craft(

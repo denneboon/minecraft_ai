@@ -58,6 +58,7 @@ OFFLINE_TESTS = [
     "test_hotbar_arrange",
     "test_armor_equip",
     "test_mining",
+    "test_mining_descent",
 ]
 
 

@@ -96,7 +96,8 @@ class FindAndChopLogs:
                  explore_dist: float = 8.0, max_explore: int = 10,
                  explore_turn: float = 65.0, is_breakable=None,
                  max_recover: int = 5, mine_action=None, goal_blocks=None,
-                 min_log_confidence: float = 0.6):
+                 min_log_confidence: float = 0.6,
+                 scan_step_px: int = 26, scan_settle_ticks: int = 1):
         # mine_action(voxel) -> Skill: what to do once IN REACH of a target.
         # Default fells the trunk (ChopTrunk); a flat block-gatherer passes a
         # plain MineBlock factory. This is the one knob that turns the
@@ -128,6 +129,16 @@ class FindAndChopLogs:
         self.max_explore = max_explore
         self.explore_turn = explore_turn
         self.max_recover = max_recover
+        # Scan = step-and-SETTLE, not a fast continuous spin. The map only
+        # records blocks the CROSSHAIR confirmed (commit_only_from_looking_at),
+        # and the ~11 Hz F3 reader needs the crosshair to REST on a trunk for a
+        # frame or two to read it. A 70 px/tick spin (~118°/s) sweeps the
+        # crosshair past whole trees between reads, so the bot never records
+        # logs it visually passed (the live "looks right past a tree it saw").
+        # Rotate a small step, then hold a couple of ticks so a log in the new
+        # view actually registers in looking_at / the map before rotating on.
+        self.scan_step_px = int(scan_step_px)
+        self.scan_settle_ticks = int(scan_settle_ticks)
         self._scan_aimer = _Aimer(tol_deg=4.0)   # stale-pose-guarded pitch leveler
         self.reset()
 
@@ -136,6 +147,7 @@ class FindAndChopLogs:
         self._target = None
         self._sub = None
         self._scan_ticks = 0
+        self._scan_settle = 0           # ticks left to hold still after a scan step
         self._blacklist = set()
         self._recover_count = 0         # recovery actions used for this target
         self._found_raw = None          # the voxel find returned (pre-descend)
@@ -419,8 +431,17 @@ class FindAndChopLogs:
             if not level_ok:
                 return SkillResult(AgentAction(look_dy=dy), SkillStatus.RUNNING,
                                    f"leveling pitch ({float(pose.pitch):.0f}deg)")
-            return SkillResult(AgentAction(look_dx=70), SkillStatus.RUNNING,
-                               f"scanning {self._scan_ticks}")
+            # SETTLE after a step: hold still so the F3 reader can land on (and
+            # the opportunistic/walk-to-visible branch above can react to) any
+            # log now in view, instead of spinning past it. The find()/looking_at
+            # checks run every tick including these holds.
+            if self._scan_settle > 0:
+                self._scan_settle -= 1
+                return SkillResult(AgentAction(), SkillStatus.RUNNING,
+                                   f"scanning (settle {self._scan_settle})")
+            self._scan_settle = self.scan_settle_ticks
+            return SkillResult(AgentAction(look_dx=self.scan_step_px),
+                               SkillStatus.RUNNING, f"scanning {self._scan_ticks}")
 
         if st == "explore":
             tgt = self._find(ctx)               # a log may appear as we walk
