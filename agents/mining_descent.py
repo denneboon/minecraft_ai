@@ -1,22 +1,26 @@
 """
-DescendToStone — get stone (cobblestone) from ANYWHERE, safely, by digging a
-simple descending staircase. Stone is a few blocks under the surface
-everywhere, so the bot never needs an exposed face.
+DescendToStone — get stone (cobblestone) from ANYWHERE by digging STRAIGHT DOWN.
 
-This works the way a person does, NOT by computing exact voxels and probing each
-one (that was brittle — your own body occludes the down-forward cell and F3's id
-garbles at steep close angles). Instead, per stair:
+Stone is a few blocks under the surface everywhere, so the bot never needs an
+exposed face — it just digs down to it. Straight down (not a forward staircase)
+because it's both robust and self-collecting:
 
-  1. Look DOWN-AND-FORWARD. F3's "Targeted Block" tells you the block right
-     there (position survives an unreadable id).
-  2. If it's lava/water -> STOP. Otherwise mine it.
-  3. Walk forward — you step down into the hole you just made.
-  4. Repeat until you've collected enough stone.
+  * The block directly below the feet is unambiguous to target (look straight
+    down) — no fragile "aim at the cell ahead" that trips over slopes, trees, or
+    your own body occluding the view.
+  * In a 1-wide vertical shaft the mined block's drop lands at your feet as you
+    fall into the gap, so the cobblestone is picked up automatically.
 
-Safety (conservative): it stops on any lava/water it looks at, stops if it ever
-falls more than a step (a cave under the floor), and only digs a shallow,
-surface-depth pit — so it can't dig itself into a deep lava lake or a fatal
-fall. If a direction is a wall/cliff it can't dig, it turns to another.
+Per step: look straight down, read the block below; if it's lava/water STOP,
+otherwise mine it and drop one block; pause a beat so the drop is collected;
+repeat until enough stone is gathered.
+
+Safety (conservative, surface-shallow): STOP on any lava/water read; STOP if a
+single mine drops us more than a block (a cave beneath the floor); and only dig
+a shallow, surface-depth shaft (``max_depth``) where lava doesn't occur — so it
+can't dig itself into a deep lava lake or a fatal fall. Not provably 100% (the
+block UNDER the one we mine is unobservable until we've dropped onto it), but
+safe in practice for the shallow surface digging this is used for.
 """
 from __future__ import annotations
 
@@ -25,16 +29,11 @@ from typing import Optional, Tuple
 
 from brain.interfaces import AgentAction
 from agents.skills import (Skill, SkillResult, SkillStatus, SkillContext,
-                           MineBlock, _Aimer)
+                           MineBlock)
 
 Voxel = Tuple[int, int, int]
 
-_CARDINALS = [(1, 0), (-1, 0), (0, 1), (0, -1)]
-_DOWN_PITCH = 62.0        # steep enough to target the IMMEDIATE next tread
-                          # (~1 ahead, 1 down) — shallower aims a block too far
-                          # away and the bot just walks across the surface.
-_MAX_FALL = 2.2           # a drop bigger than this == a cave; stop
-_STEP_REACH = 1.4         # walk at most this far per step before re-cutting
+_MAX_FALL = 2.0           # a single mine that drops us more than this == a cave
 
 # Blocks safe to dig through (allowlist — anything else, incl. an unreadable id
 # at depth, is treated as unsafe so we stop rather than mine blind).
@@ -45,6 +44,9 @@ _SAFE_DIG_STEMS = {
     "gravel", "sand", "red_sand", "sandstone", "red_sandstone", "clay",
     "moss_block", "mud", "packed_mud",
 }
+# Plant/foliage suffixes always safe to dig through (a tree in the column
+# shouldn't stop the descent — leaves/saplings/logs break harmlessly).
+_SAFE_DIG_SUFFIXES = ("_leaves", "_log", "_wood", "_sapling", "_roots")
 
 
 def _stem(bid: Optional[str]) -> str:
@@ -53,8 +55,10 @@ def _stem(bid: Optional[str]) -> str:
 
 
 def is_safe_dig(bid: Optional[str]) -> bool:
-    """True only for a KNOWN dig-through block (the allowlist)."""
-    return _stem(bid) in _SAFE_DIG_STEMS
+    """True for a KNOWN dig-through block: the terrain allowlist + tree material.
+    Anything else (unreadable id, lava/water, bedrock) is unsafe -> we stop."""
+    stem = _stem(bid)
+    return stem in _SAFE_DIG_STEMS or stem.endswith(_SAFE_DIG_SUFFIXES)
 
 
 def is_hazard(bid: Optional[str]) -> bool:
@@ -70,27 +74,12 @@ def is_stone_like(bid: Optional[str]) -> bool:
             or s in ("andesite", "diorite", "granite", "tuff"))
 
 
-def cardinal_step(yaw: float) -> Tuple[int, int]:
-    """The (dx, dz) for the cardinal nearest ``yaw`` (MC: 0=+Z, 90=-X, 180=-Z,
-    270=+X)."""
-    dx, dz = -math.sin(math.radians(yaw)), math.cos(math.radians(yaw))
-    if abs(dx) >= abs(dz):
-        return (1 if dx > 0 else -1), 0
-    return 0, (1 if dz > 0 else -1)
-
-
-def yaw_for(step: Tuple[int, int]) -> float:
-    """The MC yaw that faces cardinal ``step`` (so 'forward' walks that way)."""
-    sx, sz = step
-    return math.degrees(math.atan2(-sx, sz))
-
-
 class DescendToStone(Skill):
-    """Dig a simple safe staircase down, collecting ``count`` stone blocks (→
-    cobblestone). DONE carries however many were gathered."""
+    """Dig straight down, collecting ``count`` stone blocks (-> cobblestone).
+    DONE carries however many were gathered."""
     name = "descend_to_stone"
 
-    def __init__(self, count: int = 3, max_depth: int = 8,
+    def __init__(self, count: int = 3, max_depth: int = 12,
                  tool_role: str = "pickaxe"):
         self.count = int(count)
         self.max_depth = int(max_depth)
@@ -100,37 +89,27 @@ class DescendToStone(Skill):
     def reset(self):
         self.gathered = 0
         self._depth = 0
-        self._phase = "face"        # face -> aim -> mine -> step -> (face)
-        self._order = None          # cardinal try-order (nearest yaw first)
-        self._dir_i = 0
-        self._step = (1, 0)
-        self._yaw = 0.0
-        self._aim = _Aimer(tol_deg=5.0)
-        self._sub = None            # active MineBlock
-        self._t = 0                 # per-phase tick counter
-        self._mine_pos = None       # voxel we're mining
-        self._mine_yield = False    # is it stone (drops cobblestone)?
-        self._collect_after = False # pause to grab the drop after stepping down
-        self._step_y = None         # pose.y when the step (walk) began
-        self._step_x0 = 0.0         # pose.x/z when the step began (cap walk dist)
-        self._step_z0 = 0.0
+        self._phase = "mine"       # mine -> settle -> mine ...
+        self._sub = None           # active MineBlock(below)
+        self._t = 0
+        self._mine_pos = None      # the block we're mining (directly below)
+        self._mine_yield = False   # has it read as stone while mining?
+        self._pre_y = None         # pose.y before the mine started (fall detect)
 
     def _done(self, why: str) -> SkillResult:
         return SkillResult(AgentAction(), SkillStatus.DONE,
                            f"{why} ({self.gathered} gathered)")
 
-    def _stop_or_turn(self, why: str) -> SkillResult:
-        """A 'can't dig this way' before we've cut anything just means we faced
-        a wall/cliff: turn to the next cardinal. A hazard, or any stop after
-        we've started descending, is final."""
-        if ("lava" not in why and "water" not in why and self._depth == 0
-                and self.gathered == 0 and self._order is not None
-                and self._dir_i + 1 < len(self._order)):
-            self._dir_i += 1
-            self._sub = None; self._t = 0; self._phase = "face"
-            return SkillResult(AgentAction(), SkillStatus.RUNNING,
-                               f"can't dig that way ({why}); turning")
-        return self._done(why)
+    def _below(self, pose) -> Voxel:
+        return (int(math.floor(pose.x)), int(math.floor(pose.y)) - 1,
+                int(math.floor(pose.z)))
+
+    def _reads_below(self, ctx, below):
+        """The F3 block id IF the crosshair is on the block directly below."""
+        la = ctx.looking_at
+        if la is not None and tuple(getattr(la, "pos", ()) or ()) == tuple(below):
+            return getattr(la, "block_id", None)
+        return None
 
     def tick(self, ctx: SkillContext) -> SkillResult:
         pose = ctx.pose
@@ -141,132 +120,65 @@ class DescendToStone(Skill):
         if self._depth >= self.max_depth:
             return self._done("reached depth limit")
 
-        # 0. Pick / keep a dig direction.
-        if self._phase == "face":
-            if self._order is None:
-                base = cardinal_step(float(pose.yaw))
-                self._order = [base] + [c for c in _CARDINALS if c != base]
-            self._step = self._order[self._dir_i]
-            self._yaw = yaw_for(self._step)
-            self._phase = "aim"; self._t = 0; self._aim = _Aimer(tol_deg=5.0)
-            return SkillResult(AgentAction(), SkillStatus.RUNNING,
-                               f"digging toward {self._step}")
+        below = self._below(pose)
 
-        # 1. Look down-and-forward, then read the block there (by POSITION, which
-        #    survives an unreadable id). Decide: hazard -> stop; air ahead ->
-        #    nothing to dig this way -> turn; a safe block in front+below -> mine.
-        if self._phase == "aim":
-            dx, dy, aimed = self._aim.step(ctx, self._yaw, _DOWN_PITCH)
-            self._t += 1
-            if not aimed and self._t < 25:
-                return SkillResult(AgentAction(look_dx=dx, look_dy=dy),
-                                   SkillStatus.RUNNING, "aiming down-forward")
-            tp = ctx.targeted_pos
-            bid = getattr(ctx.looking_at, "block_id", None)
-            if tp is None:
-                return self._stop_or_turn("nothing to dig ahead")
-            if is_hazard(bid):
-                return self._done(f"stop: {_stem(bid)} ahead")
-            if not self._in_front_below(pose, tp):
-                # The crosshair grabbed our own footing / a side block — aim a
-                # touch steeper and retry; give up this way if it won't resolve.
-                if self._t < 40:
-                    return SkillResult(AgentAction(look_dy=10),
-                                       SkillStatus.RUNNING, "re-aiming lower")
-                return self._stop_or_turn("can't sight the tread")
-            # A readable non-safe block (e.g. bedrock) -> don't dig it.
-            if bid is not None and not is_safe_dig(bid):
-                return self._stop_or_turn(f"won't dig {_stem(bid)}")
-            self._mine_pos = tuple(tp)
-            self._mine_yield = is_stone_like(bid)
-            self._phase = "mine"; self._t = 0
-            return SkillResult(AgentAction(), SkillStatus.RUNNING, "tread -> mining")
-
-        # 2. Mine that block. Detect the break by the F3 target moving OFF it
-        #    (every block we dig matches is_safe_dig, so MineBlock's own id check
-        #    can't tell when it broke — position can).
+        # 1. Mine the block directly below with the proven MineBlock skill (it
+        #    aims straight down at the voxel and only mines a safe-dig block —
+        #    it abandons lava/water on its own). We drop into the gap as it
+        #    breaks; in the 1-wide shaft the cobblestone lands at our feet.
         if self._phase == "mine":
-            if self._sub is None:
-                self._sub = MineBlock(self._mine_pos, tool_role=self.tool_role,
+            # FIRST: did the block we were mining break? We detect that by the
+            # DROP into its space (pose.y fell). Check it BEFORE re-targeting,
+            # because falling changes 'below'.
+            if self._sub is not None and self._pre_y is not None:
+                fall = self._pre_y - float(pose.y)
+                if fall >= 0.6:
+                    if self._mine_yield:
+                        self.gathered += 1
+                    self._sub = None
+                    if fall > _MAX_FALL:
+                        return self._done("stopped: dropped into open space (cave)")
+                    self._depth += 1
+                    self._phase = "settle"; self._t = 0
+                    return SkillResult(AgentAction(), SkillStatus.RUNNING,
+                                       f"dug down (depth {self._depth}, got {self.gathered})")
+            # Mine the block currently below.
+            if self._sub is None or self._mine_pos != below:
+                self._sub = MineBlock(below, tool_role=self.tool_role,
                                       is_target=is_safe_dig, is_passthrough=is_safe_dig)
+                self._mine_pos = below; self._pre_y = float(pose.y)
+                self._mine_yield = False; self._t = 0
+            # Read the floor as we mine it: lava -> stop; remember if it's stone.
+            bid = self._reads_below(ctx, below)
+            if is_hazard(bid):
+                self._sub = None
+                return self._done(f"stop: {_stem(bid)} below")
+            if is_stone_like(bid):
+                self._mine_yield = True
             r = self._sub.tick(ctx)
             self._t += 1
-            tp = ctx.targeted_pos
-            broke = (self._t > 5 and tp is not None and tuple(tp) != self._mine_pos)
-            if broke or r.status == SkillStatus.DONE:
-                self._sub = None
-                self._step_y = float(pose.y)
-                self._step_x0, self._step_z0 = float(pose.x), float(pose.z)
+            if r.status == SkillStatus.DONE:        # broke without a detected fall
                 if self._mine_yield:
                     self.gathered += 1
-                # Collect AFTER stepping down: the cobblestone drops at the cut,
-                # which we're about to step onto — so pause to pick it up once
-                # we're standing THERE, not a block away from it. (Pausing before
-                # the step left the drop behind in the trench.)
-                self._collect_after = self._mine_yield
-                self._phase = "step"; self._t = 0
-                return SkillResult(r.action, SkillStatus.RUNNING, "cut tread")
-            if r.status in (SkillStatus.FAILED, SkillStatus.BLOCKED) or self._t > 50:
+                self._sub = None; self._phase = "settle"; self._t = 0
+                return SkillResult(r.action, SkillStatus.RUNNING,
+                                   f"dug down (depth {self._depth}, got {self.gathered})")
+            if r.status in (SkillStatus.FAILED, SkillStatus.BLOCKED) or self._t > 70:
                 self._sub = None
-                return self._stop_or_turn("stop: couldn't cut the tread")
+                return self._done("stop: couldn't dig down here")
             return r
 
-        # 2b. Collect: stand on the cut (we just stepped onto it) for a beat so
-        #     the cobblestone drop is sucked in (auto-pickup pulls items within
-        #     ~1 block over ~0.5 s) before moving on.
-        if self._phase == "collect":
+        # 2. Settle: hold still a beat so the cobblestone drop at our feet is
+        #    picked up before we mine the next block down.
+        if self._phase == "settle":
             self._t += 1
             if self._t >= 8:
-                self._phase = "face"; self._t = 0
+                self._phase = "mine"; self._t = 0
                 return SkillResult(AgentAction(), SkillStatus.RUNNING, "collected")
             return SkillResult(AgentAction(movement={"forward": False}),
-                               SkillStatus.RUNNING, "collecting drop")
-
-        # 3. Walk forward — step down into the hole. Watch pose.y: a ~1-block
-        #    drop is a stair; no drop for a while means a block is blocking head
-        #    height ahead, so dig again; a big drop is a cave -> stop.
-        if self._phase == "step":
-            self._t += 1
-            drop = (self._step_y - float(pose.y)) if self._step_y is not None else 0.0
-            moved = math.hypot(float(pose.x) - self._step_x0,
-                               float(pose.z) - self._step_z0)
-            if drop >= 0.7:
-                self._depth += 1
-                if drop > _MAX_FALL:
-                    return self._done("stopped: fell into open space (cave)")
-                self._t = 0
-                # Pause to pick up the cobblestone drop now that we're standing
-                # on the cut; otherwise carry on to the next stair.
-                self._phase = "collect" if self._collect_after else "face"
-                self._collect_after = False
-                return SkillResult(AgentAction(movement={"forward": False}),
-                                   SkillStatus.RUNNING, f"descended (depth {self._depth})")
-            if moved > _STEP_REACH or self._t > 16:
-                # Walked a whole block without dropping — the tread wasn't right
-                # below us (or a block is blocking head height). Re-cut: the aim
-                # phase targets whatever is now in front+below. Stops us surfing
-                # across flat ground instead of cutting DOWN.
-                self._phase = "aim"; self._t = 0; self._aim = _Aimer(tol_deg=5.0)
-                return SkillResult(AgentAction(movement={"forward": False}),
-                                   SkillStatus.RUNNING, "no drop; cutting again")
-            # hold our facing and push forward into the step.
-            ddx, _, _ = self._aim.step(ctx, self._yaw, _DOWN_PITCH)
-            return SkillResult(AgentAction(movement={"forward": True}, look_dx=ddx),
-                               SkillStatus.RUNNING, "stepping down")
+                               SkillStatus.RUNNING, "settling")
 
         return self._done("done")
 
-    def _in_front_below(self, pose, tp) -> bool:
-        """True if voxel ``tp`` is in front (along the dig step) and at/below
-        the feet — i.e. a real staircase tread, not our own footing or a block
-        behind/above us."""
-        fx, fy, fz = (int(math.floor(pose.x)), int(math.floor(pose.y)),
-                      int(math.floor(pose.z)))
-        sx, sz = self._step
-        ahead = (tp[0] - fx) * sx + (tp[2] - fz) * sz      # >0 == in the dig dir
-        horiz = abs(tp[0] - fx) + abs(tp[2] - fz)
-        return ahead >= 1 and horiz <= 3 and tp[1] <= fy
 
-
-__all__ = ["DescendToStone", "cardinal_step", "yaw_for",
-           "is_safe_dig", "is_hazard", "is_stone_like"]
+__all__ = ["DescendToStone", "is_safe_dig", "is_hazard", "is_stone_like"]
