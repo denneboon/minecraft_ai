@@ -140,6 +140,15 @@ class SampleStore:
     # Mutators
     # ------------------------------------------------------------------
 
+    def _warn_imwrite(self, path) -> None:
+        """cv2.imwrite returns False (not an exception) on encoder error / disk
+        full / bad path. Surface it ONCE so a write failure can't silently lose
+        samples — mirrors the world-map sample store."""
+        if not getattr(self, "_imwrite_warn_emitted", False):
+            self._imwrite_warn_emitted = True
+            print(f"[sample_store][WARN] cv2.imwrite returned False for {path} "
+                  f"— sample lost. (further occurrences stay silent)")
+
     def save(self, item_id: str, crop_rgb: np.ndarray) -> Optional[Path]:
         """
         Record one sample for ``item_id``. Returns the on-disk path if
@@ -161,7 +170,9 @@ class SampleStore:
             if path.is_file():
                 return None
             bgr = cv2.cvtColor(norm, cv2.COLOR_RGB2BGR)
-            cv2.imwrite(str(path), bgr)
+            if not cv2.imwrite(str(path), bgr):
+                self._warn_imwrite(path)
+                return None
             self._write_manifest_unlocked()
             return path
 
@@ -188,7 +199,13 @@ class SampleStore:
             keep_dir.mkdir(parents=True, exist_ok=True)
             keep_path = keep_dir / f"{h}.png"
             if not keep_path.is_file():
-                cv2.imwrite(str(keep_path), cv2.cvtColor(norm, cv2.COLOR_RGB2BGR))
+                if not cv2.imwrite(str(keep_path),
+                                   cv2.cvtColor(norm, cv2.COLOR_RGB2BGR)):
+                    # The correct-id copy didn't land. ABORT before the purge —
+                    # deleting the wrong-id copies now would erase the only
+                    # samples of this crop (silent data loss).
+                    self._warn_imwrite(keep_path)
+                    return 0
             # 2. Purge the same crop from every OTHER id; only drop a folder we
             # actually emptied (don't touch dirs we never modified).
             if self.root.is_dir():

@@ -18,7 +18,7 @@ What this module does
 ---------------------
 * Resolves a block id to its model JSON via ``models/block/<id>.json``,
   walking the parent chain to gather the texture variables.
-* Picks the up / north (front) / east (right) face textures.
+* Picks the up / north (left) / west (right) face textures.
 * Composites them into a 16×16 RGBA icon using three affine warps that
   match Mojang's vanilla rotation (≈30° around X, ≈45° around Y) — the
   same "three-rhombus hexagon" outline you see in every vanilla
@@ -86,7 +86,7 @@ _ICON_SIZE = 16
 
 @dataclass(frozen=True)
 class _FaceQuad:
-    name: str                                 # "up" / "north" / "east"
+    name: str                                 # "up" / "north" / "west"
     tl: Tuple[float, float]                   # icon-space top-left
     tr: Tuple[float, float]                   # icon-space top-right
     bl: Tuple[float, float]                   # icon-space bottom-left
@@ -276,10 +276,12 @@ class ModelResolver:
             if (list(frm) != [0, 0, 0] or list(to) != [16, 16, 16]):
                 return False
             faces = el.get("faces") or {}
-            # Need at least up + (north or side) + (east or side) — the
-            # three faces our isometric projection draws. Missing faces
-            # would punch holes in the icon.
-            need = {"up", "north", "east"}
+            # Need the three faces our isometric projection actually draws —
+            # up + north (left) + west (right), keyed exactly so in _FACE_QUADS
+            # / _FACE_TEXTURE_KEYS. (Checked "east" before, which the renderer
+            # never uses; a full cube has both so valid cubes were unaffected,
+            # but a model defining only the visible faces was wrongly rejected.)
+            need = {"up", "north", "west"}
             if not need.issubset(set(faces.keys())):
                 return False
             return True

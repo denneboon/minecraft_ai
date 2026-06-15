@@ -806,9 +806,14 @@ class TieredBlockClassifier:
             res = self.cnn.classify_batch(patches)
         else:
             res = [(None, 0.0)] * n
+        # Capture the threshold ONCE — the fallback list yields bid=None for
+        # every entry today (so the dereference short-circuits), but reading
+        # self.cnn.cfg inside the loop is a latent AttributeError the moment
+        # that invariant changes. Mirror the single-patch classify() guard.
+        cnn_min = self.cnn.cfg.min_confidence if self.cnn is not None else 1.0
         out: List[Tuple[Optional[str], float]] = []
         for i, (bid, conf) in enumerate(res):
-            if bid is not None and conf >= self.cnn.cfg.min_confidence:
+            if bid is not None and conf >= cnn_min:
                 out.append((bid, conf))
             else:
                 out.append(self.classify(patches[i]))   # NN/baseline fallback
