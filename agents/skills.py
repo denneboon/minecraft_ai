@@ -1179,9 +1179,11 @@ class PlaceBlock(Skill):
                  yaw_offs=(0.0, 60.0, -60.0, 120.0, -120.0, 180.0),
                  max_ticks: int = 900, max_reach: float = PLAYER_REACH,
                  tol_deg: float = 5.0, verify_ticks: int = 5,
-                 max_step_backs: int = 6, back_ticks: int = 24,
-                 spot_budget: int = 60):
+                 max_step_backs: int = 3, back_ticks: int = 12,
+                 spot_budget: int = 60, prime_back_ticks: int = 11,
+                 prime: bool = True):
         self.tool_role = tool_role
+        self.prime = bool(prime)         # try "step back + place where you stood"
         self.slot = slot                 # explicit hotbar slot 1-9, overrides role
         # SWEEP DIRECTIONS FIRST at the best pitch (turn away from obstacles
         # like a tree we're standing in), THEN revisit with other pitches —
@@ -1194,6 +1196,7 @@ class PlaceBlock(Skill):
         self.max_step_backs = int(max_step_backs)
         self.back_ticks = int(back_ticks)
         self.spot_budget = int(spot_budget)
+        self.prime_back_ticks = int(prime_back_ticks)
         self.reset()
 
     def reset(self):
@@ -1212,6 +1215,13 @@ class PlaceBlock(Skill):
         self._back_t = 0
         self._spot_ticks = 0        # ticks scanned at the CURRENT spot
         self._escape_yaw = None     # fixed heading to retreat along (set once)
+        # PRIME: "step back one block and place where you were standing" — the
+        # most reliable placement (that cell is guaranteed solid-below +
+        # clear-above), tried once before any scanning.
+        self._primed = not getattr(self, "prime", True)
+        self._stand = None          # the block under our feet at start
+        self._prime_t = 0
+        self._prime_aim = None
 
     def _exhausted_views(self):
         """All views failed at this spot. Step back onto fresh ground and
@@ -1259,6 +1269,45 @@ class PlaceBlock(Skill):
         # target (recomputing from the live yaw each tick makes it run away).
         if self._base_yaw is None:
             self._base_yaw = float(pose.yaw)
+
+        # 1b. PRIME (once, before any scanning): the most reliable placement
+        # anywhere is "step back one block and put the table where you were just
+        # standing" — that cell is GUARANTEED solid below (you stood on it) and
+        # clear above (your body filled it), so it needs no terrain scan and
+        # works on cluttered/forest/edge ground that defeats the view scan.
+        if not self._primed:
+            if self._stand is None:
+                self._stand = (int(math.floor(pose.x)),
+                               int(math.floor(pose.y)) - 1,
+                               int(math.floor(pose.z)))
+                self._prime_t = 0
+                self._prime_aim = _Aimer(tol_deg=self._tol)
+            self._prime_t += 1
+            if self._prime_t <= self.prime_back_ticks:
+                # back up off the stand cell so placing there won't intersect us
+                return SkillResult(AgentAction(movement={"backward": True}),
+                                   SkillStatus.RUNNING, "place: priming (step back)")
+            # Moving BACKWARD keeps our facing, so the cell we just stepped off
+            # of is now straight AHEAD — look down at it (same yaw) and place.
+            dx, dy, aimed = self._prime_aim.step(ctx, self._base_yaw, 52.0)
+            if not aimed and self._prime_t < self.prime_back_ticks + 24:
+                return SkillResult(AgentAction(look_dx=dx, look_dy=dy),
+                                   SkillStatus.RUNNING,
+                                   "place: priming (aim at stand spot)")
+            self._primed = True           # only ever prime once; then scan
+            place = (can_place_block(pose, ctx.looking_at, ctx.world_map,
+                                     getattr(pose, "dimension", None),
+                                     self.max_reach, assume_face="up")
+                     if aimed else None)
+            self._base_yaw = float(pose.yaw)
+            if place is not None:
+                self.placed_at = place
+                self._support = (place[0], place[1] - 1, place[2])
+                self._mode = "verify"; self._verify = 0
+                return SkillResult(AgentAction(interact="use_item"),
+                                   SkillStatus.RUNNING,
+                                   f"place: priming at {place}")
+            # couldn't place where we stood -> fall through to the view scan
 
         # STEP-BACK: walk backward onto fresh ground, then re-scan every view
         # from there (escape the cluttered chop patch). A fixed number of ticks

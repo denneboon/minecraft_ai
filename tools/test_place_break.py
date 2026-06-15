@@ -86,7 +86,7 @@ def main() -> int:
     (ok if "place_block" in SKILLS and "break_looked_at" in SKILLS else bad)(
         "skills registered")
     # single forward view at the test pose pitch so it aims immediately
-    pb = PlaceBlock("blocks", pitches=(56.0,), yaw_offs=(0.0,))
+    pb = PlaceBlock("blocks", prime=False, pitches=(56.0,), yaw_offs=(0.0,))
     ctx = SkillContext(pose=_pose(), looking_at=_la((0, 63, 1), "up"),
                        world_map=_wm(), hotbar=_hotbar({"blocks": 5}), px_per_deg=6.5)
     r = pb.tick(ctx)
@@ -114,7 +114,7 @@ def main() -> int:
         f"confirms placement once the block appears ({done.status})")
     # id-unreadable path: F3 garbles a fresh block's id (looking_at parses to
     # None) but the targeted COORDS are clean -> still confirm by position.
-    pbp = PlaceBlock("blocks", pitches=(56.0,), yaw_offs=(0.0,))
+    pbp = PlaceBlock("blocks", prime=False, pitches=(56.0,), yaw_offs=(0.0,))
     caim = SkillContext(pose=_pose(), looking_at=_la((0, 63, 1), "up"),
                         world_map=_wm(), hotbar=_hotbar({"blocks": 5}), px_per_deg=6.5)
     for _ in range(8):
@@ -132,7 +132,7 @@ def main() -> int:
     # MISREAD-id path (the live bug): the recogniser reads the fresh table as
     # some OTHER valid block at a DIFFERENT pos, but the raw F3 targeted coords
     # point at placed_at — must still confirm (identity is irrelevant).
-    pbm = PlaceBlock("blocks", pitches=(56.0,), yaw_offs=(0.0,))
+    pbm = PlaceBlock("blocks", prime=False, pitches=(56.0,), yaw_offs=(0.0,))
     caim2 = SkillContext(pose=_pose(), looking_at=_la((0, 63, 1), "up"),
                          world_map=_wm(), hotbar=_hotbar({"blocks": 5}), px_per_deg=6.5)
     for _ in range(8):
@@ -151,7 +151,7 @@ def main() -> int:
         f"confirms despite a MISREAD id when targeted coords match ({dm.status})")
     # if the block never appears (MC rejected) and there are no other views NOR
     # step-backs, it FAILS rather than hanging.
-    pbr = PlaceBlock("blocks", pitches=(56.0,), yaw_offs=(0.0,), verify_ticks=2,
+    pbr = PlaceBlock("blocks", prime=False, pitches=(56.0,), yaw_offs=(0.0,), verify_ticks=2,
                      max_step_backs=0)
     cair = SkillContext(pose=_pose(), looking_at=_la((0, 63, 1), "up"),
                         world_map=_wm(), hotbar=_hotbar({"blocks": 5}), px_per_deg=6.5)
@@ -160,7 +160,7 @@ def main() -> int:
         "rejected placement, no views nor step-backs -> FAILED")
     # WITH a step-back budget, an exhausted scan steps back (RUNNING) and
     # re-scans instead of failing immediately.
-    pbs = PlaceBlock("blocks", pitches=(56.0,), yaw_offs=(0.0,), verify_ticks=2,
+    pbs = PlaceBlock("blocks", prime=False, pitches=(56.0,), yaw_offs=(0.0,), verify_ticks=2,
                      max_step_backs=1, back_ticks=3)
     cair2 = SkillContext(pose=_pose(), looking_at=_la((0, 63, 1), "up"),
                          world_map=_wm(), hotbar=_hotbar({"blocks": 5}), px_per_deg=6.5)
@@ -170,9 +170,27 @@ def main() -> int:
     (ok if any("stepping back" in i or "step" in i for i in infos) else bad)(
         "exhausted scan with budget -> steps back to fresh ground")
     # no blocks in hotbar -> FAILED
-    pb2 = PlaceBlock("blocks")
+    pb2 = PlaceBlock("blocks", prime=False)
     r2 = pb2.tick(SkillContext(pose=_pose(), hotbar=_hotbar({}), px_per_deg=6.5))
     (ok if r2.status == SkillStatus.FAILED else bad)("no block in hotbar -> FAILED")
+
+    # 3b. PRIME path (default): step back off the stand cell, then place the
+    # table where we were standing — robust on cluttered/edge ground. With the
+    # test pose already at the back-look pitch, it should reach use_item.
+    pbprime = PlaceBlock("blocks", slot=5, prime_back_ticks=2)
+    cprime = SkillContext(pose=_pose(yaw=0.0, pitch=52.0),  # already down-aimed
+                          looking_at=_la((0, 63, 1), "up"),
+                          world_map=_wm(), hotbar=_hotbar({"blocks": 5}),
+                          px_per_deg=6.5)
+    prime_act = None
+    for _ in range(20):
+        prime_act = pbprime.tick(cprime)
+        if prime_act.action.interact == "use_item":
+            break
+    (ok if prime_act is not None and prime_act.action.interact == "use_item"
+        and pbprime.placed_at == (0, 64, 1) else bad)(
+        f"prime: steps back + places where it stood "
+        f"({getattr(pbprime,'placed_at',None)})")
 
     # 4. BreakLookedAt: attack while a block is there, DONE when gone.
     print("\n[4] BreakLookedAt skill")
