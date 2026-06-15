@@ -66,6 +66,74 @@ def _stem(item_id: str) -> str:
     return item_id.split(":", 1)[-1] if ":" in item_id else item_id
 
 
+# Tool material tiers, BEST first — the operator's preferred order
+# (netherite > diamond > iron > copper > gold > stone > wood).
+_MATERIAL_RANK = {
+    "netherite": 7, "diamond": 6, "iron": 5, "copper": 4,
+    "golden": 3, "gold": 3, "stone": 2, "wooden": 1, "wood": 1,
+}
+
+# Food preference (roughly by hunger+saturation restored), best first.
+_FOOD_RANK = {
+    "enchanted_golden_apple": 30, "golden_apple": 26, "golden_carrot": 24,
+    "cooked_beef": 22, "cooked_porkchop": 22, "cooked_mutton": 20,
+    "cooked_salmon": 18, "cooked_chicken": 16, "cooked_cod": 16,
+    "cooked_rabbit": 15, "rabbit_stew": 15, "mushroom_stew": 14,
+    "beetroot_soup": 14, "suspicious_stew": 14, "bread": 12, "baked_potato": 11,
+    "pumpkin_pie": 10, "carrot": 8, "apple": 7, "beetroot": 6,
+    "melon_slice": 5, "sweet_berries": 4, "glow_berries": 4, "cookie": 3,
+    "dried_kelp": 3, "honey_bottle": 3, "chorus_fruit": 3,
+    "beef": 2, "porkchop": 2, "chicken": 2, "mutton": 2, "rabbit": 2,
+    "cod": 2, "salmon": 2, "potato": 2, "tropical_fish": 1,
+    "pufferfish": 0, "spider_eye": 0, "rotten_flesh": 0, "poisonous_potato": 0,
+}
+
+
+def material_rank(item_id: Optional[str]) -> int:
+    """Tool material tier for ranking 'which sword/pickaxe is best' —
+    netherite=7 … wood=1, and 0 for an item with no tiered material prefix."""
+    if not item_id:
+        return 0
+    prefix = _stem(item_id).split("_", 1)[0]
+    return _MATERIAL_RANK.get(prefix, 0)
+
+
+def _role_quality(item_id: str, role: str) -> int:
+    """Sort key for 'best of a role': material tier for tools, curated quality
+    for food, 0 otherwise (blocks/armour fall back to count in the caller)."""
+    if role in ("sword", "axe", "pickaxe", "shovel", "hoe"):
+        return material_rank(item_id)
+    if role == "food":
+        return _FOOD_RANK.get(_stem(item_id), 1)
+    return 0
+
+
+def best_item_for_role(items, role: str, catalog=None,
+                       *, extra_food: Optional[Iterable[str]] = None
+                       ) -> Optional[str]:
+    """The BEST item filling ``role`` from ``items`` — highest material tier
+    (tools) or food quality, ties (and blocks/armour) broken by greatest count.
+
+    ``items`` is either a ``{item_id: count}`` mapping or an iterable of item
+    ids. Returns the item id, or ``None`` when nothing fills the role."""
+    if isinstance(items, dict):
+        pairs = list(items.items())
+    else:
+        counts: dict = {}
+        for it in (items or []):
+            if it:
+                counts[it] = counts.get(it, 0) + 1
+        pairs = list(counts.items())
+    best, best_key = None, None
+    for item_id, count in pairs:
+        if not matches_role(item_id, role, catalog, extra_food=extra_food):
+            continue
+        key = (_role_quality(item_id, role), int(count or 0))
+        if best_key is None or key > best_key:
+            best, best_key = item_id, key
+    return best
+
+
 def item_role(item_id: Optional[str],
               catalog=None,
               *,
@@ -122,4 +190,5 @@ def matches_role(item_id: Optional[str], role: str,
     return item_role(item_id, catalog, extra_food=extra_food) == role
 
 
-__all__ = ["ROLES", "DEFAULT_FOOD", "item_role", "matches_role"]
+__all__ = ["ROLES", "DEFAULT_FOOD", "item_role", "matches_role",
+           "material_rank", "best_item_for_role"]

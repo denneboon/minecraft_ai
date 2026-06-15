@@ -39,6 +39,7 @@ from control.inventory_control import InventoryController
 from agents.crafting import Crafter
 from agents.inventory_memory import InventoryMemory
 from agents.maker import Maker
+from agents.hotbar_arranger import arrange_hotbar
 from agents.treechop import FindAndChopLogs, _full_movement
 from agents.skills import SkillContext, SkillStatus
 from vision.world.f3_target import targeted_block_pos
@@ -255,6 +256,22 @@ def main(argv=None) -> int:
         if not ctrl_ok:
             M.bot_cannot_start_banner(reason)
             return 1
+        # Tidy the hotbar first: put the BEST of each role (best sword/pickaxe/
+        # axe/shovel/hoe by material tier, best food, biggest block stack) into
+        # its reserved slot, so the tool-selection behaviours grab the right
+        # item. Best-effort — a hiccup here never blocks the make.
+        try:
+            roles = {int(k): str(v) for k, v in
+                     ((settings.get("hotbar") or {}).get("slot_roles") or {}).items()}
+            xfood = tuple((settings.get("hotbar") or {}).get("extra_food") or ())
+            arr = arrange_hotbar(ctl, slot_roles=roles or None, catalog=cat,
+                                 extra_food=xfood, log=print)
+            if arr:
+                print("[make] hotbar: " + ", ".join(
+                    f"{r}={i.split(':')[-1]}" for r, i in arr.items()))
+        except Exception as e:
+            print(f"[make] hotbar arrange skipped: {e}")
+
         M.bot_running_banner(f"making {count}x {target.split(':')[-1]}")
         ok, msg = maker.make(target, count)
         result = ("SUCCESS" if ok else "FAILED", msg)

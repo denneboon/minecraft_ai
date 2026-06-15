@@ -344,10 +344,12 @@ control:
 hotbar:
   slot_roles:
     1: sword
-    2: axe
-    3: pickaxe
-    5: blocks
-    9: food
+    2: pickaxe
+    3: axe
+    4: shovel
+    5: hoe
+    6: blocks
+    7: food
   extra_food: []          # extra item stems to treat as food (e.g. modded)
 safety:
   check_focus_interval: 0.075

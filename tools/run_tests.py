@@ -55,6 +55,7 @@ OFFLINE_TESTS = [
     "test_inventory_memory",
     "test_stack_count",
     "test_place_break",
+    "test_hotbar_arrange",
 ]
 
 
