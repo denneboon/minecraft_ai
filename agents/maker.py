@@ -151,11 +151,13 @@ class Maker:
             # No raw needed -> run the craft chain (2x2 batched; 3x3 via table).
             i = 0
             crafted_ok = True
+            made_target = 0          # how many of the TARGET this chain produced
             while i < len(steps):
                 if steps[i].needs_table:
                     if self.table_craft_fn is None:
                         return False, "a 3x3 recipe needs a table but no table-craft capability"
-                    res = steps[i].result_id
+                    step = steps[i]
+                    res = step.result_id
                     self.log(f"[make] table-craft {res.split(':')[-1]}")
                     ok, msg = self.table_craft_fn(res)
                     last_msg = msg
@@ -164,11 +166,14 @@ class Maker:
                         self.log(f"[make] table-craft {res.split(':')[-1]} failed: {msg}")
                         break
                     i += 1
+                    if res == target_id:
+                        made_target += step.result_count
                 else:
                     self.ctl.open_inventory()
                     try:
                         while i < len(steps) and not steps[i].needs_table:
-                            res = steps[i].result_id
+                            step = steps[i]
+                            res = step.result_id
                             ok, msg = self.crafter.craft(res)
                             last_msg = msg
                             self.log(f"[make] craft {res.split(':')[-1]}: "
@@ -177,10 +182,25 @@ class Maker:
                                 crafted_ok = False
                                 break
                             i += 1
+                            if res == target_id:
+                                made_target += step.result_count
                     finally:
                         self.ctl.close()
                     if not crafted_ok:
                         break
+            # The TARGET was crafted and the crafter VERIFIED its result slot
+            # produced output, so trust that — don't depend on a later inventory
+            # read RECOGNISING the new item's icon. The recogniser may have no
+            # sample for a freshly-made tool (wooden_pickaxe), which would read
+            # the target as still-absent and loop us into re-crafting forever
+            # (live: pickaxe crafted, then "0/1 after 5 rounds").
+            if made_target >= count:
+                if self.memory is not None:
+                    try:
+                        self.memory.note_delta(target_id, made_target)
+                    except Exception:
+                        pass
+                return True, f"made {made_target}x {short}"
             if not crafted_ok:
                 # Don't hard-abort on a (possibly transient) craft hiccup —
                 # an inventory misread or slot-timing glitch can fail one step.
