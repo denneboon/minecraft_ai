@@ -79,6 +79,16 @@ def main() -> int:
     # replaces it). Without this, no spot in a grassy/flowery biome is placeable.
     (ok if can_place_block(p, _la((0, 63, 1), "up"), _wm(plants=[(0, 64, 1)])) == (0, 64, 1)
      else bad)("placement voxel is grass/flower (replaceable) -> placeable")
+    # VERTICALLY CLEAR placements: a spot directly below us (same x,z, lower y)
+    # does NOT intersect the hitbox and places fine — the old horizontal-only
+    # distance floor wrongly rejected every such spot (the main "renders things
+    # impossible to place even when possible" bug).
+    (ok if can_place_block(p, _la((0, 62, 0), "up"), _wm()) == (0, 63, 0)
+     else bad)("placement directly below (vertically clear) -> placeable")
+    # a 1-block STEP-DOWN in front (uneven ground): top face one level down ->
+    # placeable (it's clear of the body), where the old hd floor often killed it.
+    (ok if can_place_block(p, _la((0, 62, 1), "up"), _wm()) == (0, 63, 1)
+     else bad)("step-down ground in front -> placeable")
 
     # 3. PlaceBlock: select slot, aim, place via use_item, then VERIFY the
     # block appeared under the crosshair before declaring DONE.

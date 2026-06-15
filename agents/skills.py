@@ -142,6 +142,32 @@ def _player_voxels(pose) -> Tuple[Voxel, Voxel]:
     return (fx, fy, fz), (fx, fy + 1, fz)
 
 
+# Player collision box: 0.6 wide (±0.30 around x,z) and 1.80 tall from the feet.
+_PLAYER_HALF_W = 0.30
+_PLAYER_HEIGHT = 1.80
+
+
+def _intersects_player(pose, place: Voxel) -> bool:
+    """True iff the 1×1×1 block at ``place`` would overlap the player's
+    collision box — the ONLY geometric reason MC silently refuses a placement.
+
+    A real 3-axis AABB test, NOT a horizontal-distance approximation: a block
+    that's horizontally close but VERTICALLY clear (the ground directly below
+    you when looking down, or a 1-block step down on uneven terrain) does NOT
+    intersect and places fine. The old check rejected on horizontal distance
+    alone, which ruled out a huge number of perfectly legal placements."""
+    try:
+        px, py, pz = float(pose.x), float(pose.y), float(pose.z)
+    except Exception:
+        return False
+    bx, by, bz = place
+    r = _PLAYER_HALF_W
+    x_over = (bx < px + r) and (bx + 1.0 > px - r)
+    y_over = (by < py + _PLAYER_HEIGHT) and (by + 1.0 > py)
+    z_over = (bz < pz + r) and (bz + 1.0 > pz - r)
+    return x_over and y_over and z_over
+
+
 def placement_voxel(looking_at) -> Optional[Voxel]:
     """The voxel a block would be PLACED INTO if the player right-clicked the
     block they're looking at now: the targeted block's position offset by its
@@ -212,23 +238,15 @@ def can_place_block(pose, looking_at, world_map=None, dimension=None,
         return None
     n = _FACE_NORMAL[face]
     place = (tgt[0] + n[0], tgt[1] + n[1], tgt[2] + n[2])
-    if not block_in_reach(pose, tgt, max_reach):     # block too far
+    # Reach is to the block you CLICK (the targeted block). MC then places into
+    # the adjacent cell — which may itself sit a hair past the reach sphere, so
+    # we deliberately do NOT also require ``place`` to be in reach (that wrongly
+    # rejected boundary placements where the clicked block is clearly reachable).
+    if not block_in_reach(pose, tgt, max_reach):     # clicked block too far
         return None
-    if not block_in_reach(pose, place, max_reach):   # resulting voxel too far
-        return None
-    if place in _player_voxels(pose):                # would be inside us
-        return None
-    # Must be clearly IN FRONT, not hugging the player — MC rejects a
-    # placement whose box intersects the player hitbox, so a spot < ~1 block
-    # away horizontally tends to silently fail.
-    hd = math.hypot((place[0] + 0.5) - pose.x, (place[2] + 0.5) - pose.z)
-    if hd < 0.85:
-        # MC rejects a placement whose block box intersects the player hitbox
-        # (~0.3 radius + 0.5 half-block ≈ 0.8). Below ~0.85 it's a sure reject;
-        # between there and 1.0 it OFTEN works, and the placer's post-place
-        # verify catches the genuine rejects — so don't pre-emptively rule out
-        # the close-but-legal spots (on cratered chop terrain the only reachable
-        # ground is close, and the old 1.0 floor rejected every spot -> timeout).
+    # The ONLY geometric block: the placed cube can't intersect our hitbox.
+    # Full 3-axis test — horizontally-close-but-vertically-clear spots place fine.
+    if _intersects_player(pose, place):
         return None
     if world_map is not None:                        # already occupied?
         try:
