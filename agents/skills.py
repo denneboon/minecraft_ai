@@ -786,9 +786,16 @@ class WalkToward(Skill):
                  face_tol_deg: float = 14.0, stuck_window: int = 18,
                  min_progress: float = 0.12, avoid_fall: bool = True,
                  sprint: bool = True, jump_after: int = 4,
-                 arrive_on_column: bool = False):
+                 arrive_on_column: bool = False,
+                 arrive_max_dy: Optional[float] = None):
         self.target = tuple(target)
         self.arrive_dist = arrive_dist
+        # Optional VERTICAL gate on arrival: only count as arrived when the feet
+        # are within this many blocks of the target's y. Used by drop-collection
+        # on slopes/ledges so the bot doesn't "arrive" on a shelf high ABOVE the
+        # drop and dwell there — it keeps walking (with avoid_fall off) to
+        # descend to the item's level. None = no vertical constraint.
+        self.arrive_max_dy = arrive_max_dy
         # When True, "arrived" means the player's ROUNDED (floor) x,z equal the
         # target's x,z — i.e. standing in the target block's column. Used to
         # COLLECT a broken block's drop: walk onto its exact x,z so the item
@@ -852,13 +859,18 @@ class WalkToward(Skill):
         tx, tz = self.target[0] + 0.5, self.target[2] + 0.5
         dx, dz = tx - px, tz - pz
         dist = math.hypot(dx, dz)
+        # Optional vertical gate: not "arrived" while we're still well above (or
+        # below) the target's level — keeps the collector walking down to the
+        # drop instead of stopping on a ledge over it.
+        dy_ok = (self.arrive_max_dy is None
+                 or abs(int(math.floor(p.y)) - self.target[1]) <= self.arrive_max_dy)
         # Arrived when standing in the target's column (rounded x,z match) — the
         # tight goal used for item collection — or within arrive_dist otherwise.
-        if self.arrive_on_column and int(math.floor(px)) == self.target[0] \
+        if dy_ok and self.arrive_on_column and int(math.floor(px)) == self.target[0] \
                 and int(math.floor(pz)) == self.target[2]:
             return SkillResult(AgentAction(movement={"forward": False}),
                                SkillStatus.DONE, "arrived on column")
-        if dist <= self.arrive_dist:
+        if dy_ok and dist <= self.arrive_dist:
             return SkillResult(AgentAction(movement={"forward": False}),
                                SkillStatus.DONE, f"arrived (d={dist:.1f})")
         # Progress / stuck tracking.

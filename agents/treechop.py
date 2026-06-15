@@ -139,6 +139,28 @@ class FindAndChopLogs:
         return (int(math.floor(pose.x)), int(math.floor(pose.y)),
                 int(math.floor(pose.z)))
 
+    def _drop_ground(self, ctx, base):
+        """The cell a broken log's drop comes to REST in: scan DOWN from the log
+        through air/log to the first solid block; the item sits on top of it.
+        Lets the collector walk to the drop's real LEVEL (in a valley below a
+        ledge), not just its x,z. Falls back to the log's own cell when the
+        column below is unmapped."""
+        wm = getattr(ctx, "world_map", None)
+        if wm is None:
+            return base
+        x, y, z = base
+        for yy in range(y, y - 24, -1):
+            try:
+                obs = wm.get_block((x, yy - 1, z), dimension=ctx.dimension)
+            except TypeError:
+                obs = wm.get_block((x, yy - 1, z))
+            bid = getattr(obs, "block_id", None)
+            if bid is None:
+                break                       # unmapped below -> stop, best guess
+            if bid != AIR_BLOCK and not self.is_log(bid):
+                return (x, yy, z)           # solid at yy-1 -> drop rests at yy
+        return (x, y, z)
+
     def _reachable_band(self, pose, v) -> bool:
         """A looked-at log worth WALKING to: within the scan radius
         horizontally and a feet-reachable height band (not a high canopy log we
@@ -472,9 +494,14 @@ class FindAndChopLogs:
                 # never reaches the drop and collects 0 (the live "chopped N,
                 # collected 0" bug). It's a short walk to a spot we were just
                 # next to — not a cliff — so let it step in and mantle out.
-                self._sub = WalkToward(base, arrive_dist=0.6, arrive_on_column=True,
+                # Target the drop's RESTING cell (down at the ground), with a
+                # vertical arrival gate, so on a slope/ledge the bot walks DOWN
+                # to the item's level instead of stopping on a shelf above it.
+                gcell = self._drop_ground(ctx, base)
+                self._target = gcell
+                self._sub = WalkToward(gcell, arrive_dist=0.6, arrive_on_column=True,
                                        stuck_window=10, avoid_fall=False,
-                                       jump_after=6)
+                                       jump_after=6, arrive_max_dy=2.5)
                 self._state = "collect"
                 # Stand still ~1s on arrival so drops still FALLING from a tall/
                 # branchy trunk (acacia logs sit high, the drop takes a moment
@@ -533,7 +560,8 @@ class FindAndChopLogs:
                 # Cleared (or couldn't) — resume walking onto the drop column.
                 self._sub = WalkToward(self._target, arrive_dist=0.6,
                                        arrive_on_column=True, stuck_window=10,
-                                       avoid_fall=False, jump_after=6)
+                                       avoid_fall=False, jump_after=6,
+                                       arrive_max_dy=2.5)
                 self._state = "collect"
                 return SkillResult(r.action, SkillStatus.RUNNING,
                                    "collect: cleared; resuming walk to drop")
