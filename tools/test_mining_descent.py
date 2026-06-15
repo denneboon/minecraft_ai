@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Offline self-test for agents/mining_descent.py — the SAFE descend-to-stone
-strategy. Covers the pure safety/geometry core (cardinal step, stair plan,
-dig/hazard predicates) and the skill's conservative stops (no pose; lava ahead
-=> halt with nothing gathered, never an unsafe dig)."""
+"""Offline self-test for agents/mining_descent.py — the simple SAFE
+descend-to-stone staircase: direction/facing math, dig/hazard/stone predicates,
+and the skill's conservative stops (no pose; lava ahead => halt, never dig)."""
 from __future__ import annotations
 
 import os
@@ -16,8 +15,8 @@ if ROOT not in sys.path:
 from utils.console import ensure_utf8_stdout
 ensure_utf8_stdout()
 
-from agents.mining_descent import (DescendToStone, plan_stair, cardinal_step,
-                                   is_safe_dig, is_hazard)
+from agents.mining_descent import (DescendToStone, cardinal_step, yaw_for,
+                                   is_safe_dig, is_hazard, is_stone_like)
 from agents.skills import SkillContext, SkillStatus
 
 _fails = 0
@@ -31,57 +30,51 @@ def _pose(x=0.5, y=64.0, z=0.5, yaw=0.0, pitch=0.0):
 
 
 def main() -> int:
-    print("=" * 56); print(" descend-to-stone (safe) — offline self-test"); print("=" * 56)
+    print("=" * 56); print(" descend-to-stone (simple, safe) — offline self-test"); print("=" * 56)
 
-    # 1. cardinal step from yaw (MC: 0=+Z south, 90=-X west, 180=-Z north, 270=+X east).
-    print("\n[1] cardinal step from yaw")
-    cases = {0.0: (0, 1), 90.0: (-1, 0), 180.0: (0, -1), 270.0: (1, 0), -90.0: (1, 0)}
-    for yaw, want in cases.items():
-        got = cardinal_step(yaw)
-        (ok if got == want else bad)(f"yaw {yaw} -> {want} (got {got})")
+    # 1. cardinal step + the yaw that faces it (round-trip).
+    print("\n[1] facing math")
+    for yaw, want in {0.0: (0, 1), 90.0: (-1, 0), 180.0: (0, -1), 270.0: (1, 0)}.items():
+        (ok if cardinal_step(yaw) == want else bad)(
+            f"yaw {yaw} -> step {want} (got {cardinal_step(yaw)})")
+    for step in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
+        (ok if cardinal_step(yaw_for(step)) == step else bad)(
+            f"yaw_for{step} faces back to {step}")
 
-    # 2. stair geometry: 3 cells to clear (head, mid, drop) + a solid support
-    #    one below the drop, and the new feet at forward+down-1.
-    print("\n[2] stair plan geometry")
-    cut, support, stand = plan_stair((0, 64, 0), (0, 1))
-    (ok if cut == ((0, 65, 1), (0, 64, 1), (0, 63, 1)) else bad)(
-        f"clears head/mid/drop ahead (got {cut})")
-    (ok if support == (0, 62, 1) else bad)(f"support is one below the drop (got {support})")
-    (ok if stand == (0, 63, 1) else bad)(f"stands forward+down-1 (got {stand})")
-
-    # 3. dig/hazard predicates — allowlist for digging, liquids are hazards.
-    print("\n[3] safe-dig allowlist + hazard liquids")
-    for b in ("minecraft:stone", "minecraft:dirt", "minecraft:deepslate",
-              "minecraft:gravel", "minecraft:grass_block"):
-        (ok if is_safe_dig(b) else bad)(f"{b.split(':')[-1]} is safe to dig")
+    # 2. dig / hazard / stone predicates.
+    print("\n[2] block predicates")
+    for b in ("minecraft:stone", "minecraft:dirt", "minecraft:gravel",
+              "minecraft:deepslate", "minecraft:grass_block"):
+        (ok if is_safe_dig(b) else bad)(f"{b.split(':')[-1]} safe to dig")
     for b in ("minecraft:bedrock", "minecraft:lava", "minecraft:water", None):
-        (ok if not is_safe_dig(b) else bad)(f"{b} is NOT auto-dug")
-    (ok if is_hazard("minecraft:lava") and is_hazard("minecraft:water") else bad)(
-        "lava/water flagged as hazards")
-    (ok if not is_hazard("minecraft:stone") else bad)("stone is not a hazard")
+        (ok if not is_safe_dig(b) else bad)(f"{b} NOT auto-dug")
+    (ok if is_hazard("minecraft:lava") and is_hazard("minecraft:water")
+        and not is_hazard("minecraft:stone") else bad)("lava/water are hazards, stone isn't")
+    (ok if is_stone_like("minecraft:stone") and is_stone_like("minecraft:granite")
+        and not is_stone_like("minecraft:dirt")
+        and not is_stone_like("minecraft:sandstone") else bad)(
+        "stone/granite drop cobble; dirt/sandstone don't")
 
-    # 4. conservative stops: no pose -> BLOCKED (never acts blind).
-    print("\n[4] skill is conservative")
-    sk = DescendToStone(count=3)
-    r = sk.tick(SkillContext(pose=None, world_map=None))
+    # 3. no pose -> BLOCKED (never acts blind).
+    print("\n[3] conservative: no pose")
+    r = DescendToStone(count=3).tick(SkillContext(pose=None, world_map=None))
     (ok if r.status == SkillStatus.BLOCKED else bad)(f"no pose -> BLOCKED ({r.status})")
 
-    # 5. lava directly ahead -> the skill HALTS (DONE, 0 gathered), never mines.
-    print("\n[5] lava ahead -> halt, gather nothing, no dig")
+    # 4. lava in front+below -> HALT (DONE, 0 gathered), never mines.
+    print("\n[4] lava ahead -> halt, gather nothing")
     sk = DescendToStone(count=3)
-    pose = _pose(yaw=0.0)                       # faces +Z -> first cell ahead = (0,65,1)
-    lava = SimpleNamespace(pos=(0, 65, 1), block_id="minecraft:lava")
-    # tick 1: face (computes the plan); tick 2+: look at the head cell -> lava.
-    sk.tick(SkillContext(pose=pose, world_map=None, looking_at=lava))
+    pose = _pose(yaw=0.0)                       # faces +Z; step = (0,1)
+    lava = SimpleNamespace(pos=(0, 63, 1), block_id="minecraft:lava")
+    ctx = SkillContext(pose=pose, world_map=None, looking_at=lava,
+                       targeted_pos=(0, 63, 1))
     res = None
-    for _ in range(4):
-        res = sk.tick(SkillContext(pose=pose, world_map=None, looking_at=lava))
+    for _ in range(40):
+        res = sk.tick(ctx)
         if res.status == SkillStatus.DONE:
             break
     (ok if res.status == SkillStatus.DONE and sk.gathered == 0 else bad)(
-        f"halts on lava with 0 gathered (status={res.status}, got {sk.gathered})")
-    (ok if "lava" in res.info or "stop" in res.info else bad)(
-        f"reports the hazard ({res.info})")
+        f"halts on lava, 0 gathered (status={res.status}, got {sk.gathered})")
+    (ok if "lava" in res.info else bad)(f"reports the hazard ({res.info})")
 
     print("\n" + ("ALL DESCEND-TO-STONE TESTS PASSED" if not _fails
                   else f"{_fails} CHECK(S) FAILED"))
