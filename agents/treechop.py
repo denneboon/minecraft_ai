@@ -269,9 +269,11 @@ class FindAndChopLogs:
 
         # OPPORTUNISTIC CHOP: the crosshair is the authority. If F3 says we're
         # looking directly at a log that's in reach, chop it NOW — never hover
-        # over a reachable log while busy navigating/aiming/scanning. (Only
-        # pre-empts non-chop states; ChopTrunk owns the chop state once in it.)
-        if self._state != "chop":
+        # over a reachable log while busy navigating/aiming/scanning. EXCLUDE the
+        # collect states: interrupting a collect to grab a freshly-seen log
+        # abandons the drop before the dwell finishes (re-introducing the
+        # chopped-N-collected-fewer drop loss). ChopTrunk owns 'chop' once in it.
+        if self._state not in ("chop", "collect", "collect_mine"):
             la = ctx.looking_at
             la_id = getattr(la, "block_id", None) if la is not None else None
             la_pos = (tuple(la.pos) if la is not None

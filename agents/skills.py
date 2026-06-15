@@ -452,6 +452,7 @@ class MineBlock(Skill):
         self._await_ticks = 0          # aimed-but-F3-silent ticks (acquisition)
         self._clear_ticks = 0          # ticks spent clearing occluding leaves
         self._aim_ticks = 0            # consecutive ticks trying to aim/acquire
+        self._oor_ticks = 0            # consecutive out-of-reach frames while mining
         self.broke = False             # did a LOG actually break? (for counting)
 
     def reset(self):
@@ -462,6 +463,7 @@ class MineBlock(Skill):
         self._await_ticks = 0
         self._clear_ticks = 0
         self._aim_ticks = 0            # ticks spent trying to aim/acquire a log
+        self._oor_ticks = 0
         self.broke = False
 
     def _is_log(self, bid) -> bool:
@@ -523,8 +525,14 @@ class MineBlock(Skill):
         if self._mode in ("mine_log", "clear_leaf"):
             _e = _eye(ctx.pose)
             if _e is not None and block_reach_distance(_e, self.voxel) > self.max_reach:
-                return SkillResult(AgentAction(), SkillStatus.FAILED,
-                                   f"target out of reach while mining ({self.voxel})")
+                # Require a SUSTAINED out-of-reach (not a one-frame F3 pose
+                # jitter) before abandoning a mine in progress.
+                self._oor_ticks += 1
+                if self._oor_ticks >= 4:
+                    return SkillResult(AgentAction(), SkillStatus.FAILED,
+                                       f"target out of reach while mining ({self.voxel})")
+            else:
+                self._oor_ticks = 0
 
         # ── MINING a log: frozen camera, hold click until the log is gone ──
         if self._mode == "mine_log":
