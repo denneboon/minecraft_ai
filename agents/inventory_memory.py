@@ -58,6 +58,17 @@ def inventory_counts(snap) -> Dict[str, int]:
     return out
 
 
+def read_open_inventory(ctl):
+    """Read a snapshot from an already-open InventoryController, tolerating
+    controllers whose ``read`` doesn't accept ``stop_when`` (older builds / test
+    doubles). Returns the snapshot, or whatever ``read`` returns (may be None).
+    Shared by the inventory arrangers so the fallback isn't copy-pasted."""
+    try:
+        return ctl.read(stop_when=lambda s: False)
+    except TypeError:
+        return ctl.read()
+
+
 class InventoryMemory:
     """What the bot believes it is carrying, learned from inventory reads."""
 

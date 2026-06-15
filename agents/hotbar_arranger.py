@@ -20,7 +20,7 @@ import time
 from typing import Dict, Optional
 
 from knowledge.item_roles import best_item_for_role
-from agents.inventory_memory import inventory_counts
+from agents.inventory_memory import inventory_counts, read_open_inventory
 from agents.crafting import find_item_slot
 
 # Default layout when the caller doesn't supply one — covers every category the
@@ -52,10 +52,7 @@ def arrange_hotbar(ctl, slot_roles: Optional[Dict[int, str]] = None,
         time.sleep(settle)
         for slot in sorted(layout):
             role = layout[slot]
-            try:
-                snap = ctl.read(stop_when=lambda s: False)
-            except TypeError:
-                snap = ctl.read()
+            snap = read_open_inventory(ctl)
             if snap is None:
                 continue
             best = best_item_for_role(inventory_counts(snap), role, catalog,

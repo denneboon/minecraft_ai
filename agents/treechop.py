@@ -46,6 +46,20 @@ def _is_log_default(bid: str) -> bool:
     return bool(bid) and str(bid).endswith(_LOG_SUFFIXES)
 
 
+def log_predicates(cat):
+    """``(is_log, is_breakable)`` derived from a Catalog — species-agnostic:
+    any log/wood variant (the ``logs`` tag OR a ``_log``/``_wood``/… suffix)
+    counts as a log, and logs + leaves are breakable. Shared by every place
+    that builds the tree-gather FSM so the classification can't drift between
+    them (it was copy-pasted in three spots)."""
+    log_ids = {b.id for b in cat.blocks_in_tag("logs")}
+    leaf_ids = {b.id for b in cat.blocks_in_tag("leaves")}
+    is_log = lambda b: bool(b) and (b in log_ids or str(b).endswith(_LOG_SUFFIXES))
+    is_breakable = lambda b: bool(b) and (
+        is_log(b) or b in leaf_ids or str(b).endswith("_leaves"))
+    return is_log, is_breakable
+
+
 _MOVE_KEYS = ("forward", "backward", "left", "right", "jump", "sprint", "sneak")
 
 
@@ -665,13 +679,8 @@ class TreeChopAgent(BaseAgent):
         from vision.mc_assets import MCAssets
         from control.hotbar import build_hotbar_manager
         cat = Catalog.load(MCAssets.load())
-        log_ids = {b.id for b in cat.blocks_in_tag("logs")}
-        leaf_ids = {b.id for b in cat.blocks_in_tag("leaves")}
-        # Species-agnostic: any log/wood variant (tag OR suffix) — so birch,
-        # oak, spruce, … are all treated identically.
-        is_log = lambda b: bool(b) and (b in log_ids or str(b).endswith(_LOG_SUFFIXES))
-        is_breakable = lambda b: bool(b) and (
-            is_log(b) or b in leaf_ids or str(b).endswith("_leaves"))
+        # Species-agnostic log/leaf predicates (birch, oak, spruce, … alike).
+        is_log, is_breakable = log_predicates(cat)
         self._hotbar = build_hotbar_manager(self._settings, catalog=cat)
         self._fsm = FindAndChopLogs(is_log=is_log, is_breakable=is_breakable,
                                     tool_role="axe", max_logs=self._max_logs)
@@ -857,11 +866,7 @@ def _fsm_for_task(task: dict, cat) -> "FindAndChopLogs":
     count = int(task.get("count", 9999))
     kind = str(task.get("kind", "logs")).lower()
     if kind in ("logs", "log", "wood", "tree", "trees"):
-        log_ids = {b.id for b in cat.blocks_in_tag("logs")}
-        leaf_ids = {b.id for b in cat.blocks_in_tag("leaves")}
-        is_log = lambda b: bool(b) and (b in log_ids or str(b).endswith(_LOG_SUFFIXES))
-        is_brk = lambda b: bool(b) and (
-            is_log(b) or b in leaf_ids or str(b).endswith("_leaves"))
+        is_log, is_brk = log_predicates(cat)
         return FindAndChopLogs(is_log=is_log, is_breakable=is_brk,
                                tool_role=task.get("tool", "axe"), goal_blocks=count)
     match = [str(m).lower() for m in (task.get("match") or [kind])]

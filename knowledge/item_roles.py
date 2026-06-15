@@ -230,10 +230,14 @@ def item_role(item_id: Optional[str],
         except Exception:
             info = None
 
-    # 1. Tools — by tag (authoritative) then by suffix.
-    if info is not None and info.tags:
+    # 1. Tools — by tag (authoritative) then by suffix. Read catalog attributes
+    # defensively (getattr): an alternate/duck-typed Catalog item may not expose
+    # every field, and a missing one should degrade to the suffix heuristics —
+    # not raise out of item_role.
+    tags = getattr(info, "tags", None) if info is not None else None
+    if tags:
         for tag, role in _TOOL_TAG_ROLE.items():
-            if tag in info.tags:
+            if tag in tags:
                 return role
     for suf, role in _TOOL_SUFFIX_ROLE.items():
         if stem.endswith(suf):
@@ -246,13 +250,13 @@ def item_role(item_id: Optional[str],
         return "food"
 
     # 3. Armor — anything with an equipment slot (head/chest/legs/feet).
-    if info is not None and info.equipment_slot in ("head", "chest", "legs", "feet"):
+    if getattr(info, "equipment_slot", None) in ("head", "chest", "legs", "feet"):
         return "armor"
     if any(stem.endswith(s) for s in ("_helmet", "_chestplate", "_leggings", "_boots")):
         return "armor"
 
     # 4. Placeable block (bridging / building material).
-    if info is not None and info.is_block_item:
+    if getattr(info, "is_block_item", False):
         return "blocks"
 
     return None

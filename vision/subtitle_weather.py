@@ -33,7 +33,7 @@ a drop-in for the existing weather plumbing in perception.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
 import cv2

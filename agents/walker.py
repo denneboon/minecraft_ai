@@ -146,11 +146,6 @@ class WalkerConfig:
     # unknown-block policy without subclassing the walker.
     pathfind: PathfinderConfig = field(default_factory=PathfinderConfig)
 
-    # Hard cap on plan attempts per ``set_target`` call. Prevents an
-    # impossible target from blowing the agent loop's per-tick
-    # budget with repeated A* calls.
-    max_plan_attempts: int = 4
-
     # Failed-target cooldown TTL (agent ticks). When a plan to a
     # specific goal fails, that goal is remembered for this many
     # ticks before the walker accepts another ``set_target`` call
@@ -874,7 +869,7 @@ def build_pathwalker_agent(settings: dict) -> PathWalkerAgent:
         if key in cfg_raw and cfg_raw[key] is not None:
             setattr(cfg, key, float(cfg_raw[key]))
     for key in ("stuck_progress_window", "stuck_replan_retries",
-                "max_plan_attempts", "failed_target_ttl_ticks",
+                "failed_target_ttl_ticks",
                 "unexpected_y_drop_blocks", "goal_rescue_radius"):
         if key in cfg_raw and cfg_raw[key] is not None:
             setattr(cfg, key, int(cfg_raw[key]))

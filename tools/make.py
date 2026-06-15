@@ -41,14 +41,12 @@ from agents.inventory_memory import InventoryMemory
 from agents.maker import Maker
 from agents.hotbar_arranger import arrange_hotbar
 from agents.armor_equip import equip_best_armor
-from agents.treechop import FindAndChopLogs, _full_movement
+from agents.treechop import FindAndChopLogs, _full_movement, log_predicates
 from agents.skills import SkillContext, SkillStatus
 from vision.world.f3_target import targeted_block_pos
 from knowledge.catalog import Catalog
 from vision.mc_assets import MCAssets
 from tools.table_craft import run_table_craft
-
-_LOGSUF = ("_log", "_wood", "_stem", "_hyphae")
 
 
 def main(argv=None) -> int:
@@ -109,15 +107,9 @@ def main(argv=None) -> int:
                               inspector=inspector, memory=memory)
     crafter = Crafter(ctl, a, cat)
 
-    log_ids = {b.id for b in cat.blocks_in_tag("logs")}
-    leaf_ids = {b.id for b in cat.blocks_in_tag("leaves")}
-
-    def is_log(bid):
-        return bool(bid) and (bid in log_ids or str(bid).endswith(_LOGSUF))
-
-    def is_breakable(bid):
-        return bool(bid) and (is_log(bid) or bid in leaf_ids
-                              or str(bid).endswith("_leaves"))
+    # Species-agnostic log/leaf predicates (shared with the treechop agent so
+    # the classification can't drift between the gatherer and the FSM).
+    is_log, is_breakable = log_predicates(cat)
 
     def _dispatch(action, apply_look=True):
         if action.hotbar:

@@ -24,17 +24,10 @@ import time
 from typing import Dict, Optional
 
 from knowledge.item_roles import best_armor_for_slot, armor_material_rank
-from agents.inventory_memory import inventory_counts
+from agents.inventory_memory import inventory_counts, read_open_inventory
 from agents.crafting import find_item_slot
 
 _BODY_SLOTS = ("head", "chest", "legs", "feet")
-
-
-def _read(ctl):
-    try:
-        return ctl.read(stop_when=lambda s: False)
-    except TypeError:
-        return ctl.read()
 
 
 def equip_best_armor(ctl, catalog=None, *, log=None,
@@ -49,7 +42,7 @@ def equip_best_armor(ctl, catalog=None, *, log=None,
     try:
         time.sleep(settle)
         for slot in _BODY_SLOTS:
-            snap = _read(ctl)
+            snap = read_open_inventory(ctl)
             if snap is None:
                 continue
             # inventory_counts excludes the armour slots, so this is only LOOSE

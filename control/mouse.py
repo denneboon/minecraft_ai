@@ -431,7 +431,7 @@ class Mouse:
         mouse.right_release()
 
         mouse.scroll(up/down)
-        mouse.move_to_target(dx, dy)
+        mouse.move_to_screen_xy(x, y)    # cursor to an absolute screen point
 
         mouse.flick(dx, dy)              # fast PvP flick
         mouse.track_target(dx, dy)       # intelligent smooth turn
