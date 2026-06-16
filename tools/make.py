@@ -130,9 +130,17 @@ def main(argv=None) -> int:
             cmd = [sys.executable, os.path.abspath(__file__), short, str(cnt)]
             if debug:
                 cmd.append("--debug")
-            print(f"\n[make] ===== isolated item: {short} (fresh process) =====")
-            rc = subprocess.run(cmd).returncode
-            results.append((short, rc == 0))
+            ok = False
+            # One retry per item: the table-craft preflight has a low-rate
+            # "camera won't respond" flake that can hit any item; a fresh
+            # re-attempt clears it, so a ~1/9 flake becomes negligible.
+            for attempt in range(2):
+                tag = "retry" if attempt else "fresh process"
+                print(f"\n[make] ===== isolated item: {short} ({tag}) =====")
+                if subprocess.run(cmd).returncode == 0:
+                    ok = True
+                    break
+            results.append((short, ok))
         n_ok = sum(1 for _, ok in results if ok)
         print("\n[make] kit (isolated): "
               f"{n_ok}/{len(results)} — "
