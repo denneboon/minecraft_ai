@@ -363,6 +363,20 @@ class Capture:
             rect = self._ensure_rect()
         return int(rect[0]), int(rect[1])
 
+    def window_bounds(self) -> Optional[Tuple[int, int, int, int]]:
+        """The captured window's (left, top, right, bottom) in DESKTOP pixels,
+        or ``None`` if it can't be determined. Unlike ``window_origin`` +
+        frame-shape, this is the TRUE window rect straight from the OS, so it
+        stays correct even if the capture ever falls back to a different-sized
+        grab. Used to fence absolute cursor moves inside the MC window so a
+        misread slot can never click the desktop/taskbar."""
+        try:
+            with self._lock:
+                rect = self._ensure_rect()
+            return (int(rect[0]), int(rect[1]), int(rect[2]), int(rect[3]))
+        except Exception:
+            return None
+
     def _ensure_rect(self):
         if self.cfg.hwnd:
             rect = _windows_get_client_rect(self.cfg.hwnd)

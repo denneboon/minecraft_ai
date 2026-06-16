@@ -472,6 +472,18 @@ class Mouse:
         self._last_event_ts = 0.0
         self._gate = gate
 
+        # Optional "play area" — the MC window rect (left, top, right, bottom)
+        # in desktop pixels. When set, every ABSOLUTE cursor move
+        # (``move_to_screen_xy``, used for menu/inventory slot clicks) is
+        # clamped inside it. A misread inventory slot can otherwise send the
+        # cursor onto the desktop/taskbar and right-click it — which opens a
+        # context menu, steals focus from MC, and derails the run. Clamping
+        # keeps a stray click on a (wrong) IN-WINDOW slot instead of off-app.
+        # ``None`` = no fence (tests / standalone). Relative gameplay moves
+        # (``move``/``set_velocity``) are unaffected — MC's locked cursor
+        # ignores absolute position there.
+        self._play_area: Optional[Tuple[int, int, int, int]] = None
+
         # ── Velocity-mode worker state ───────────────────────────
         # When the agent calls ``set_velocity(vx, vy)`` we run a
         # background thread that emits tiny relative-motion events
@@ -542,6 +554,34 @@ class Mouse:
             pass
         self._velocity_thread = None
         self._backend.stop()
+
+    def set_play_area(self, bounds: Optional[Tuple[int, int, int, int]]) -> None:
+        """Fence absolute cursor moves to ``(left, top, right, bottom)`` desktop
+        pixels — the MC window. Pass ``None`` to remove the fence. Set it once
+        the capture window is known; refresh it if the window moves/resizes."""
+        if bounds is None:
+            self._play_area = None
+            return
+        l, t, r, b = (int(bounds[0]), int(bounds[1]), int(bounds[2]), int(bounds[3]))
+        if r < l: l, r = r, l
+        if b < t: t, b = b, t
+        self._play_area = (l, t, r, b)
+
+    def _clamp_play_area(self, x: int, y: int) -> Tuple[int, int]:
+        """Clamp an absolute target inside the play area (a small inset keeps
+        it off the very edge). No-op when no play area is set."""
+        pa = self._play_area
+        if pa is None:
+            return int(x), int(y)
+        l, t, r, b = pa
+        m = 2                                     # inset so we never sit on the frame
+        cx = min(max(int(x), l + m), r - m)
+        cy = min(max(int(y), t + m), b - m)
+        if (cx, cy) != (int(x), int(y)):
+            print(f"[mouse][WARN] absolute move ({int(x)},{int(y)}) is OUTSIDE the "
+                  f"MC window {pa} — clamped to ({cx},{cy}). A container slot was "
+                  f"likely misread (GUI not open?); refusing to click off-app.")
+        return cx, cy
 
     # ── Continuous-velocity motion API ─────────────────────────────
 
@@ -845,6 +885,10 @@ class Mouse:
         """
         if self._gate and not self._gate.allow():
             return
+        # SAFETY FENCE: never let an absolute move leave the MC window. A
+        # misread inventory slot would otherwise reach the desktop/taskbar and
+        # the follow-up click steals focus / opens a context menu.
+        target_x, target_y = self._clamp_play_area(target_x, target_y)
         # Cancel any active velocity command — otherwise the worker
         # keeps emitting relative motion while we're trying to position
         # absolutely, and the cursor judders along a compound path.

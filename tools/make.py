@@ -93,6 +93,12 @@ def main(argv=None) -> int:
     kb = M.build_keyboard(settings, keymap, gate=gate)
     capture = Capture(CaptureConfig(hwnd=hwnd, use_client_area=True, threaded=True))
     safety.start(); mouse.start(); kb.start(); capture.start(); time.sleep(0.3)
+    # Fence absolute cursor moves (inventory/craft slot clicks) to the MC
+    # window so a misread slot can never click the desktop/taskbar.
+    try:
+        mouse.set_play_area(capture.window_bounds())
+    except Exception:
+        pass
 
     f3 = build_f3_reader(settings)
     # F3 OCR is ~86 ms/read — far too slow to run inline every control tick

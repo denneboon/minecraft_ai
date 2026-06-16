@@ -66,6 +66,20 @@ def test_geometry():
         good = abs(norm_angle(y - wy)) < 0.5 and abs(p - wp) < 0.5
         (ok if good else bad)(f"{desc}: yaw={y:.1f}(want {wy}) pitch={p:.1f}(want {wp})")
 
+    # Vertical target + a known current yaw: KEEP the current yaw (don't spin
+    # the camera a full turn chasing a meaningless yaw=0 for a straight look).
+    # This is what lets the straight-down dig settle without flailing the yaw.
+    yd, pd = aim_angles(eye, (0, -5, 0), cur_yaw=123.4)
+    (ok if abs(norm_angle(yd - 123.4)) < 0.01 and abs(pd - 90.0) < 0.5 else bad)(
+        f"straight down keeps current yaw: yaw={yd:.1f}(want 123.4) pitch={pd:.1f}")
+    yu, pu = aim_angles(eye, (0, 5, 0), cur_yaw=-47.0)
+    (ok if abs(norm_angle(yu + 47.0)) < 0.01 and abs(pu + 90.0) < 0.5 else bad)(
+        f"straight up keeps current yaw: yaw={yu:.1f}(want -47.0) pitch={pu:.1f}")
+    # A non-vertical target still computes a real yaw even with cur_yaw given.
+    yh, _ = aim_angles(eye, (5, 0, 0), cur_yaw=123.4)
+    (ok if abs(norm_angle(yh + 90.0)) < 0.5 else bad)(
+        f"horizontal target ignores cur_yaw: yaw={yh:.1f}(want -90)")
+
 
 def test_select_role(cat):
     print("\n[2] SelectRole")
@@ -143,8 +157,8 @@ def test_mine_block(cat):
     hb = _hotbar(cat)
     def log_la():  return SimpleNamespace(pos=vox, block_id="minecraft:oak_log")
 
-    # The instant F3 shows the target log: select axe, then FREEZE + mine —
-    # holding the click and NEVER moving the camera.
+    # Centred on the target log: select axe, then FREEZE + mine — holding the
+    # click and NEVER moving the camera.
     sk = MineBlock(vox, tool_role="axe", is_target=LOG, is_passthrough=LEAFLOG)
     ctx = SkillContext(pose=_pose(yaw=yaw, pitch=pitch), hotbar=hb, looking_at=log_la())
     saw_tool = saw_attack = saw_look = False
@@ -156,6 +170,32 @@ def test_mine_block(cat):
     (ok if saw_tool else bad)("selected axe before mining")
     (ok if saw_attack else bad)("holds attack on the confirmed log")
     (ok if not saw_look else bad)("NEVER moves the camera while mining a log")
+
+    # Camera stays FROZEN mid-mine even when the pose JITTERS off-centre — the
+    # real failure the user saw: a re-centring nudge chases jittery F3 and
+    # slips the crosshair off (and, at an angle, an in-between block intercepts
+    # the dig). Once latched we must emit ZERO look regardless of pose noise.
+    sk_j = MineBlock(vox, tool_role=None, is_target=LOG)
+    ctx_j = SkillContext(pose=_pose(yaw=yaw, pitch=pitch), looking_at=log_la())
+    sk_j.tick(ctx_j)                                  # centred -> latch mine_log
+    jittered_look = False
+    for dphi in (3.0, -4.0, 2.5, -1.5, 5.0):
+        ctx_j.pose = _pose(yaw=yaw + dphi, pitch=pitch - dphi)   # pose wobbles
+        r = sk_j.tick(ctx_j)
+        if r.action.look_dx or r.action.look_dy: jittered_look = True
+    (ok if not jittered_look else bad)(
+        "stays frozen mid-mine despite pose jitter (no re-centre nudge)")
+
+    # Aim-THEN-freeze: a log under the crosshair but NOT yet centred must keep
+    # AIMING (move the camera toward centre), not latch on the edge.
+    sk_a = MineBlock(vox, tool_role=None, is_target=LOG)
+    off = SkillContext(pose=_pose(yaw=yaw - 30, pitch=pitch),     # 30deg off
+                       looking_at=SimpleNamespace(pos=(9, 9, 9),
+                                                  block_id="minecraft:oak_log"))
+    r = sk_a.tick(off)
+    (ok if r.status == SkillStatus.RUNNING and (r.action.look_dx or r.action.look_dy)
+        and r.action.interact != "attack" else bad)(
+        "off-centre: aims toward the target first (no mine yet)")
 
     # Log breaks: F3 stops showing a log -> after a brief grace, DONE + broke.
     ctx.looking_at = None
@@ -253,6 +293,32 @@ def test_mine_block(cat):
     rr = skr.tick(SkillContext(pose=_pose(yaw=0, pitch=0)))
     (ok if rr.status == SkillStatus.FAILED and "out of reach" in rr.info else bad)(
         f"out-of-reach target -> abandon ({rr.status})")
+
+    # Closed-loop straight-DOWN dig (DescendToStone's per-block mine). Starting
+    # from the EXACT pose the live dig froze at (yaw -78.7, pitch 41.4), the
+    # aim must converge — camera turning from the emitted look deltas, as in
+    # the game — and latch to mining, WITHOUT the yaw spinning a full turn (the
+    # vertical-aim bug that left the camera flailing and never settling).
+    DIG = lambda b: bool(b)                  # any block is safe-dig (like the dig)
+    below = (5, 63, 5)                       # directly under feet at (5.5, 64, 5.5)
+    skd = MineBlock(below, tool_role=None, is_target=DIG, is_passthrough=DIG)
+    pose = _pose(x=5.5, y=64.0, z=5.5, yaw=-78.7, pitch=41.4)
+    ppd = 6.5; latched = False; max_yaw = 0.0
+    for _ in range(80):
+        # F3 names the block below only once we're pointed steeply down.
+        la = (SimpleNamespace(pos=below, block_id="minecraft:stone")
+              if pose.pitch > 80.0 else None)
+        r = skd.tick(SkillContext(pose=_pose(x=pose.x, y=pose.y, z=pose.z,
+                                             yaw=pose.yaw, pitch=pose.pitch),
+                                  looking_at=la, px_per_deg=ppd))
+        if skd._mode == "mine_log":
+            latched = True; break
+        pose.yaw = norm_angle(pose.yaw + (r.action.look_dx or 0) / ppd)
+        pose.pitch = max(-90.0, min(90.0, pose.pitch + (r.action.look_dy or 0) / ppd))
+        max_yaw = max(max_yaw, abs(norm_angle(pose.yaw - (-78.7))))
+    (ok if latched else bad)(f"straight-down dig aim latches to mining (mode={skd._mode})")
+    (ok if max_yaw < 20.0 else bad)(
+        f"yaw barely moves for a vertical look (excursion {max_yaw:.0f}deg < 20)")
 
 
 def test_pillar_up(cat):

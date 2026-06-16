@@ -83,15 +83,27 @@ def norm_angle(a: float) -> float:
 
 
 def aim_angles(eye: Tuple[float, float, float],
-               target: Tuple[float, float, float]) -> Tuple[float, float]:
+               target: Tuple[float, float, float],
+               cur_yaw: Optional[float] = None) -> Tuple[float, float]:
     """Desired (yaw, pitch) in MC degrees to look from ``eye`` at
     ``target`` (both world xyz). MC: yaw 0 = +Z increasing clockwise;
-    pitch +90 = straight down. atan2(dy,0) is well-defined (±90)."""
+    pitch +90 = straight down. atan2(dy,0) is well-defined (±90).
+
+    For a target directly above/below the eye the horizontal distance is
+    ~0, so yaw is INDETERMINATE — ``atan2(0,0)`` collapses it to 0. Aiming
+    blindly at yaw 0 then forces a full spurious spin of the camera for a
+    purely vertical look (e.g. mining the block straight below while
+    digging down), and the aimer can't settle because it's chasing a
+    meaningless yaw. When ``cur_yaw`` is given we KEEP it for a vertical
+    target — only the pitch needs to change to look straight up/down."""
     dx = target[0] - eye[0]
     dy = target[1] - eye[1]
     dz = target[2] - eye[2]
-    yaw = math.degrees(math.atan2(-dx, dz))
     horiz = math.hypot(dx, dz)
+    if horiz < 1e-3 and cur_yaw is not None:
+        yaw = float(cur_yaw)
+    else:
+        yaw = math.degrees(math.atan2(-dx, dz))
     pitch = math.degrees(-math.atan2(dy, horiz))
     return yaw, pitch
 
@@ -409,7 +421,7 @@ class LookAtVoxel(Skill):
         if eye is None:
             return SkillResult(AgentAction(), SkillStatus.BLOCKED, "no pose")
         tgt = (self.voxel[0] + 0.5, self.voxel[1] + 0.5, self.voxel[2] + 0.5)
-        yaw, pitch = aim_angles(eye, tgt)
+        yaw, pitch = aim_angles(eye, tgt, cur_yaw=getattr(ctx.pose, "yaw", None))
         dx, dy, aimed = self.aim.step(ctx, yaw, pitch)
         if aimed:
             return SkillResult(AgentAction(), SkillStatus.DONE, "aimed")
@@ -530,29 +542,6 @@ class MineBlock(Skill):
                 return SkillResult(AgentAction(), SkillStatus.FAILED, "timed out mining")
             return SkillResult(AgentAction(interact="attack"), SkillStatus.RUNNING, info)
 
-        def _mine_centred(info):
-            # Like _hold, but keeps the crosshair CENTRED on the target voxel
-            # while mining. Freezing the camera the instant F3 first flickers
-            # "log" can latch it on the block's EDGE; pose jitter then slips the
-            # crosshair off and MC RESETS break progress, so it punches forever
-            # without breaking (live-observed: 10 s, never broke). A small
-            # correction toward the FIXED voxel centre (not chasing jittery F3)
-            # holds it on the block; capped so it can't swing onto a neighbour.
-            self._mining_ticks += 1
-            if self._mining_ticks > self.max_ticks:
-                return SkillResult(AgentAction(), SkillStatus.FAILED, "timed out mining")
-            e = _eye(ctx.pose)
-            if e is None:
-                return SkillResult(AgentAction(interact="attack"),
-                                   SkillStatus.RUNNING, info)
-            c = (self.voxel[0] + 0.5, self.voxel[1] + 0.5, self.voxel[2] + 0.5)
-            yaw, pitch = aim_angles(e, c)
-            dx, dy, _ = self.aim.step(ctx, yaw, pitch)
-            cap = 6                              # ~1 deg/tick: nudge, never swing off
-            dx = max(-cap, min(cap, int(dx))); dy = max(-cap, min(cap, int(dy)))
-            return SkillResult(AgentAction(interact="attack", look_dx=dx, look_dy=dy),
-                               SkillStatus.RUNNING, info)
-
         # While LATCHED onto a target (mine_log / clear_leaf), keep checking it's
         # in INTERACTION reach. F3's targeted-block ray reaches ~20 blocks — far
         # past the 4.5 we can actually hit — so the crosshair can rest on a log
@@ -579,7 +568,7 @@ class MineBlock(Skill):
             # crosshair falls through and the targeted position changes/clears.
             if self._is_log(la_id) or (la_id is None and on_target_raw):
                 self._silent = 0
-                return _mine_centred("mining log")   # hold crosshair ON the block
+                return _hold("mining log")   # camera FROZEN — crosshair stays put
             self._silent += 1
             if self._silent <= 3:        # ride out a brief F3 OCR gap, still frozen
                 return _hold("mining log (F3 gap)")
@@ -629,36 +618,49 @@ class MineBlock(Skill):
                 return SkillResult(AgentAction(hotbar=slot), SkillStatus.RUNNING,
                                    f"select {self.tool_role} slot {slot}")
 
-        # THE MOMENT F3 shows a LOG under the crosshair: LATCH -> freeze + mine.
-        # NB: do NOT reset _aim_ticks here — a crosshair that just FLICKERS onto
-        # a log (edge-of-reach jitter) would keep resetting it and never time
-        # out. _aim_ticks counts TOTAL aim-phase ticks this MineBlock; a real
-        # mine sits in mine_log (not aiming) so it never approaches the cap.
-        if self._is_log(la_id):
-            self._mode = "mine_log"; self._silent = 0
-            return _hold("log in crosshair -> mining")
-
-        # Id unreadable, but F3's raw POSITION confirms the crosshair is on the
-        # EXACT voxel we set out to mine (the world-map classified it a log, and
-        # the _Aimer has us pointed at it). Trust position + that prior
-        # classification and mine — otherwise busy-scene id-garble (F3 '?')
-        # makes the bot stare at a real log it can't "confirm" and abandon.
-        # A READABLE non-log id still abandons below, so builds stay safe.
-        if la_id is None and on_target_raw:
-            self._mode = "mine_log"; self._silent = 0
-            return _hold("on-target by position (id unreadable) -> mining")
-
-        # Otherwise AIM toward the target voxel — the only state that moves.
+        # AIM-THEN-FREEZE. The camera moves in EXACTLY ONE place — here, the
+        # aim phase — and the move STOPS the instant we're centred on the
+        # target voxel. We compute the aim FIRST, then only latch into a
+        # (frozen) mining mode once the crosshair is on the voxel CENTRE.
+        #
+        # Why centre, not "the moment F3 flickers a log": latching on first
+        # contact pins the crosshair at the block's EDGE, where (a) tiny pose
+        # jitter slips it onto a neighbour and MC resets the break, and (b) an
+        # oblique line of sight lets a block BETWEEN us and the target
+        # intercept the dig. Aiming dead-on first means the sightline is
+        # straight at the face and the crosshair has margin to stay on it
+        # while frozen. The OLD fix (nudge the camera mid-mine to re-centre)
+        # is exactly the "moving the mouse while mining" we must never do.
         eye = _eye(ctx.pose)
         tgt = (self.voxel[0] + 0.5, self.voxel[1] + 0.5, self.voxel[2] + 0.5)
-        yaw, pitch = aim_angles(eye, tgt)
+        yaw, pitch = aim_angles(eye, tgt, cur_yaw=getattr(ctx.pose, "yaw", None))
         dx, dy, aimed = self.aim.step(ctx, yaw, pitch)
-        locked = on_target or aimed
+        # Centred = the aimer settled on the voxel-centre angle, OR F3's ray
+        # confirms the crosshair is on our exact voxel (a stronger real-world
+        # signal than the eye-height angle estimate). NB: do NOT reset
+        # _aim_ticks on flicker — a crosshair that merely grazes the target
+        # would keep resetting it and never time out.
+        centred = aimed or on_target or on_target_raw
+
+        if not centred:
+            # Still aiming. If a READABLE non-target, non-passthrough block is
+            # dead-on our voxel, it's mislabelled — abandon now rather than
+            # grinding the aim into a build/terrain block we'd never mine.
+            if (la_id is not None and on_target
+                    and not self._is_log(la_id) and not self._is_pass(la_id)):
+                return SkillResult(AgentAction(), SkillStatus.FAILED,
+                                   f"target is {la_id}, not a log — abandon")
+            return SkillResult(AgentAction(look_dx=dx, look_dy=dy),
+                               SkillStatus.RUNNING, "aiming at target")
+
+        # Centred. Freeze the camera and decide what's under the crosshair.
+        if self._is_log(la_id) or (la_id is None and on_target_raw):
+            # A log (or an unreadable id whose raw position is our exact voxel,
+            # already map-classified a log) -> mine it, camera FROZEN.
+            self._mode = "mine_log"; self._silent = 0
+            return _hold("centred on log -> mining")
 
         if la_id is not None:            # a NON-log block under the crosshair
-            if not locked:
-                return SkillResult(AgentAction(look_dx=dx, look_dy=dy),
-                                   SkillStatus.RUNNING, "aiming at target")
             if on_target:                # the target voxel itself isn't a log
                 return SkillResult(AgentAction(), SkillStatus.FAILED,
                                    f"target is {la_id}, not a log — abandon")
@@ -668,15 +670,13 @@ class MineBlock(Skill):
             return SkillResult(AgentAction(), SkillStatus.FAILED,
                                f"{la_id} blocks the target — abandon")
 
-        # F3 silent (crosshair on sky / unreadable).
-        if not locked:
-            return SkillResult(AgentAction(look_dx=dx, look_dy=dy),
-                               SkillStatus.RUNNING, "aiming at target")
+        # Centred but F3 named no block and gave no raw position -> wait a few
+        # ticks for the read to resolve, then abandon (bounded, no hang).
         self._await_ticks += 1
         if self._await_ticks > 10:
             return SkillResult(AgentAction(), SkillStatus.FAILED,
-                               "locked but F3 showed no block — abandon")
-        return SkillResult(AgentAction(), SkillStatus.RUNNING, "locked; awaiting F3")
+                               "centred but F3 showed no block — abandon")
+        return SkillResult(AgentAction(), SkillStatus.RUNNING, "centred; awaiting F3")
 
 
 class PillarUp(Skill):
@@ -1489,7 +1489,7 @@ class PlaceBlock(Skill):
                 if e is not None:
                     c = (self.placed_at[0] + 0.5, self.placed_at[1] + 0.5,
                          self.placed_at[2] + 0.5)
-                    yaw, pitch = aim_angles(e, c)
+                    yaw, pitch = aim_angles(e, c, cur_yaw=getattr(pose, "yaw", None))
                     adx, ady, _ = self._aimer.step(ctx, yaw, pitch)
             if self._verify > self.verify_ticks:
                 # Couldn't visually confirm. If this was the PRIME placement, the

@@ -332,14 +332,72 @@ def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
             print(f"[table] table placed at {table_pos}"
                   f"{' (already open via place-click)' if gui_already_open else ''}")
 
-        # 3. Open it — UNLESS a click during placement already opened it. For the
-        # pillar-placed table, aim straight DOWN at it (it's under our feet) then
-        # right-click. SETTLE before reading: the GUI needs a moment to fully
-        # render its slots, or the first read sees a half-open grid.
+        # 3. Open it — UNLESS a click during placement already opened it.
+        def _camera_frozen():
+            """True if a relative look nudge does NOT turn the view — i.e. a GUI
+            is open (MC unlocks the cursor, so look input no longer rotates the
+            camera). This is the reliable 'is a container open?' signal: the
+            menu detector only knows the PAUSE menu, NOT a crafting-table GUI,
+            so checking the camera response is what actually distinguishes
+            'table opened' from 'still in gameplay'."""
+            p0 = _pose_now(); y0 = getattr(p0, "yaw", None)
+            mouse.move(70, 0); time.sleep(0.28)
+            p1 = _pose_now(); y1 = getattr(p1, "yaw", None)
+            moved = (y0 is not None and y1 is not None
+                     and abs(norm_angle(float(y1) - float(y0))) > 1.5)
+            if moved:
+                mouse.move(-70, 0); time.sleep(0.1)   # undo the probe turn
+            return not moved
+
+        def _open_table_below(tries=5):
+            """Open a table directly UNDER the feet, VERIFIED by camera freeze.
+            We can't trust an aim skill to confirm we're looking straight down
+            (F3 under-reads pitch at steep angles — reported 84° while really
+            ~90°), so we FORCE the look straight down with relative nudges,
+            right-click, and confirm the view FROZE (= a GUI opened). A
+            non-placeable slot is selected first so a stray right-click can only
+            OPEN the table, never place a block onto it."""
+            safe = hotbar.best_slot_for("pickaxe") if hotbar is not None else None
+            if safe is not None:
+                kb.tap(str(int(safe))); time.sleep(0.2)
+            for k in range(tries):
+                # Force straight-down: a few relative nudges past 90° clamp at
+                # straight-down regardless of what F3 reads. These land directly
+                # (no fresh-pose gating) so the camera actually moves. Only do
+                # this while still in GAMEPLAY — once a GUI is open these would
+                # move the GUI cursor (the 'cursor shot straight down' bug).
+                for _ in range(8):
+                    mouse.move(0, 40); time.sleep(0.02)
+                time.sleep(0.15)
+                mouse.right_click()
+                time.sleep(0.6)
+                if _camera_frozen():
+                    # A GUI is open. Make sure it isn't the PAUSE menu (also
+                    # freezes the view) — if it is, resume and retry.
+                    det = (menu_detector.detect(capture.get_frame())
+                           if menu_detector is not None else None)
+                    if det is not None and det.menu == "pause":
+                        M.ensure_playing(capture, menu_detector, kb); time.sleep(0.2)
+                        continue
+                    if debug:
+                        print(f"[table] table opened + verified (view froze, "
+                              f"try {k+1}/{tries})")
+                    return True
+                elif debug:
+                    print(f"[table] open try {k+1}/{tries}: view still live "
+                          f"(not open) — retrying")
+            return False
+
         if pillar_place:
-            drive(LookAtVoxel(table_pos, tol_deg=5.0), "aim-open",
-                  max_secs=4.0, debug=debug)
-            mouse.right_click()
+            if not _open_table_below():
+                # Couldn't open it — do NOT blind-click slots (that's how the
+                # cursor ends up off-window). Reclaim the table and fail clean.
+                print("[table] could not open the pillar-placed table — reclaiming")
+                drive(LookAtVoxel(table_pos, tol_deg=4.0), "aim-break",
+                      max_secs=3.0, debug=debug)
+                bk = BreakLookedAt(expect_pos=table_pos)
+                drive(bk, "break", max_secs=14.0, debug=debug)
+                return False, "couldn't open the pillar-placed table"
         elif not gui_already_open:
             mouse.right_click()
         time.sleep(0.9)
@@ -393,6 +451,10 @@ def main(argv=None) -> int:
     kb = M.build_keyboard(settings, keymap_flat, gate=gate)
     capture = Capture(CaptureConfig(hwnd=hwnd, use_client_area=True, threaded=True))
     safety.start(); mouse.start(); kb.start(); capture.start(); time.sleep(0.3)
+    try:
+        mouse.set_play_area(capture.window_bounds())   # fence slot clicks to MC
+    except Exception:
+        pass
 
     f3 = build_f3_reader(settings)
     wp = build_world_perception(settings)
