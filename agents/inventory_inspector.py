@@ -117,6 +117,12 @@ class InspectorConfig:
     # hovered.
     skip_above_confidence: float = 0.50
 
+    # Once an item has been CONFIRMED this session (a hover, or a read at/above
+    # ``skip_above_confidence``), trust the recogniser's best guess of that SAME
+    # item again at this lower bar — it re-reads common blocks just under 0.50,
+    # so this stops re-hovering already-identified items on every pass.
+    trust_confirmed_above: float = 0.30
+
 
 @dataclass
 class InspectionResult:
@@ -169,6 +175,15 @@ class InventoryInspector:
         # carries the "stop checking it" win within the current session too. A
         # slot drops out of the set the moment a read shows a real item there.
         self._session_empty: set = set()
+        # Item-identity memory for THIS session, so we don't re-hover slots we
+        # already identified. ``_session_items`` maps slot -> confirmed id (the
+        # recogniser reads common blocks just under the skip bar, so without this
+        # it re-hovers cobble/stick/table on EVERY read). ``_session_confirmed``
+        # is the set of ids confirmed at least once — once we've validated the
+        # recogniser CAN read an item, we trust its best guess of that same item
+        # again at a lower bar, even after it bounces to a different slot.
+        self._session_items: dict = {}
+        self._session_confirmed: set = set()
 
     def _move_cursor_to(self, x: int, y: int) -> None:
         """Eased reach to (x, y) if a Mouse instance is wired in,
@@ -297,10 +312,39 @@ class InventoryInspector:
             if content is None:
                 continue
             if content.is_empty and not include_empty:
+                self._session_items.pop(name, None)   # slot emptied -> forget its id
                 continue
             if (content.item is not None
                     and content.confidence >= self.cfg.skip_above_confidence):
                 self._session_empty.discard(name)     # a real item showed up
+                self._session_items[name] = content.item
+                self._session_confirmed.add(content.item)
+                continue
+            # Same slot, same item we already CONFIRMED this session -> trust it
+            # (the recogniser reads it just under 0.50). Rescue an unsure (None)
+            # read by applying the remembered id; drop the memory if the slot now
+            # reads as a CONFIDENT different item (its contents changed).
+            cached = self._session_items.get(name)
+            if cached is not None and not content.is_empty:
+                if content.item in (None, cached):
+                    if content.item != cached:
+                        snap.slots[name] = SlotContent(
+                            item=cached, count=content.count,
+                            durability=content.durability, enchanted=content.enchanted,
+                            confidence=max(content.confidence,
+                                           self.cfg.skip_above_confidence),
+                            score=content.score, second=content.item,
+                            source="session")
+                    self._session_empty.discard(name)
+                    continue
+                self._session_items.pop(name, None)   # changed -> re-identify below
+            # Item we've confirmed before, now best-guessed here above the lower
+            # bar (handles an item that bounced to a NEW slot) -> trust, no hover.
+            if (content.item is not None and not content.is_empty
+                    and content.item in self._session_confirmed
+                    and content.confidence >= self.cfg.trust_confirmed_above):
+                self._session_items[name] = content.item
+                self._session_empty.discard(name)
                 continue
             # Already learned empty this session (and still reads non-item) ->
             # don't re-hover it. Mark it empty in the snapshot and move on.
@@ -324,9 +368,12 @@ class InventoryInspector:
                     self._save_sample_from_frame(
                         pre_hover_frame, slot, EMPTY_SAMPLE_LABEL)
                 self._session_empty.add(name)
+                self._session_items.pop(name, None)   # hover found nothing -> forget
                 _mark_slot_empty(snap, name)
                 continue
             self._session_empty.discard(name)         # hover found a real item
+            self._session_items[name] = result.item_id           # remember it
+            self._session_confirmed.add(result.item_id)          # ...and the id
             results[name] = result
             # Update the snapshot in-place with ground truth.
             snap.slots[name] = SlotContent(

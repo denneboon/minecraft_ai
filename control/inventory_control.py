@@ -264,6 +264,7 @@ class InventoryController:
         """Move src's whole stack to (empty) dst via a carry hotbar slot —
         two number-key swaps, no drag. Returns the carry slot used."""
         n = self.carry_slot(snap)
+        time.sleep(self._settle)              # let the GUI settle so the swap lands
         self.number_swap(src, n)              # src stack -> carry
         self.number_swap(dst, n)              # carry -> dst (dst was empty)
         return n
@@ -274,6 +275,11 @@ class InventoryController:
         return the remainder."""
         if not cells:
             return
+        # Settle first: a pick-up click on an un-rendered frame (right after a
+        # prior craft moved stacks) silently no-ops, and then EVERY right-click
+        # drops nothing -> empty cells (the intermittent grid under-fill). The
+        # extra beat lets the screen finish drawing before we grab the stack.
+        time.sleep(self._settle)
         self.left_click(src)                  # whole stack onto cursor
         for cell in cells:
             self.right_click(cell)            # drop one
