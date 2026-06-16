@@ -267,6 +267,15 @@ def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
         ctl.close(); time.sleep(0.3)
 
         def _pose_now():
+            # Prefer the background F3 worker — it applies the pose filter and
+            # reads continuously, so it resolves a yaw where a single inline
+            # read garbles (the live "camera won't respond" was actually an
+            # UNREADABLE pose, not a frozen view). Its reading carries .yaw, so
+            # the camera-live nudge check can use it directly.
+            if f3_worker is not None:
+                r = f3_worker.latest()
+                if r is not None and getattr(r, "yaw", None) is not None:
+                    return r
             fr = capture.get_frame()
             return wp.update(fr, f3.read(fr)).pose
 
@@ -276,24 +285,50 @@ def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
             confirm the pose moves; if a menu is actually OPEN, close it (or
             resume from pause). NEVER blind-escape — escape with nothing open
             opens the PAUSE menu (the live bug)."""
-            for _ in range(tries):
+            saw_real_freeze = False
+            for i in range(tries):
                 p0 = _pose_now(); y0 = getattr(p0, "yaw", None)
                 mouse.track_target(90, 0); time.sleep(0.30)
                 p1 = _pose_now(); y1 = getattr(p1, "yaw", None)
-                if y0 is not None and y1 is not None \
-                        and abs(norm_angle(float(y1) - float(y0))) > 1.0:
+                readable = (y0 is not None and y1 is not None)
+                dy = abs(norm_angle(float(y1) - float(y0))) if readable else None
+                if dy is not None and dy > 1.0:
                     mouse.track_target(-90, 0); time.sleep(0.15)
+                    if debug:
+                        print(f"[table] camera-live OK (try {i+1}, dyaw={dy:.1f})")
                     return True
-                # View didn't move. Only escape if a GUI is genuinely open.
                 det = (menu_detector.detect(capture.get_frame())
                        if menu_detector is not None else None)
+                if debug:
+                    print(f"[table] camera-live try {i+1}: "
+                          f"{'FROZEN' if readable else 'UNREADABLE'} (y0={y0} y1={y1} "
+                          f"dyaw={dy}) menu={getattr(det,'menu',None)} "
+                          f"open={getattr(det,'open',None)}")
                 if det is not None and det.menu == "pause":
+                    saw_real_freeze = True
                     M.ensure_playing(capture, menu_detector, kb); time.sleep(0.2)
                 elif det is not None and det.open:
+                    saw_real_freeze = True
                     kb.tap("escape"); time.sleep(0.35)
+                elif readable:
+                    # Readable pose that DIDN'T move + no menu -> a genuine stuck
+                    # view (rare). Undo our nudge and keep probing.
+                    saw_real_freeze = True
+                    mouse.track_target(-90, 0); time.sleep(0.2)
                 else:
-                    time.sleep(0.25)         # no menu — wait for mouse re-grab
-            return False
+                    # UNREADABLE pose — F3 just couldn't OCR this frame's yaw.
+                    # That is NOT evidence of a frozen camera, so don't treat it
+                    # as one. Undo the nudge and wait for a readable frame.
+                    mouse.track_target(-90, 0); time.sleep(0.2)
+            # Never confirmed the view turned. If every failure was an UNREADABLE
+            # pose (no real freeze, no menu), the camera is almost surely fine —
+            # F3 just couldn't read it — so PROCEED rather than abort a good
+            # craft (the live "camera won't respond" was exactly this). Only give
+            # up when we actually observed a real freeze / stuck menu.
+            if debug:
+                print(f"[table] camera-live done: "
+                      f"{'GAVE UP (real freeze)' if saw_real_freeze else 'proceeding (only unreadable poses)'}")
+            return not saw_real_freeze
 
         if not _ensure_camera_live():
             return False, "camera won't respond (a menu may be stuck open)"

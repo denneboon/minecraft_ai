@@ -469,6 +469,25 @@ def main(argv=None) -> int:
         return 0 if all_ok else 1
     finally:
         _stop()
+        # SAFETY on exit: if the game auto-paused on a focus blip, it can be left
+        # sitting on the pause menu. Park the OS cursor on a SAFE non-button edge
+        # (the left side has no buttons — they're horizontally centred) so it is
+        # NEVER left hovering 'Save and Quit to Title', and resume the pause if
+        # MC is still focused (ensure_playing is input-gated, so it no-ops when
+        # MC isn't foreground — we don't yank focus back from the user).
+        try:
+            b = capture.window_bounds()
+            if b:
+                import ctypes as _ct
+                _ct.windll.user32.SetCursorPos(int(b[0]) + 12,
+                                               (int(b[1]) + int(b[3])) // 2)
+        except Exception:
+            pass
+        try:
+            if menu_detector is not None:
+                M.ensure_playing(capture, menu_detector, kb)
+        except Exception:
+            pass
         M.bot_stopped_banner(*result)
         try:
             f3w.stop()
