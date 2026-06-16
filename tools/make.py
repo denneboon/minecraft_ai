@@ -116,6 +116,29 @@ def main(argv=None) -> int:
     goals = _parse_goals(pos)
     debug = "--debug" in argv
 
+    # --isolate: run each goal in its OWN fresh process. The table-craft state
+    # (camera/GUI) can corrupt across items in one long process, randomly
+    # dropping an item on a transition ("camera won't respond"); a fresh process
+    # per item starts from a clean state, so each gets its full single-item
+    # reliability. Best for the multi-item demo (`make kit --isolate`).
+    if ("--isolate" in argv or "kit" in pos) and len(goals) > 1 \
+            and "--no-isolate" not in argv:
+        import subprocess
+        results = []
+        for tgt, cnt in goals:
+            short = tgt.split(":")[-1]
+            cmd = [sys.executable, os.path.abspath(__file__), short, str(cnt)]
+            if debug:
+                cmd.append("--debug")
+            print(f"\n[make] ===== isolated item: {short} (fresh process) =====")
+            rc = subprocess.run(cmd).returncode
+            results.append((short, rc == 0))
+        n_ok = sum(1 for _, ok in results if ok)
+        print("\n[make] kit (isolated): "
+              f"{n_ok}/{len(results)} — "
+              + ", ".join(f"{s}={'OK' if ok else 'FAIL'}" for s, ok in results))
+        return 0 if n_ok == len(results) else 1
+
     wins = _find_minecraft_hwnd()
     if not wins:
         print("[make] Minecraft not found"); return 2
