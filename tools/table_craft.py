@@ -333,27 +333,40 @@ def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
                   f"{' (already open via place-click)' if gui_already_open else ''}")
 
         # 3. Open it — UNLESS a click during placement already opened it.
-        def _camera_frozen():
-            """True if a relative look nudge does NOT turn the view — i.e. a GUI
-            is open (MC unlocks the cursor, so look input no longer rotates the
-            camera). This is the reliable 'is a container open?' signal: the
-            menu detector only knows the PAUSE menu, NOT a crafting-table GUI,
-            so checking the camera response is what actually distinguishes
-            'table opened' from 'still in gameplay'."""
+        def _probe_camera():
+            """One look nudge: True if it TURNED the view, False if not, None if
+            the pose was unreadable."""
             p0 = _pose_now(); y0 = getattr(p0, "yaw", None)
             mouse.move(70, 0); time.sleep(0.28)
             p1 = _pose_now(); y1 = getattr(p1, "yaw", None)
             if y0 is None or y1 is None:
-                # Couldn't read the pose at all — INCONCLUSIVE. Don't claim the
-                # GUI opened (a false 'frozen' would march the bot on to craft a
-                # table that isn't open); treat as 'not frozen' so the open
-                # retries rather than proceeding on a bad assumption.
-                mouse.move(-70, 0); time.sleep(0.1)
-                return False
+                mouse.move(-70, 0); time.sleep(0.05)
+                return None
             moved = abs(norm_angle(float(y1) - float(y0))) > 1.5
             if moved:
-                mouse.move(-70, 0); time.sleep(0.1)   # undo the probe turn
-            return not moved
+                mouse.move(-70, 0); time.sleep(0.05)   # undo the probe turn
+            return moved
+
+        def _camera_frozen():
+            """True if look nudges do NOT turn the view — i.e. a GUI is open (MC
+            unlocks the cursor, so look input no longer rotates the camera). The
+            menu detector only knows the PAUSE menu, NOT a crafting GUI, so the
+            camera response is what distinguishes 'table open' from 'gameplay'.
+
+            We re-probe before concluding FROZEN: right after a GUI CLOSES, MC
+            briefly hasn't re-grabbed the mouse, so a single probe reads as
+            'frozen' even though we're back in gameplay — that false positive
+            made the verified-close press Escape and pop the PAUSE menu (the
+            'keeps pausing' symptom). If EITHER probe turns the view it's
+            gameplay; only a view that stays put across both is really frozen."""
+            r = _probe_camera()
+            if r is None:
+                return False            # unreadable -> don't claim a GUI is open
+            if r:
+                return False            # turned -> gameplay
+            time.sleep(0.2)             # let a just-closed GUI finish re-grabbing
+            r2 = _probe_camera()
+            return r2 is False          # frozen only if it STAYS put (not None)
 
         def _open_table(straight_down, tries=5):
             """Open the just-placed table, VERIFIED by camera freeze, retrying.
@@ -405,6 +418,24 @@ def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
                           f"(not open) — retrying")
             return False
 
+        def _reclaim_table():
+            """Break the placed table back into the inventory. For a PILLAR
+            table (under the feet) FORCE the look straight down — LookAtVoxel
+            can't confirm the steep angle (F3 under-reads pitch), so the
+            aim-break TIMES OUT and the table is LOST, which then makes the
+            maker re-gather wood to remake it. The forced nudges put the
+            crosshair on the table directly. A ground table is aimed normally."""
+            if pillar_place:
+                for _ in range(8):
+                    mouse.move(0, 40); time.sleep(0.02)
+                time.sleep(0.2)
+            else:
+                drive(LookAtVoxel(table_pos, tol_deg=4.0), "aim-break",
+                      max_secs=3.0, debug=debug)
+            bk = BreakLookedAt(expect_pos=table_pos)
+            drive(bk, "break", max_secs=14.0, debug=debug)
+            return bk.broke
+
         # Trust a GUI that a place-click already opened ONLY if the view is in
         # fact frozen now; otherwise open it ourselves (verified, retrying).
         if not (gui_already_open and _camera_frozen()):
@@ -413,10 +444,8 @@ def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
                 # cursor ends up off-window) and do NOT leave the table behind
                 # for the maker to remake. Reclaim it and fail clean.
                 print("[table] could not open the placed table — reclaiming")
-                drive(LookAtVoxel(table_pos, tol_deg=4.0), "aim-break",
-                      max_secs=3.0, debug=debug)
-                bk = BreakLookedAt(expect_pos=table_pos)
-                drive(bk, "break", max_secs=14.0, debug=debug)
+                got_back = _reclaim_table()
+                print(f"[table] table reclaimed: {got_back}")
                 return False, "couldn't open the placed table"
         time.sleep(0.9)
 
@@ -448,18 +477,11 @@ def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
                 break
             kb.tap("escape"); time.sleep(0.3)
 
-        # 5. Break the table back (by POSITION — its id won't OCR). Re-aim at
-        # it FIRST: closing the table GUI leaves the camera wherever it was
-        # when the GUI opened (not necessarily on the table), and BreakLookedAt
-        # only attacks while the crosshair is ON the voxel — it never aims
-        # itself, so a left-over off-target view would idle the break to its
-        # timeout. LookAtVoxel returns DONE immediately when already aimed, so
-        # this is ~free in the common case.
-        drive(LookAtVoxel(table_pos, tol_deg=4.0), "aim-break",
-              max_secs=3.0, debug=debug)
-        bk = BreakLookedAt(expect_pos=table_pos)
-        drive(bk, "break", max_secs=14.0, debug=debug)
-        print(f"[table] table reclaimed: {bk.broke}")
+        # 5. Break the table back (by POSITION — its id won't OCR). _reclaim_table
+        # re-aims onto it first (force straight-down for a pillar table, where
+        # LookAtVoxel can't confirm the steep angle and would time out, losing
+        # the table) then breaks it.
+        print(f"[table] table reclaimed: {_reclaim_table()}")
         return okc, msg
     finally:
         _stop()
