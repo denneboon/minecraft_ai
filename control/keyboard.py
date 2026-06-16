@@ -22,6 +22,44 @@ import platform
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
+# --- Caps Lock guard (Windows) ------------------------------------------------
+# Synthetic key presses go through the OS keyboard layer, so when CAPS LOCK is
+# ON the bot's typed text comes out UPPERCASE. Minecraft chat COMMANDS are
+# case-sensitive ("/tp" works, "/TP" is rejected), so a stray Caps Lock silently
+# breaks every command the bot sends (tp/fill/give/weather/spreadplayers…). The
+# only visible symptom is "nothing happened" — once stranding the player inside
+# blocks. We force Caps Lock OFF before typing literal text so case is correct.
+try:
+    import ctypes as _ctypes
+    _U32 = _ctypes.windll.user32 if platform.system() == "Windows" else None
+except Exception:
+    _U32 = None
+
+_VK_CAPITAL = 0x14
+_KEYEVENTF_KEYUP = 0x0002
+
+
+def _caps_lock_on() -> bool:
+    if _U32 is None:
+        return False
+    try:
+        return bool(_U32.GetKeyState(_VK_CAPITAL) & 0x0001)
+    except Exception:
+        return False
+
+
+def _caps_lock_off() -> bool:
+    """If Caps Lock is on, toggle it off. Returns True if it changed it."""
+    if _U32 is None or not _caps_lock_on():
+        return False
+    try:
+        _U32.keybd_event(_VK_CAPITAL, 0, 0, 0)               # press
+        _U32.keybd_event(_VK_CAPITAL, 0, _KEYEVENTF_KEYUP, 0)  # release
+        time.sleep(0.03)
+        return True
+    except Exception:
+        return False
+
 # --------------------------
 # Configuration
 # --------------------------
@@ -367,6 +405,11 @@ class Keyboard:
         """
         if self._gate and not self._gate.allow():
             return
+        # Force Caps Lock off first — otherwise letters inject as uppercase and
+        # case-sensitive MC chat commands ("/tp" -> "/TP") silently fail.
+        if _caps_lock_off():
+            print("[keyboard] Caps Lock was ON — turned it off so typed text "
+                  "isn't uppercased (MC commands are case-sensitive).")
         backend = getattr(self, "_backend", None)
         controller = getattr(backend, "_controller", None)
         if controller is None:

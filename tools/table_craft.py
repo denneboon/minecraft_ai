@@ -355,26 +355,37 @@ def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
                 mouse.move(-70, 0); time.sleep(0.1)   # undo the probe turn
             return not moved
 
-        def _open_table_below(tries=5):
-            """Open a table directly UNDER the feet, VERIFIED by camera freeze.
-            We can't trust an aim skill to confirm we're looking straight down
-            (F3 under-reads pitch at steep angles — reported 84° while really
-            ~90°), so we FORCE the look straight down with relative nudges,
-            right-click, and confirm the view FROZE (= a GUI opened). A
-            non-placeable slot is selected first so a stray right-click can only
-            OPEN the table, never place a block onto it."""
+        def _open_table(straight_down, tries=5):
+            """Open the just-placed table, VERIFIED by camera freeze, retrying.
+            A single unverified right-click (the old ground path) silently
+            misses on messy/forest ground — the craft then fails, the table is
+            lost, and the maker remakes ANOTHER table and loops (the live
+            'places, never opens, keeps crafting tables' bug). Here we AIM at the
+            table, right-click, and confirm the view FROZE (= a GUI opened);
+            on a miss we re-aim and retry.
+
+            ``straight_down`` (pillar): the table is under the feet, and F3
+            under-reads pitch at steep angles, so we can't trust an aim skill —
+            FORCE the look straight down with relative nudges. Otherwise (ground)
+            the table is in front: aim onto it with LookAtVoxel. A non-placeable
+            slot is selected first so a stray right-click can only OPEN the
+            table, never place a block onto it."""
             safe = hotbar.best_slot_for("pickaxe") if hotbar is not None else None
             if safe is not None:
                 kb.tap(str(int(safe))); time.sleep(0.2)
             for k in range(tries):
-                # Force straight-down: a few relative nudges past 90° clamp at
-                # straight-down regardless of what F3 reads. These land directly
-                # (no fresh-pose gating) so the camera actually moves. Only do
-                # this while still in GAMEPLAY — once a GUI is open these would
-                # move the GUI cursor (the 'cursor shot straight down' bug).
-                for _ in range(8):
-                    mouse.move(0, 40); time.sleep(0.02)
-                time.sleep(0.15)
+                if straight_down:
+                    # Relative nudges past 90° clamp at straight-down regardless
+                    # of what F3 reads. Land directly (no fresh-pose gating).
+                    # Only while still in GAMEPLAY — once a GUI is open these
+                    # would move the GUI cursor (the 'cursor shot down' bug).
+                    for _ in range(8):
+                        mouse.move(0, 40); time.sleep(0.02)
+                    time.sleep(0.15)
+                else:
+                    # Table is in front: turn the crosshair onto it.
+                    drive(LookAtVoxel(table_pos, tol_deg=6.0), "aim-open",
+                          max_secs=3.0, debug=debug)
                 mouse.right_click()
                 time.sleep(0.6)
                 if _camera_frozen():
@@ -394,18 +405,19 @@ def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
                           f"(not open) — retrying")
             return False
 
-        if pillar_place:
-            if not _open_table_below():
+        # Trust a GUI that a place-click already opened ONLY if the view is in
+        # fact frozen now; otherwise open it ourselves (verified, retrying).
+        if not (gui_already_open and _camera_frozen()):
+            if not _open_table(straight_down=pillar_place):
                 # Couldn't open it — do NOT blind-click slots (that's how the
-                # cursor ends up off-window). Reclaim the table and fail clean.
-                print("[table] could not open the pillar-placed table — reclaiming")
+                # cursor ends up off-window) and do NOT leave the table behind
+                # for the maker to remake. Reclaim it and fail clean.
+                print("[table] could not open the placed table — reclaiming")
                 drive(LookAtVoxel(table_pos, tol_deg=4.0), "aim-break",
                       max_secs=3.0, debug=debug)
                 bk = BreakLookedAt(expect_pos=table_pos)
                 drive(bk, "break", max_secs=14.0, debug=debug)
-                return False, "couldn't open the pillar-placed table"
-        elif not gui_already_open:
-            mouse.right_click()
+                return False, "couldn't open the placed table"
         time.sleep(0.9)
 
         # 4. Craft the 3x3 recipe in the open table.
@@ -422,8 +434,17 @@ def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
         # can't turn onto the table, and the reclaim fails (live: lost table ->
         # the maker has to re-gather wood to remake it). Verify by camera
         # response and re-press Escape until the view turns again.
-        for _ in range(4):
+        for _ in range(3):
             if not _camera_frozen():
+                break                       # gameplay (camera responds) -> closed
+            # Still frozen. It could be the table GUI (Escape missed) OR — if a
+            # prior Escape over-shot — the PAUSE menu. Check before pressing
+            # Escape again, so we never TOGGLE pause on/off (the "keeps pausing"
+            # symptom); if pause is up, resume instead of Escaping it back open.
+            det = (menu_detector.detect(capture.get_frame())
+                   if menu_detector is not None else None)
+            if det is not None and det.menu == "pause":
+                M.ensure_playing(capture, menu_detector, kb); time.sleep(0.2)
                 break
             kb.tap("escape"); time.sleep(0.3)
 

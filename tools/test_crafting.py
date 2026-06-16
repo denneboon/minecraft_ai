@@ -93,6 +93,25 @@ def main() -> int:
     (ok if not okc and not any(c[0] in ("move_stack", "distribute_one") for c in ctl.calls)
      else bad)(f"no moves when uncraftable ({msg})")
 
+    # Identity guard: a mis-filled grid yields the WRONG item in the result
+    # slot (the live bug: 3 cobble land in a row, sticks don't place -> MC
+    # offers cobblestone SLABS). The Crafter must NOT take it and claim success.
+    print("\n[6] wrong output in result slot -> abort, don't take")
+    ctl = _Ctl(_snap({"inv_0": ("minecraft:oak_log", 5),
+                      "craft_result": ("minecraft:cobblestone_slab", 6)}))
+    okc, msg = Crafter(ctl, a, cat).craft("minecraft:oak_planks")
+    (ok if not okc and "cobblestone_slab" in msg else bad)(
+        f"refuses to take a wrong result item ({msg})")
+    (ok if not any(c[0] == "take_result" for c in ctl.calls) else bad)(
+        "never calls take_result on a wrong output")
+    # ...but a correct (or unreadable) result is still taken.
+    print("\n[7] correct result -> taken")
+    ctl = _Ctl(_snap({"inv_0": ("minecraft:oak_log", 5),
+                      "craft_result": ("minecraft:oak_planks", 4)}))
+    okc, msg = Crafter(ctl, a, cat).craft("minecraft:oak_planks")
+    (ok if okc and any(c[0] == "take_result" for c in ctl.calls) else bad)(
+        f"takes a correctly-identified result ({msg})")
+
     print("\n" + ("ALL CRAFTING TESTS PASSED" if not _fails
                   else f"{_fails} CHECK(S) FAILED"))
     return 0 if not _fails else 1

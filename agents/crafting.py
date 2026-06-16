@@ -149,6 +149,22 @@ class Crafter:
             return False, (f"{step.result_id.split(':')[-1]}: nothing produced "
                            f"(grid under-filled)")
 
+        # IDENTITY guard: if the result is RECOGNISED as a DIFFERENT item than we
+        # intended, do NOT take it and mislabel it a success. The classic case:
+        # 3 cobblestone land in a row but the sticks don't place, so MC offers
+        # cobblestone SLABS — the bot would otherwise take slabs and report
+        # "crafted stone_pickaxe". A fresh tool often OCRs to garble (item None),
+        # so we only abort on a CONFIDENT wrong id, never on an unreadable one
+        # (keeps the happy path + offline mocks working).
+        res_item = getattr(result_slot, "item", None) if result_slot is not None else None
+        if res_item:
+            want = step.result_id.split(":")[-1]
+            got = str(res_item).split(":")[-1]
+            if got != want:
+                self._clear_grid(width)
+                return False, (f"{want}: result slot holds {got}, not {want} — "
+                               f"grid mis-filled, not taking it")
+
         self.ctl.take_result()
         self._clear_grid(width)
         return True, f"crafted {step.result_id.split(':')[-1]} x{step.result_count}"
