@@ -343,8 +343,14 @@ def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
             p0 = _pose_now(); y0 = getattr(p0, "yaw", None)
             mouse.move(70, 0); time.sleep(0.28)
             p1 = _pose_now(); y1 = getattr(p1, "yaw", None)
-            moved = (y0 is not None and y1 is not None
-                     and abs(norm_angle(float(y1) - float(y0))) > 1.5)
+            if y0 is None or y1 is None:
+                # Couldn't read the pose at all — INCONCLUSIVE. Don't claim the
+                # GUI opened (a false 'frozen' would march the bot on to craft a
+                # table that isn't open); treat as 'not frozen' so the open
+                # retries rather than proceeding on a bad assumption.
+                mouse.move(-70, 0); time.sleep(0.1)
+                return False
+            moved = abs(norm_angle(float(y1) - float(y0))) > 1.5
             if moved:
                 mouse.move(-70, 0); time.sleep(0.1)   # undo the probe turn
             return not moved
@@ -410,6 +416,16 @@ def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
         okc, msg = Crafter(tctl, a, cat).craft(target)
         print(f"[table] craft: {'OK' if okc else 'FAIL'}: {msg}")
         tctl.close(); time.sleep(0.5)
+        # Make sure the GUI REALLY closed before trying to break the table. A
+        # single Escape can miss, and the menu detector can't see a crafting
+        # GUI — so a still-open table leaves the camera frozen, the aim-break
+        # can't turn onto the table, and the reclaim fails (live: lost table ->
+        # the maker has to re-gather wood to remake it). Verify by camera
+        # response and re-press Escape until the view turns again.
+        for _ in range(4):
+            if not _camera_frozen():
+                break
+            kb.tap("escape"); time.sleep(0.3)
 
         # 5. Break the table back (by POSITION — its id won't OCR). Re-aim at
         # it FIRST: closing the table GUI leaves the camera wherever it was

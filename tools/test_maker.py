@@ -173,6 +173,24 @@ def main() -> int:
     (ok if "stuck" in msg or "round" in msg.lower() else bad)(
         f"reports a bounded give-up ({msg})")
 
+    # 7. make.py goal parsing: multi-target + the stone_tools alias (pickaxe
+    #    FIRST), with the old name+count form still working.
+    print("\n[7] make.py goal parsing (multi-target + stone_tools)")
+    from tools.make import _parse_goals
+    def _names(pos): return [(t.split(":")[-1], c) for t, c in _parse_goals(pos)]
+    (ok if _names([]) == [("wooden_pickaxe", 1)] else bad)(
+        "empty -> default wooden_pickaxe")
+    (ok if _names(["oak_planks", "16"]) == [("oak_planks", 16)] else bad)(
+        "name + count still parses")
+    (ok if _names(["stone_tools"]) == [("stone_pickaxe", 1), ("stone_sword", 1),
+                                       ("stone_axe", 1), ("stone_shovel", 1)] else bad)(
+        "stone_tools -> pickaxe FIRST, then sword/axe/shovel")
+    (ok if _names(["stone_pickaxe", "stone_sword"]) ==
+        [("stone_pickaxe", 1), ("stone_sword", 1)] else bad)(
+        "explicit multi-target kept in order")
+    (ok if all(t.startswith("minecraft:") for t, _ in _parse_goals(["stone_tools"]))
+        else bad)("expanded ids are namespaced")
+
     print("\n" + ("ALL MAKER TESTS PASSED" if not _fails
                   else f"{_fails} CHECK(S) FAILED"))
     return 0 if not _fails else 1
