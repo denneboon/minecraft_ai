@@ -397,8 +397,21 @@ def main(argv=None) -> int:
         # the reclaimed table) and only re-gathers its shortfall. One tool
         # failing doesn't abort the rest — they're independent attempts.
         results = []
-        for tgt, cnt in goals:
+        for idx, (tgt, cnt) in enumerate(goals):
             short = tgt.split(':')[-1]
+            if idx > 0:
+                # Clean slate before the next item. A prior craft can leave an
+                # inventory/table GUI open or the camera mid-reclaim, which broke
+                # the FOLLOWING item (live: the 2nd kit item failed "camera won't
+                # respond" / grid under-fill). Stop inputs, force gameplay, and
+                # settle so each item starts from a known state.
+                try:
+                    _stop()
+                    if menu_detector is not None:
+                        M.ensure_playing(capture, menu_detector, kb)
+                    time.sleep(1.0)
+                except Exception:
+                    pass
             M.bot_running_banner(f"making {cnt}x {short}")
             ok, msg = maker.make(tgt, cnt)
             results.append((short, ok, msg))
