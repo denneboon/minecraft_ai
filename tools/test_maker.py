@@ -183,8 +183,12 @@ def main() -> int:
     (ok if _names(["oak_planks", "16"]) == [("oak_planks", 16)] else bad)(
         "name + count still parses")
     (ok if _names(["stone_tools"]) == [("stone_pickaxe", 1), ("stone_sword", 1),
-                                       ("stone_axe", 1), ("stone_shovel", 1)] else bad)(
-        "stone_tools -> pickaxe FIRST, then sword/axe/shovel")
+                                       ("stone_axe", 1), ("stone_shovel", 1),
+                                       ("stone_hoe", 1)] else bad)(
+        "stone_tools -> pickaxe FIRST, then sword/axe/shovel/hoe")
+    (ok if _names(["kit"])[0] == ("wooden_pickaxe", 1)
+        and ("furnace", 1) in _names(["kit"]) and ("oak_boat", 1) in _names(["kit"])
+        else bad)("kit -> wooden pickaxe first, includes furnace + boat")
     (ok if _names(["stone_pickaxe", "stone_sword"]) ==
         [("stone_pickaxe", 1), ("stone_sword", 1)] else bad)(
         "explicit multi-target kept in order")

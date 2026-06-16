@@ -346,10 +346,11 @@ hotbar:
     1: sword
     2: pickaxe
     3: axe
-    4: shovel
+    4: boat          # boats get their own quick-access slot (operator request)
     5: hoe
     6: blocks
     7: food
+    8: shovel
   extra_food: []          # extra item stems to treat as food (e.g. modded)
 safety:
   check_focus_interval: 0.075

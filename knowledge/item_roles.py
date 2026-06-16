@@ -31,7 +31,8 @@ from typing import Iterable, Optional, Set
 
 
 # Functional roles a hotbar slot can be assigned.
-ROLES = ("sword", "axe", "pickaxe", "shovel", "hoe", "food", "armor", "blocks")
+ROLES = ("sword", "axe", "pickaxe", "shovel", "hoe", "food", "armor", "blocks",
+         "boat")
 
 # Tool tag -> role (the item-tag names Mojang ships).
 _TOOL_TAG_ROLE = {
@@ -255,7 +256,12 @@ def item_role(item_id: Optional[str],
     if any(stem.endswith(s) for s in ("_helmet", "_chestplate", "_leggings", "_boots")):
         return "armor"
 
-    # 4. Placeable block (bridging / building material).
+    # 4. Boat / raft — a vehicle item (NOT a placeable block), kept on its own
+    # reserved hotbar slot for quick "place on water" access.
+    if stem.endswith(("_boat", "_raft")) or stem == "boat":
+        return "boat"
+
+    # 5. Placeable block (bridging / building material).
     if getattr(info, "is_block_item", False):
         return "blocks"
 

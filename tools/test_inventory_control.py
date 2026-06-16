@@ -151,13 +151,20 @@ def main() -> int:
         return s
     insp.resolve_unknowns(_low_snap())                # 1st read: hover to confirm
     n1 = len(hovers)
-    insp.resolve_unknowns(_low_snap())                # 2nd: trust cache, no hover
+    insp.resolve_unknowns(_low_snap())                # 2nd: recogniser agrees, no hover
     n2 = len(hovers) - n1
-    insp.resolve_unknowns(_low_snap("inv_5"))         # bounced to a new slot
+    # A DIFFERENT/unsure read at the cached slot must NOT be masked by the cache
+    # (the boat-on-cobble-slot bug). Here the same slot now reads as None.
+    none_snap = InventorySnapshot(container="player_inventory")
+    none_snap.frame_shape = (1080, 1920); none_snap.ui_scale = 2
+    none_snap.slots = {"inv_0": SlotContent(item=None, count=1, confidence=0.0,
+                                            score=1.0)}   # occupied, unrecognised
+    insp.resolve_unknowns(none_snap)
     n3 = len(hovers) - n1 - n2
     (ok if n1 == 1 else bad)(f"hovers once to identify a low-confidence slot ({n1})")
-    (ok if n2 == 0 else bad)(f"does NOT re-hover the same identified slot ({n2})")
-    (ok if n3 == 0 else bad)(f"trusts a confirmed item even at a new slot ({n3})")
+    (ok if n2 == 0 else bad)(f"does NOT re-hover when the recogniser AGREES ({n2})")
+    (ok if n3 == 1 else bad)(
+        f"re-identifies (no cache mask) when the slot reads None/changed ({n3})")
     # A CONFIDENT different item at the cached slot drops the memory + re-IDs.
     insp2 = InventoryInspector(None, _Cap(), config=InspectorConfig())
     insp2.resolve_slot = _fake_resolve

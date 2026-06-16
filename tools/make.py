@@ -69,8 +69,15 @@ _DIG_DOWN_SOURCES = {"stone", "deepslate", "andesite", "diorite", "granite",
 # leftover materials between them). The stone toolset makes the PICKAXE first —
 # the priority tool — then sword, axe, shovel.
 _GOAL_ALIASES = {
-    "stone_tools":  ["stone_pickaxe", "stone_sword", "stone_axe", "stone_shovel"],
-    "wooden_tools": ["wooden_pickaxe", "wooden_sword", "wooden_axe", "wooden_shovel"],
+    "stone_tools":  ["stone_pickaxe", "stone_sword", "stone_axe", "stone_shovel",
+                     "stone_hoe"],
+    "wooden_tools": ["wooden_pickaxe", "wooden_sword", "wooden_axe", "wooden_shovel",
+                     "wooden_hoe"],
+    # The full demo: a wooden pickaxe (so we can mine stone), the whole stone
+    # toolset, then the utility items. Each is made in order, reusing leftovers.
+    "kit": ["wooden_pickaxe",
+            "stone_pickaxe", "stone_sword", "stone_axe", "stone_shovel", "stone_hoe",
+            "furnace", "chest", "oak_boat"],
 }
 
 
@@ -399,6 +406,17 @@ def main(argv=None) -> int:
         n_ok = sum(1 for _, ok, _ in results if ok)
         all_ok = n_ok == len(results)
         summary = ", ".join(f"{s}={'OK' if ok else 'FAIL'}" for s, ok, _ in results)
+        # Tidy the hotbar after making, so crafted items land on their reserved
+        # slots (e.g. a boat -> slot 4). Best-effort; never fails the run.
+        if n_ok:
+            try:
+                arr2 = arrange_hotbar(ctl, slot_roles=roles or None, catalog=cat,
+                                      log=print)
+                if arr2:
+                    print("[make] hotbar tidied: " + ", ".join(
+                        f"{s}={i.split(':')[-1]}" for s, i in sorted(arr2.items())))
+            except Exception as e:
+                print(f"[make] post-make hotbar arrange skipped: {e}")
         if len(results) == 1:
             result = ("SUCCESS" if all_ok else "FAILED", results[0][2])
         else:

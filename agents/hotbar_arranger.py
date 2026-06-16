@@ -27,8 +27,8 @@ from agents.crafting import find_item_slot
 # bot uses (slot 1-9 -> role). Match this to hotbar.slot_roles in settings so
 # the tool-selection behaviours look in the same slots we fill.
 DEFAULT_ARRANGE: Dict[int, str] = {
-    1: "sword", 2: "pickaxe", 3: "axe", 4: "shovel", 5: "hoe",
-    6: "blocks", 7: "food",
+    1: "sword", 2: "pickaxe", 3: "axe", 4: "boat", 5: "hoe",
+    6: "blocks", 7: "food", 8: "shovel",
 }
 
 
