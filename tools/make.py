@@ -4,10 +4,19 @@ make X from scratch — the autonomous goal that ties everything together.
 
     python tools/make.py wooden_pickaxe
     python tools/make.py oak_planks 16
+    python tools/make.py stone_pickaxe stone_sword        # several, in order
+    python tools/make.py stone_tools                      # the whole stone set
 
 Works out the plan (gather raw + craft chain), GATHERS logs it's short on,
 CRAFTS the 2x2 intermediates (planks/sticks/table), and TABLE-CRAFTS the final
 3x3 recipe — count-aware (only the shortfall). Needs MC running + focused.
+
+Multiple targets are made in sequence, each RE-READING the inventory first, so
+leftover materials carry over (e.g. after the stone pickaxe the bot still has
+sticks + the reclaimed table, so the sword/axe/shovel only re-dig the
+cobblestone they're short on). ``stone_tools`` expands to the full set with the
+PICKAXE first (the priority tool), then sword, axe, shovel.
+
 Panic: Ctrl+Shift+F12.
 """
 from __future__ import annotations
@@ -56,6 +65,32 @@ from tools.table_craft import run_table_craft
 _DIG_DOWN_SOURCES = {"stone", "deepslate", "andesite", "diorite", "granite",
                      "tuff"}
 
+# Convenience goals that expand to a SEQUENCE of targets, made in order (reusing
+# leftover materials between them). The stone toolset makes the PICKAXE first —
+# the priority tool — then sword, axe, shovel.
+_GOAL_ALIASES = {
+    "stone_tools":  ["stone_pickaxe", "stone_sword", "stone_axe", "stone_shovel"],
+    "wooden_tools": ["wooden_pickaxe", "wooden_sword", "wooden_axe", "wooden_shovel"],
+}
+
+
+def _parse_goals(pos):
+    """Ordered list of (target_id, count) from the positional args.
+
+      make oak_planks 16              -> [(oak_planks, 16)]
+      make stone_pickaxe stone_sword  -> [(stone_pickaxe, 1), (stone_sword, 1)]
+      make stone_tools                -> the stone toolset (pickaxe first)
+    A bare number sets the count of the target just before it."""
+    goals = []
+    for tok in pos:
+        if tok.isdigit():
+            if goals:
+                goals[-1] = (goals[-1][0], int(tok))
+            continue
+        for name in _GOAL_ALIASES.get(tok, [tok]):
+            goals.append((name if ":" in name else "minecraft:" + name, 1))
+    return goals or [("minecraft:wooden_pickaxe", 1)]
+
 
 def _gprog(fsm):
     """How many target blocks a gather FSM has secured — works for both the
@@ -71,10 +106,7 @@ def _gstate(fsm):
 def main(argv=None) -> int:
     argv = argv if argv is not None else sys.argv[1:]
     pos = [x for x in argv if not x.startswith("-")]
-    target = (pos[0] if pos else "wooden_pickaxe")
-    if ":" not in target:
-        target = "minecraft:" + target
-    count = int(pos[1]) if len(pos) > 1 and pos[1].isdigit() else 1
+    goals = _parse_goals(pos)
     debug = "--debug" in argv
 
     wins = _find_minecraft_hwnd()
@@ -200,10 +232,17 @@ def main(argv=None) -> int:
                 # Stone is everywhere a few blocks DOWN — don't depend on an
                 # exposed face. Cut a safe descending staircase to it (never
                 # digs straight down / into lava — see agents.mining_descent).
+                # Dig ONE extra: the descent counts a block as cobblestone from
+                # an F3 stone-read, which can over-count by one at the dirt/stone
+                # boundary (a stale/garbled read) or miss a drop — leaving the
+                # craft a single cobble short, which (live) loses the just-placed
+                # table on the failed craft and snowballs into a wood re-gather.
+                # The spare carries over to the next tool, so it's not wasted.
+                dig_qty = qty + 1
                 print(f"[make] gather {short}: digging straight down to "
-                      f"{src_stem} with a {role}")
-                fsm = DescendToStone(count=qty, tool_role=role,
-                                     max_depth=max(8, qty + 6))
+                      f"{src_stem} with a {role} (target {qty}, +1 buffer)")
+                fsm = DescendToStone(count=dig_qty, tool_role=role,
+                                     max_depth=max(8, dig_qty + 6))
                 dug["v"] = True   # we'll be in a shaft -> craft via pillar-place
             else:
                 pred = (lambda b, s=source, st=src_stem:
@@ -346,10 +385,26 @@ def main(argv=None) -> int:
         except Exception as e:
             print(f"[make] armor equip skipped: {e}")
 
-        M.bot_running_banner(f"making {count}x {target.split(':')[-1]}")
-        ok, msg = maker.make(target, count)
-        result = ("SUCCESS" if ok else "FAILED", msg)
-        return 0 if ok else 1
+        # Make each goal in order. Each maker.make() re-reads the inventory, so
+        # a later tool reuses whatever the earlier ones left (sticks, planks,
+        # the reclaimed table) and only re-gathers its shortfall. One tool
+        # failing doesn't abort the rest — they're independent attempts.
+        results = []
+        for tgt, cnt in goals:
+            short = tgt.split(':')[-1]
+            M.bot_running_banner(f"making {cnt}x {short}")
+            ok, msg = maker.make(tgt, cnt)
+            results.append((short, ok, msg))
+            print(f"[make] {'DONE' if ok else 'FAILED'}: {short} — {msg}")
+        n_ok = sum(1 for _, ok, _ in results if ok)
+        all_ok = n_ok == len(results)
+        summary = ", ".join(f"{s}={'OK' if ok else 'FAIL'}" for s, ok, _ in results)
+        if len(results) == 1:
+            result = ("SUCCESS" if all_ok else "FAILED", results[0][2])
+        else:
+            result = ("SUCCESS" if all_ok else "FAILED",
+                      f"{n_ok}/{len(results)} made [{summary}]")
+        return 0 if all_ok else 1
     finally:
         _stop()
         M.bot_stopped_banner(*result)
