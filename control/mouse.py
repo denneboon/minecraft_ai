@@ -583,6 +583,19 @@ class Mouse:
                   f"likely misread (GUI not open?); refusing to click off-app.")
         return cx, cy
 
+    def _cursor_off_window(self) -> bool:
+        """True if a play area is set and the OS cursor is OUTSIDE it right now.
+        A button-press is refused in that case so the bot can never click the
+        desktop/taskbar — e.g. when a relative camera nudge moved the UNLOCKED
+        GUI cursor off-window. During gameplay MC grabs the cursor and keeps it
+        at the window centre, so this never blocks a real in-game click."""
+        pa = self._play_area
+        if pa is None:
+            return False
+        x, y = _get_screen_xy_raw()
+        l, t, r, b = pa
+        return not (l <= x <= r and t <= y <= b)
+
     # ── Continuous-velocity motion API ─────────────────────────────
 
     def set_velocity(self, vx_per_sec: float, vy_per_sec: float) -> None:
@@ -757,6 +770,10 @@ class Mouse:
     def left_press(self) -> None:
         if self._gate and not self._gate.allow():
             return
+        if self._cursor_off_window():
+            print("[mouse][WARN] refusing LEFT click — cursor is OUTSIDE the MC "
+                  "window (would click the desktop/taskbar).")
+            return
         if not self._pressed["left"]:
             self._backend.press_left()
             self._pressed["left"] = True
@@ -773,6 +790,10 @@ class Mouse:
 
     def right_press(self) -> None:
         if self._gate and not self._gate.allow():
+            return
+        if self._cursor_off_window():
+            print("[mouse][WARN] refusing RIGHT click — cursor is OUTSIDE the MC "
+                  "window (would click the desktop/taskbar).")
             return
         if not self._pressed["right"]:
             self._backend.press_right()

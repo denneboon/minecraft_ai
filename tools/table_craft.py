@@ -298,27 +298,17 @@ def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
         if not _ensure_camera_live():
             return False, "camera won't respond (a menu may be stuck open)"
 
-        # 2. Place the table.
-        if pillar_place:
-            # Pillar-place it UNDER the feet (jump + place) — works in a tight
-            # 1-wide shaft. The bot ends up standing ON the table.
-            pu = PillarUp(height=1, slot=table_slot, place_pitch=85.0,
-                          per_block_budget=60)
-            st = drive(pu, "place-table", max_secs=22.0, debug=debug)
-            reading = (f3_worker.latest() if f3_worker is not None
-                       else f3.read(capture.get_frame()))
-            wf = wp.update(capture.get_frame(), reading)
-            pose = wf.pose
-            if st != SkillStatus.DONE or pose is None:
-                return False, "couldn't pillar-place the table"
-            table_pos = (int(math.floor(pose.x)), int(math.floor(pose.y)) - 1,
-                         int(math.floor(pose.z)))
-            gui_already_open = False
-            print(f"[table] pillar-placed table under feet at {table_pos}")
-        else:
+        # 2. Place the table. For a normal craft, try the GROUND placement
+        # first; if it can't find a clear spot (cluttered / uneven / edge
+        # ground — the live "couldn't place the table"), FALL BACK to the pillar
+        # place (table UNDER the feet — works anywhere there's air above), so a
+        # bad stance never strands the craft. ``pillar_place`` (shaft) goes
+        # straight to pillar.
+        used_pillar = bool(pillar_place)
+        gui_already_open = False
+        table_pos = None
+        if not pillar_place:
             # Place on the ground in front (scans look-views, self-verifies).
-            # Generous budget: on cratered post-chop ground the placer may step
-            # back several times to reach flat ground before it can place.
             pb = PlaceBlock(slot=table_slot)
             st = drive(pb, "place", max_secs=140.0, debug=debug)
             # Success is EITHER PlaceBlock's visual confirm OR a GUI opening
@@ -327,10 +317,29 @@ def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
             # often can't read it).
             gui_already_open = place_gui["open"]
             table_pos = pb.placed_at or place_gui["pos"]
-            if st != SkillStatus.DONE or table_pos is None:
-                return False, "couldn't place the table"
-            print(f"[table] table placed at {table_pos}"
-                  f"{' (already open via place-click)' if gui_already_open else ''}")
+            if st == SkillStatus.DONE and table_pos is not None:
+                print(f"[table] table placed at {table_pos}"
+                      f"{' (already open via place-click)' if gui_already_open else ''}")
+            else:
+                print("[table] ground placement failed — falling back to "
+                      "pillar-place (table under the feet)")
+                used_pillar = True
+        if used_pillar:
+            # Pillar-place it UNDER the feet (jump + place). The bot ends up
+            # standing ON the table; opened by looking straight down.
+            pu = PillarUp(height=1, slot=table_slot, place_pitch=85.0,
+                          per_block_budget=60)
+            st = drive(pu, "place-table", max_secs=22.0, debug=debug)
+            reading = (f3_worker.latest() if f3_worker is not None
+                       else f3.read(capture.get_frame()))
+            wf = wp.update(capture.get_frame(), reading)
+            pose = wf.pose
+            if st != SkillStatus.DONE or pose is None:
+                return False, "couldn't place the table (ground + pillar both failed)"
+            table_pos = (int(math.floor(pose.x)), int(math.floor(pose.y)) - 1,
+                         int(math.floor(pose.z)))
+            gui_already_open = False
+            print(f"[table] pillar-placed table under feet at {table_pos}")
 
         # 3. Open it — UNLESS a click during placement already opened it.
         def _probe_camera():
@@ -387,11 +396,26 @@ def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
             if safe is not None:
                 kb.tap(str(int(safe))); time.sleep(0.2)
             for k in range(tries):
+                # If a GUI is ALREADY open (a prior right-click opened the table
+                # but the freeze-check missed it last loop), STOP — do NOT run the
+                # relative straight-down nudges below: with the cursor unlocked
+                # they walk the OS cursor off the bottom of the window onto the
+                # TASKBAR, and the next right-click hits it (the live bug). A
+                # frozen view = a GUI is open = the table is open.
+                if _camera_frozen():
+                    det = (menu_detector.detect(capture.get_frame())
+                           if menu_detector is not None else None)
+                    if det is not None and det.menu == "pause":
+                        M.ensure_playing(capture, menu_detector, kb); time.sleep(0.2)
+                        continue
+                    if debug:
+                        print(f"[table] table already open (view frozen, try {k+1})")
+                    return True
                 if straight_down:
                     # Relative nudges past 90° clamp at straight-down regardless
                     # of what F3 reads. Land directly (no fresh-pose gating).
-                    # Only while still in GAMEPLAY — once a GUI is open these
-                    # would move the GUI cursor (the 'cursor shot down' bug).
+                    # Reached only in GAMEPLAY (the freeze-check above guards it),
+                    # so they move the CAMERA, not the unlocked GUI cursor.
                     for _ in range(8):
                         mouse.move(0, 40); time.sleep(0.02)
                     time.sleep(0.15)
@@ -425,10 +449,14 @@ def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
             aim-break TIMES OUT and the table is LOST, which then makes the
             maker re-gather wood to remake it. The forced nudges put the
             crosshair on the table directly. A ground table is aimed normally."""
-            if pillar_place:
-                for _ in range(8):
-                    mouse.move(0, 40); time.sleep(0.02)
-                time.sleep(0.2)
+            if used_pillar:
+                # Only nudge straight down in GAMEPLAY — if a GUI were somehow
+                # still open these relative moves would walk the unlocked cursor
+                # onto the taskbar. The freeze-check guards it.
+                if not _camera_frozen():
+                    for _ in range(8):
+                        mouse.move(0, 40); time.sleep(0.02)
+                    time.sleep(0.2)
             else:
                 drive(LookAtVoxel(table_pos, tol_deg=4.0), "aim-break",
                       max_secs=3.0, debug=debug)
@@ -439,7 +467,7 @@ def run_table_craft(target, *, capture, mouse, kb, f3, wp, menu_detector,
         # Trust a GUI that a place-click already opened ONLY if the view is in
         # fact frozen now; otherwise open it ourselves (verified, retrying).
         if not (gui_already_open and _camera_frozen()):
-            if not _open_table(straight_down=pillar_place):
+            if not _open_table(straight_down=used_pillar):
                 # Couldn't open it — do NOT blind-click slots (that's how the
                 # cursor ends up off-window) and do NOT leave the table behind
                 # for the maker to remake. Reclaim it and fail clean.
