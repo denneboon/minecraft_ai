@@ -253,6 +253,47 @@ def test_world_map() -> bool:
         return False
     _ok(f"eviction held to cap=100, ended at {wm2.block_count()} "
         f"after 150 inserts")
+
+    # mark_broken: a mined block becomes AIR and stops being a phantom target.
+    # Without it a chopped log lingers as a 'confirmed' log forever (decay is
+    # unused), so the chopper re-walks to a log that's already gone.
+    from vision.world.map import AIR_BLOCK
+    from agents.skills import find_nearest_block
+    wmb = WorldMap()
+    wmb.update_block(BlockObservation(
+        pos=(3, 64, 0), block_id="minecraft:oak_log",
+        confidence=1.0, source="looking_at", last_seen_tick=5))
+    if wmb.get_confirmed((3, 64, 0)) is None:
+        _fail("setup: log should be confirmed before breaking"); return False
+    wmb.mark_broken((3, 64, 0), tick=6)
+    gb = wmb.get_block((3, 64, 0))
+    if gb is None or gb.block_id != AIR_BLOCK:
+        _fail(f"mark_broken: cell should be AIR, got {gb and gb.block_id}"); return False
+    gc = wmb.get_confirmed((3, 64, 0))
+    if gc is None or gc.block_id != AIR_BLOCK:
+        _fail("mark_broken: confirmed cell should now read as AIR, not a solid"); return False
+    if any(tuple(o.pos) == (3, 64, 0) for o in wmb.iter_confirmed()):  # excludes air
+        _fail("mark_broken: iter_confirmed (solids) must not include the broken cell")
+        return False
+    if find_nearest_block(wmb, (0, 64, 0), lambda b: b == "minecraft:oak_log") is not None:
+        _fail("mark_broken: a broken log must NOT be a find target"); return False
+    _ok("mark_broken: a mined log becomes air and is no longer a chop target")
+
+    # Eviction respects AUTHORITY: a confirmed solid survives over guesses even
+    # when a guess has a HIGHER confidence number (old key sorted on confidence
+    # only, so it could evict ground truth and keep a guess).
+    wme = WorldMap(); wme._max_blocks_per_dim = 10
+    wme.update_block(BlockObservation(
+        pos=(999, 64, 0), block_id="minecraft:oak_log",
+        confidence=0.5, source="looking_at", last_seen_tick=1))      # confirmed, low conf
+    for i in range(40):
+        wme.update_block(BlockObservation(
+            pos=(i, 64, 0), block_id="minecraft:stone",
+            confidence=0.99, source="vision_patch", last_seen_tick=2))  # guesses, high conf
+    if wme.get_block((999, 64, 0)) is None:
+        _fail("eviction dropped a CONFIRMED solid while keeping higher-confidence guesses")
+        return False
+    _ok("eviction keeps a confirmed solid over higher-confidence guesses")
     return True
 
 

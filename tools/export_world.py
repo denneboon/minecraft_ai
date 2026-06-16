@@ -59,6 +59,10 @@ def _dict_to_world_map(data: dict):
         rows = data.get("blocks", [])
         for row in rows:
             x, y, z, idx = row
+            # Guard a truncated/corrupt palette: a raw IndexError here would
+            # abort the whole load with an ugly traceback — skip the bad cell.
+            if not (0 <= idx < len(palette)):
+                continue
             bid = palette[idx]
             wm.update_block(BlockObservation(
                 pos=(int(x), int(y), int(z)),

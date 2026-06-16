@@ -573,6 +573,16 @@ class MineBlock(Skill):
             if self._silent <= 3:        # ride out a brief F3 OCR gap, still frozen
                 return _hold("mining log (F3 gap)")
             self.broke = True            # the log we held on is gone -> counted
+            # The block is gone — tell the map so it stops being a phantom
+            # target (a mined log otherwise lingers as a 'confirmed' log and
+            # the chopper walks back to it; decay never removes it).
+            wm = getattr(ctx, "world_map", None)
+            if wm is not None and hasattr(wm, "mark_broken"):
+                try:
+                    wm.mark_broken(self.voxel, dimension=ctx.dimension,
+                                   tick=int(getattr(ctx, "tick", 0) or 0))
+                except Exception:
+                    pass
             return SkillResult(AgentAction(), SkillStatus.DONE, "mined log")
 
         # ── CLEARING occluding leaves: frozen, hold click; NOT counted.

@@ -246,14 +246,18 @@ class IsoWorldRenderer:
         # voxels with strictly larger x+y+z (further from the viewer
         # in our isometric setup). Sort by x+y+z ascending and draw
         # back-to-front so nearer cubes paint over further ones.
-        candidates: List[Tuple[int, int, int]] = []
+        # Keep the OBS from this single pass (not just the pos): re-fetching
+        # each via get_block below would double the lookups and, worse, race a
+        # concurrent map mutation (a block present here could read None there →
+        # flicker). iter_solid_blocks already snapshots the store.
+        candidates: List[Tuple[Tuple[int, int, int], object]] = []
         for obs in world_map.iter_solid_blocks(dimension=dimension):
             x, y, z = obs.pos
             if abs(x - cx) > r or abs(z - cz) > r:
                 continue
             if not (cy - cfg.layers_below <= y <= cy + cfg.layers_above):
                 continue
-            candidates.append(obs.pos)
+            candidates.append((obs.pos, obs))
         # Painter's algorithm: draw farther voxels first so nearer
         # ones overdraw them. The iso camera looks at the world from
         # the +X +Y +Z corner, so the depth axis (into-screen) is
@@ -266,10 +270,9 @@ class IsoWorldRenderer:
         # voxels on the back-left of the scene paint LAST,
         # producing visible occlusion artefacts (small far voxels
         # drawn on top of large near voxels in the iso snapshot).
-        candidates.sort(key=lambda p: (p[0] + p[1] + p[2]))
+        candidates.sort(key=lambda pc: (pc[0][0] + pc[0][1] + pc[0][2]))
 
-        for pos in candidates:
-            obs = world_map.get_block(pos, dimension=dimension)
+        for pos, obs in candidates:
             if obs is None or not obs.block_id:
                 continue
             base = _color_for_block(obs.block_id)
@@ -388,8 +391,11 @@ class IsoWorldRenderer:
         # cv2's Hershey fonts don't have a glyph for the em-dash, so
         # we use an ASCII hyphen here to avoid the renderer's `???`
         # fallback in the output PNG.
-        cv2.putText(img, "World Map - isometric (3D, F3-only)", (10, 22),
-                    font, 0.58, white, 1, cv2.LINE_AA)
+        # NB: this view draws the BELIEF map (iter_solid_blocks — incl. CNN
+        # guesses); F3-confirmed voxels get the gold outline. The header used to
+        # say "F3-only", which was misleading (guesses were shown as solid too).
+        cv2.putText(img, "World Map - iso (3D; belief, F3=gold outline)", (10, 22),
+                    font, 0.54, white, 1, cv2.LINE_AA)
         if pose is not None:
             pose_line = (f"X={pose.x:7.1f}  Y={pose.y:6.1f}  Z={pose.z:7.1f}"
                          f"   yaw={pose.yaw:6.1f}   pitch={pose.pitch:5.1f}"

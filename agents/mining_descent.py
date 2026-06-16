@@ -135,6 +135,19 @@ class DescendToStone(Skill):
                 if fall >= 0.6:
                     if self._mine_yield:
                         self.gathered += 1
+                    # We dropped into the mined block's space -> it's gone. Mark
+                    # it air so the map doesn't keep it as a phantom solid (the
+                    # dig clears MineBlock on the fall, so MineBlock's own
+                    # mark-broken never fires for the straight-down dig).
+                    wm = getattr(ctx, "world_map", None)
+                    if (wm is not None and self._mine_pos is not None
+                            and hasattr(wm, "mark_broken")):
+                        try:
+                            wm.mark_broken(self._mine_pos,
+                                           dimension=getattr(ctx, "dimension", None),
+                                           tick=int(getattr(ctx, "tick", 0) or 0))
+                        except Exception:
+                            pass
                     self._sub = None
                     if fall > _MAX_FALL:
                         return self._done("stopped: dropped into open space (cave)")

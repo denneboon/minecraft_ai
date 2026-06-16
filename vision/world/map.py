@@ -40,6 +40,7 @@ from vision.world.types import (
 # Source authority: higher number = more trusted. Used when deciding
 # whether a new observation should overwrite an existing one.
 _SOURCE_AUTHORITY: Dict[str, int] = {
+    "broken":          6,   # the bot itself broke this block -> it's now air
     "manual":          5,
     "looking_at":      4,
     "ray_clear_air":   3,   # carved as air along a confirmed F3 sightline
@@ -169,7 +170,7 @@ class WorldMap:
     # The belief map is ``get_block`` / ``iter_blocks`` above. The confirmed
     # map is the same store filtered to F3 "looking_at" observations — the
     # only source the multi-frame + ray + catalog gates guarantee is real.
-    _CONFIRMED_SOURCES = ("looking_at", "ray_clear_air")
+    _CONFIRMED_SOURCES = ("looking_at", "ray_clear_air", "broken")
 
     def get_confirmed(self,
                       pos: Tuple[int, int, int],
@@ -190,7 +191,10 @@ class WorldMap:
                        *, include_air: bool = False) -> Iterable[BlockObservation]:
         """Every CONFIRMED (looking_at) observation — the ground-truth map.
         Air (carved sightlines) is excluded unless ``include_air``."""
-        for o in self._store(dimension).blocks.values():
+        # Snapshot: perception (and the background CNN trainer) mutate the store
+        # on another path, so iterating .values() live can raise "dict changed
+        # size during iteration" in a viewer mid-render.
+        for o in list(self._store(dimension).blocks.values()):
             if getattr(o, "source", None) not in self._CONFIRMED_SOURCES:
                 continue
             if (not include_air) and o.block_id == AIR_BLOCK:
@@ -215,20 +219,20 @@ class WorldMap:
         # Iterating the whole store is fine while we're under
         # ~250 K entries; if that ever changes we'll add a chunk
         # index keyed by 16-block bins.
-        for pos, obs in store.blocks.items():
+        for pos, obs in list(store.blocks.items()):   # snapshot (concurrent mutation)
             if (abs(pos[0] - cx) <= radius
                     and abs(pos[1] - cy) <= radius
                     and abs(pos[2] - cz) <= radius):
                 yield obs
 
     def iter_blocks(self, dimension: Optional[str] = None) -> Iterable[BlockObservation]:
-        return iter(self._store(dimension).blocks.values())
+        return iter(list(self._store(dimension).blocks.values()))   # snapshot
 
     def iter_solid_blocks(self,
                           dimension: Optional[str] = None
                           ) -> Iterable[BlockObservation]:
         """Yield only observations of SOLID blocks (excludes air)."""
-        for o in self._store(dimension).blocks.values():
+        for o in list(self._store(dimension).blocks.values()):      # snapshot
             if o.block_id and o.block_id != AIR_BLOCK:
                 yield o
 
@@ -262,6 +266,28 @@ class WorldMap:
             )):
                 n_changed += 1
         return n_changed
+
+    def mark_broken(self,
+                    pos: Tuple[int, int, int],
+                    *,
+                    dimension: Optional[str] = None,
+                    tick: int = 0,
+                    confidence: float = 1.0) -> None:
+        """Record that the bot just BROKE the block at ``pos`` — it is now air.
+
+        Written at the highest authority (``broken``) so it OVERWRITES a stale
+        confirmed solid: otherwise a mined log/stone lingers in the map forever
+        (decay is unused), and the chopper keeps re-walking to a log that's
+        already gone (the live "sees a log, then looks elsewhere / can't chop"
+        symptom). A confirmed break is the strongest possible free-space signal,
+        so it outranks even a fresh F3 ``looking_at`` read."""
+        self.update_block(BlockObservation(
+            pos=tuple(pos), block_id=AIR_BLOCK,
+            confidence=confidence,
+            source="broken",
+            last_seen_tick=tick,
+            dimension=dimension or self._current_dim,
+        ))
 
     def forget_blocks_older_than(self,
                                  cutoff_tick: int,
@@ -320,9 +346,15 @@ class WorldMap:
         # target in one pass restores it; the O(n log n) sort dominates cost
         # either way, so the cap bought nothing.
         n_drop = max(1, len(store.blocks) - target)
+        # Evict by (authority, confidence, recency) ascending — lowest FIRST.
+        # Authority must lead the key: a CNN/extrapolation guess (or carved air
+        # at conf 0.95) must be dropped before an F3-confirmed solid, even when
+        # the guess has a higher confidence number. Sorting on confidence alone
+        # could evict hard-won ground truth and keep a guess.
         items = sorted(
             store.blocks.items(),
-            key=lambda kv: (kv[1].confidence, kv[1].last_seen_tick),
+            key=lambda kv: (_source_score(kv[1].source),
+                            kv[1].confidence, kv[1].last_seen_tick),
         )
         for k, _ in items[:n_drop]:
             del store.blocks[k]
