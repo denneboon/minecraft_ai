@@ -94,6 +94,7 @@ class DescendToStone(Skill):
         self._t = 0
         self._mine_pos = None      # the block we're mining (directly below)
         self._mine_yield = False   # has it read as stone while mining?
+        self._mine_nonstone = False  # has it read as a CONFIRMED non-stone dig block?
         self._pre_y = None         # pose.y before the mine started (fall detect)
 
     def _done(self, why: str) -> SkillResult:
@@ -103,6 +104,17 @@ class DescendToStone(Skill):
     def _below(self, pose) -> Voxel:
         return (int(math.floor(pose.x)), int(math.floor(pose.y)) - 1,
                 int(math.floor(pose.z)))
+
+    def _count_yield(self) -> bool:
+        """Whether the block we just broke counts as a cobblestone yield. True if
+        it READ as stone, OR it was UNREADABLE (F3 garble — common on bright/snowy
+        terrain) yet we're already past the surface dirt layer, where the world is
+        stone-family (all of which drop cobblestone / cobbled deepslate). Without
+        this fallback, an F3 misread of an actually-mined stone block leaves
+        ``gathered`` at 0 even though the drop was collected — and make.py then
+        reports a successful descent as "got 0". A CONFIRMED non-stone read
+        (dirt/sand/gravel/…) blocks the fallback so a dirt pocket isn't counted."""
+        return self._mine_yield or (not self._mine_nonstone and self._depth >= 3)
 
     def _reads_below(self, ctx, below):
         """The F3 block id IF the crosshair is on the block directly below."""
@@ -133,7 +145,7 @@ class DescendToStone(Skill):
             if self._sub is not None and self._pre_y is not None:
                 fall = self._pre_y - float(pose.y)
                 if fall >= 0.6:
-                    if self._mine_yield:
+                    if self._count_yield():
                         self.gathered += 1
                     # We dropped into the mined block's space -> it's gone. Mark
                     # it air so the map doesn't keep it as a phantom solid (the
@@ -160,7 +172,7 @@ class DescendToStone(Skill):
                 self._sub = MineBlock(below, tool_role=self.tool_role,
                                       is_target=is_safe_dig, is_passthrough=is_safe_dig)
                 self._mine_pos = below; self._pre_y = float(pose.y)
-                self._mine_yield = False; self._t = 0
+                self._mine_yield = False; self._mine_nonstone = False; self._t = 0
             # Read the floor as we mine it: lava -> stop; remember if it's stone.
             bid = self._reads_below(ctx, below)
             if is_hazard(bid):
@@ -168,10 +180,15 @@ class DescendToStone(Skill):
                 return self._done(f"stop: {_stem(bid)} below")
             if is_stone_like(bid):
                 self._mine_yield = True
+            elif bid is not None and is_safe_dig(bid):
+                # A CONFIRMED non-stone dig read (dirt/grass/sand/gravel/clay/…):
+                # it won't drop cobblestone, so block the unreadable-at-depth
+                # fallback from miscounting this block.
+                self._mine_nonstone = True
             r = self._sub.tick(ctx)
             self._t += 1
             if r.status == SkillStatus.DONE:        # broke without a detected fall
-                if self._mine_yield:
+                if self._count_yield():
                     self.gathered += 1
                 self._sub = None; self._phase = "settle"; self._t = 0
                 return SkillResult(r.action, SkillStatus.RUNNING,

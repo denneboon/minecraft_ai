@@ -225,7 +225,12 @@ class InventoryController:
         self._kb.tap("e"); time.sleep(0.35)
 
     def close(self) -> None:
-        self._kb.tap("escape"); time.sleep(0.25)
+        # Close with the INVENTORY key, not Escape. Escape with no screen open
+        # opens the Game Menu and PAUSES single-player (that's what made the bot
+        # "pause the game" mid-run). The inventory key closes the player
+        # inventory and open containers (incl. the crafting table); if nothing
+        # is open it merely toggles the inventory — it never opens the Game Menu.
+        self._kb.tap("e"); time.sleep(0.25)
 
     # ── carry-slot selection ─────────────────────────────────────────
     def carry_slot(self, snap) -> int:

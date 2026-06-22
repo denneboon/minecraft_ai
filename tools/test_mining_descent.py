@@ -81,6 +81,21 @@ def main() -> int:
     (ok if sk2.gathered == 1 else bad)(f"counted 1 cobblestone on the drop (got {sk2.gathered})")
     (ok if "dug down" in r2.info else bad)(f"reports digging down ({r2.info})")
 
+    # 5. yield-counting fallback: an UNREADABLE block (F3 garble) past the
+    #    surface dirt layer still counts as cobblestone; a CONFIRMED dirt read
+    #    does not; surface-depth unreadable does not.
+    print("\n[5] cobblestone yield-count fallback (F3-garble robustness)")
+    sk3 = DescendToStone(count=3)
+    sk3._depth = 4
+    sk3._mine_yield = False; sk3._mine_nonstone = False
+    (ok if sk3._count_yield() else bad)("unreadable block at depth>=3 counts as cobblestone")
+    sk3._mine_nonstone = True
+    (ok if not sk3._count_yield() else bad)("confirmed dirt/sand at depth does NOT count")
+    sk3._mine_yield = True; sk3._mine_nonstone = False
+    (ok if sk3._count_yield() else bad)("a confirmed stone read always counts")
+    sk3._depth = 1; sk3._mine_yield = False; sk3._mine_nonstone = False
+    (ok if not sk3._count_yield() else bad)("unreadable block at surface depth does NOT count")
+
     print("\n" + ("ALL DESCEND-TO-STONE TESTS PASSED" if not _fails
                   else f"{_fails} CHECK(S) FAILED"))
     return 0 if not _fails else 1
